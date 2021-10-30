@@ -126,6 +126,8 @@ android_library {
         "lottie",
         "LowLightDreamLib",
         "bcsmartspace-google",
+        "colorkt",
+        "themelib",
     ],
     manifest: "AndroidManifest.xml",
 
