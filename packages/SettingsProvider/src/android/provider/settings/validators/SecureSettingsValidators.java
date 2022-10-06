@@ -358,5 +358,6 @@ public class SecureSettingsValidators {
         VALIDATORS.put(Secure.MONET_ENGINE_CHROMA_FACTOR, ANY_FLOAT_VALIDATOR);
         VALIDATORS.put(Secure.MONET_ENGINE_LINEAR_LIGHTNESS, new InclusiveIntegerRangeValidator(0, 1));
         VALIDATORS.put(Secure.MONET_ENGINE_WHITE_LUMINANCE, new InclusiveIntegerRangeValidator(0, 1000));
+        VALIDATORS.put(Secure.EXTENDED_MONET_THEMES, ANY_INTEGER_VALIDATOR);
     }
 }

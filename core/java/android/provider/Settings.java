@@ -11091,6 +11091,11 @@ public final class Settings {
         public static final String MONET_ENGINE_WHITE_LUMINANCE = "monet_engine_white_luminance_user";
 
         /**
+         * @hide
+         */
+        public static final String EXTENDED_MONET_THEMES = "monet_themes_style";
+
+        /**
          * Keys we no longer back up under the current schema, but want to continue to
          * process when restoring historical backup datasets.
          *

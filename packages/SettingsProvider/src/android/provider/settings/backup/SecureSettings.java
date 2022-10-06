@@ -224,5 +224,6 @@ public class SecureSettings {
         Settings.Secure.MONET_ENGINE_CHROMA_FACTOR,
         Settings.Secure.MONET_ENGINE_LINEAR_LIGHTNESS,
         Settings.Secure.MONET_ENGINE_WHITE_LUMINANCE,
+        Settings.Secure.EXTENDED_MONET_THEMES,
     };
 }
