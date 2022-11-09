@@ -11105,6 +11105,11 @@ public final class Settings {
          */
         public static final String EXTRA_AUTOMATIC_POWER_SAVE_MODE =
                 "extra_automatic_power_save_mode";
+        /**
+         * Whether to show daily data usage in the QS footer.
+         * @hide
+         */
+        public static final String QS_SHOW_DATA_USAGE = "qs_show_data_usage";
 
         /**
          * These entries are considered common between the personal and the managed profile,
