@@ -65,22 +65,16 @@
     <!-- 70% white -->
     <color name="secondary_text_default_material_dark">#b3ffffff</color>
 
-    <item name="hint_alpha_material_dark" format="float" type="dimen">0.50</item>
-    <item name="hint_alpha_material_light" format="float" type="dimen">0.38</item>
-
-    <item name="hint_pressed_alpha_material_dark" format="float" type="dimen">0.70</item>
-    <item name="hint_pressed_alpha_material_light" format="float" type="dimen">0.54</item>
-
     <item name="disabled_alpha_material_light" format="float" type="dimen">0.26</item>
     <item name="disabled_alpha_material_dark" format="float" type="dimen">0.30</item>
     <item name="primary_content_alpha_material_dark" format="float" type="dimen">1</item>
     <item name="primary_content_alpha_material_light" format="float" type="dimen">0.87</item>
     <item name="secondary_content_alpha_material_dark" format="float" type="dimen">.7</item>
-    <item name="secondary_content_alpha_material_light" format="float" type="dimen">0.54</item>
+    <item name="secondary_content_alpha_material_light" format="float" type="dimen">0.60</item>
 
-    <item name="highlight_alpha_material_light" format="float" type="dimen">0.16</item>
-    <item name="highlight_alpha_material_dark" format="float" type="dimen">0.16</item>
-    <item name="highlight_alpha_material_colored" format="float" type="dimen">0.16</item>
+    <item name="highlight_alpha_material_light" format="float" type="dimen">0.10</item>
+    <item name="highlight_alpha_material_dark" format="float" type="dimen">0.10</item>
+    <item name="highlight_alpha_material_colored" format="float" type="dimen">0.10</item>
 
     <!-- Primary & accent colors -->
     <eat-comment />
@@ -97,7 +91,7 @@
     <color name="material_deep_teal_100">#ffb2dfdb</color>
     <color name="material_deep_teal_200">#ff80cbc4</color>
     <color name="material_deep_teal_300">#ff4db6ac</color>
-    <color name="material_deep_teal_500">#ff009688</color>
+    <color name="material_deep_teal_500">#ff008577</color>
 
     <color name="material_blue_grey_200">#ffb0bec5</color>
     <color name="material_blue_grey_700">#ff455a64</color>
@@ -144,5 +138,12 @@
 
     <color name="datepicker_default_view_animator_color_material_light">#fff2f2f2</color>
     <color name="datepicker_default_view_animator_color_material_dark">#ff303030</color>
+
+    <!-- Autofill colors -->
+    <color name="autofill_background_material_dark">@color/material_blue_grey_900</color>
+    <color name="autofill_background_material_light">@color/material_grey_50</color>
+
+    <!-- List divider opacity -->
+    <color name="list_divider_opacity_material">#1f000000</color>
 
 </resources>

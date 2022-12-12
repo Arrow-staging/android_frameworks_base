@@ -19,6 +19,7 @@ package android.telecom;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.TestApi;
 import android.bluetooth.BluetoothDevice;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -100,6 +101,7 @@ public final class CallAudioState implements Parcelable {
     }
 
     /** @hide */
+    @TestApi
     public CallAudioState(boolean isMuted, @CallAudioRoute int route,
             @CallAudioRoute int supportedRouteMask,
             @Nullable BluetoothDevice activeBluetoothDevice,
@@ -237,7 +239,7 @@ public final class CallAudioState implements Parcelable {
     /**
      * Responsible for creating AudioState objects for deserialized Parcels.
      */
-    public static final Parcelable.Creator<CallAudioState> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<CallAudioState> CREATOR =
             new Parcelable.Creator<CallAudioState> () {
 
         @Override
@@ -246,10 +248,10 @@ public final class CallAudioState implements Parcelable {
             int route = source.readInt();
             int supportedRouteMask = source.readInt();
             BluetoothDevice activeBluetoothDevice = source.readParcelable(
-                    ClassLoader.getSystemClassLoader());
+                    ClassLoader.getSystemClassLoader(), android.bluetooth.BluetoothDevice.class);
             List<BluetoothDevice> supportedBluetoothDevices = new ArrayList<>();
             source.readParcelableList(supportedBluetoothDevices,
-                    ClassLoader.getSystemClassLoader());
+                    ClassLoader.getSystemClassLoader(), android.bluetooth.BluetoothDevice.class);
             return new CallAudioState(isMuted, route,
                     supportedRouteMask, activeBluetoothDevice, supportedBluetoothDevices);
         }

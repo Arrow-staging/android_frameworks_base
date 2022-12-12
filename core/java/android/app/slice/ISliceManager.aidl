@@ -16,22 +16,24 @@
 
 package android.app.slice;
 
-import android.app.slice.ISliceListener;
 import android.app.slice.SliceSpec;
 import android.net.Uri;
 
 /** @hide */
 interface ISliceManager {
-    void addSliceListener(in Uri uri, String pkg, in ISliceListener listener,
-            in SliceSpec[] specs);
-    void removeSliceListener(in Uri uri, String pkg, in ISliceListener listener);
-    void pinSlice(String pkg, in Uri uri, in SliceSpec[] specs);
-    void unpinSlice(String pkg, in Uri uri);
+    void pinSlice(String pkg, in Uri uri, in SliceSpec[] specs, in IBinder token);
+    void unpinSlice(String pkg, in Uri uri, in IBinder token);
     boolean hasSliceAccess(String pkg);
     SliceSpec[] getPinnedSpecs(in Uri uri, String pkg);
-    int checkSlicePermission(in Uri uri, String pkg, int pid, int uid);
-    void grantPermissionFromUser(in Uri uri, String pkg, String callingPkg, boolean allSlices);
+    Uri[] getPinnedSlices(String pkg);
 
     byte[] getBackupPayload(int user);
     void applyRestore(in byte[] payload, int user);
+
+    // Perms.
+    void grantSlicePermission(String callingPkg, String toPkg, in Uri uri);
+    void revokeSlicePermission(String callingPkg, String toPkg, in Uri uri);
+    int checkSlicePermission(in Uri uri, String callingPkg, String pkg, int pid, int uid,
+            in String[] autoGrantPermissions);
+    void grantPermissionFromUser(in Uri uri, String pkg, String callingPkg, boolean allSlices);
 }

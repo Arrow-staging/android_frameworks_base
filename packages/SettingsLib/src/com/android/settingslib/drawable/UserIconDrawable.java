@@ -16,6 +16,12 @@
 
 package com.android.settingslib.drawable;
 
+import static android.app.admin.DevicePolicyResources.Drawables.Style.SOLID_COLORED;
+import static android.app.admin.DevicePolicyResources.Drawables.WORK_PROFILE_ICON;
+import static android.app.admin.DevicePolicyResources.Drawables.WORK_PROFILE_USER_ICON;
+
+import android.annotation.ColorInt;
+import android.annotation.DrawableRes;
 import android.annotation.NonNull;
 import android.app.admin.DevicePolicyManager;
 import android.content.Context;
@@ -36,8 +42,13 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
+import android.os.UserHandle;
 
-import com.android.settingslib.R;
+import androidx.annotation.RequiresApi;
+import androidx.annotation.VisibleForTesting;
+
+import com.android.settingslib.utils.BuildCompatUtils;
 
 /**
  * Converts the user avatar icon to a circularly clipped one with an optional badge and frame
@@ -69,15 +80,38 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
     private float mBadgeMargin;
 
     /**
-     * Gets the system default managed-user badge as a drawable
+     * Gets the system default managed-user badge as a drawable. This drawable is tint-able.
+     * For badging purpose, consider
+     * {@link android.content.pm.PackageManager#getUserBadgedDrawableForDensity(Drawable, UserHandle, Rect, int)}.
+     *
      * @param context
      * @return drawable containing just the badge
      */
-    public static Drawable getManagedUserBadgeDrawable(Context context) {
-        int displayDensity = context.getResources().getDisplayMetrics().densityDpi;
+    public static Drawable getManagedUserDrawable(Context context) {
+        if (BuildCompatUtils.isAtLeastT()) {
+            return getUpdatableManagedUserDrawable(context);
+        } else {
+            return getDrawableForDisplayDensity(
+                    context, com.android.internal.R.drawable.ic_corp_user_badge);
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private static Drawable getUpdatableManagedUserDrawable(Context context) {
+        DevicePolicyManager dpm = context.getSystemService(DevicePolicyManager.class);
+        return dpm.getResources().getDrawableForDensity(
+                WORK_PROFILE_USER_ICON,
+                SOLID_COLORED,
+                context.getResources().getDisplayMetrics().densityDpi,
+                /* default= */ () -> getDrawableForDisplayDensity(
+                        context, com.android.internal.R.drawable.ic_corp_user_badge));
+    }
+
+    private static Drawable getDrawableForDisplayDensity(
+            Context context, @DrawableRes int drawable) {
+        int density = context.getResources().getDisplayMetrics().densityDpi;
         return context.getResources().getDrawableForDensity(
-                com.android.internal.R.drawable.ic_corp_user_badge,
-                displayDensity, context.getTheme());
+                drawable, density, context.getTheme());
     }
 
     /**
@@ -85,8 +119,9 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
      * @param context
      * @return size in pixels
      */
-    public static int getSizeForList(Context context) {
-        return (int) context.getResources().getDimension(R.dimen.circle_avatar_size);
+    public static int getDefaultSize(Context context) {
+        return context.getResources()
+                .getDimensionPixelSize(com.android.internal.R.dimen.user_icon_size);
     }
 
     public UserIconDrawable() {
@@ -142,6 +177,10 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
         return this;
     }
 
+    public boolean isEmpty() {
+        return getUserIcon() == null && getUserDrawable() == null;
+    }
+
     public UserIconDrawable setBadge(Drawable badge) {
         mBadge = badge;
         if (mBadge != null) {
@@ -161,12 +200,50 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
 
     public UserIconDrawable setBadgeIfManagedUser(Context context, int userId) {
         Drawable badge = null;
-        boolean isManaged = context.getSystemService(DevicePolicyManager.class)
-                .getProfileOwnerAsUser(userId) != null;
-        if (isManaged) {
-            badge = getManagedUserBadgeDrawable(context);
+        if (userId != UserHandle.USER_NULL) {
+            DevicePolicyManager dpm = context.getSystemService(DevicePolicyManager.class);
+            boolean isCorp =
+                    dpm.getProfileOwnerAsUser(userId) != null // has an owner
+                    && dpm.getProfileOwnerOrDeviceOwnerSupervisionComponent(UserHandle.of(userId))
+                            == null; // and has no supervisor
+            if (isCorp) {
+                badge = getManagementBadge(context);
+            }
         }
         return setBadge(badge);
+    }
+
+    /**
+     * Sets the managed badge to this user icon if the device has a device owner.
+     */
+    public UserIconDrawable setBadgeIfManagedDevice(Context context) {
+        DevicePolicyManager dpm = context.getSystemService(DevicePolicyManager.class);
+        Drawable badge = null;
+        boolean deviceOwnerExists = dpm.getDeviceOwnerComponentOnAnyUser() != null;
+        if (deviceOwnerExists) {
+            badge = getManagementBadge(context);
+        }
+        return setBadge(badge);
+    }
+
+    private static Drawable getManagementBadge(Context context) {
+        if (BuildCompatUtils.isAtLeastT()) {
+            return getUpdatableManagementBadge(context);
+        } else {
+            return getDrawableForDisplayDensity(
+                    context, com.android.internal.R.drawable.ic_corp_user_badge);
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private static Drawable getUpdatableManagementBadge(Context context) {
+        DevicePolicyManager dpm = context.getSystemService(DevicePolicyManager.class);
+        return dpm.getResources().getDrawableForDensity(
+                WORK_PROFILE_ICON,
+                SOLID_COLORED,
+                context.getResources().getDisplayMetrics().densityDpi,
+                /* default= */ () -> getDrawableForDisplayDensity(
+                        context, com.android.internal.R.drawable.ic_corp_badge_case));
     }
 
     public void setBadgeRadius(float radius) {
@@ -240,15 +317,24 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
                 mPaint.setColorFilter(null);
             } else {
                 int color = mTintColor.getColorForState(getState(), mTintColor.getDefaultColor());
-                if (mPaint.getColorFilter() == null) {
+                if (shouldUpdateColorFilter(color, mTintMode)) {
                     mPaint.setColorFilter(new PorterDuffColorFilter(color, mTintMode));
-                } else {
-                    ((PorterDuffColorFilter) mPaint.getColorFilter()).setMode(mTintMode);
-                    ((PorterDuffColorFilter) mPaint.getColorFilter()).setColor(color);
                 }
             }
 
             canvas.drawBitmap(mBitmap, 0, 0, mPaint);
+        }
+    }
+
+    private boolean shouldUpdateColorFilter(@ColorInt int color, PorterDuff.Mode mode) {
+        ColorFilter colorFilter = mPaint.getColorFilter();
+        if (colorFilter instanceof PorterDuffColorFilter) {
+            PorterDuffColorFilter porterDuffColorFilter = (PorterDuffColorFilter) colorFilter;
+            int currentColor = porterDuffColorFilter.getColor();
+            PorterDuff.Mode currentMode = porterDuffColorFilter.getMode();
+            return currentColor != color || currentMode != mode;
+        } else {
+            return true;
         }
     }
 
@@ -322,7 +408,6 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
                     mIntrinsicRadius, mIconPaint);
             canvas.restoreToCount(saveId);
         }
-
         if (mFrameColor != null) {
             mFramePaint.setColor(mFrameColor.getColorForState(getState(), Color.TRANSPARENT));
         }
@@ -343,7 +428,6 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
             final float borderRadius = mBadge.getBounds().width() * 0.5f + mBadgeMargin;
             canvas.drawCircle(badgeLeft + mBadgeRadius, badgeTop + mBadgeRadius,
                     borderRadius, mClearPaint);
-
             mBadge.draw(canvas);
         }
     }
@@ -430,5 +514,25 @@ public class UserIconDrawable extends Drawable implements Drawable.Callback {
     @Override
     public void unscheduleDrawable(@NonNull Drawable who, @NonNull Runnable what) {
         unscheduleSelf(what);
+    }
+
+    @VisibleForTesting
+    public Drawable getUserDrawable() {
+        return mUserDrawable;
+    }
+
+    @VisibleForTesting
+    public Bitmap getUserIcon() {
+        return mUserIcon;
+    }
+
+    @VisibleForTesting
+    public boolean isInvalidated() {
+        return mInvalidated;
+    }
+
+    @VisibleForTesting
+    public Drawable getBadge() {
+        return mBadge;
     }
 }

@@ -19,13 +19,15 @@ package com.android.server.pm;
 import android.app.AlarmManager;
 import android.content.Context;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.os.SystemProperties;
 import android.os.storage.StorageManager;
-import android.support.test.InstrumentationRegistry;
 import android.util.Log;
 
+import androidx.test.InstrumentationRegistry;
+
 import org.junit.After;
-import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -34,6 +36,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -141,27 +144,19 @@ public final class BackgroundDexOptServiceIntegrationTests {
     // Run the command and return the stdout.
     private static String runShellCommand(String cmd) throws IOException {
         Log.i(TAG, String.format("running command: '%s'", cmd));
-        long startTime = System.nanoTime();
-        Process p = Runtime.getRuntime().exec(cmd);
-        int res;
-        try {
-            res = p.waitFor();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+        ParcelFileDescriptor pfd = InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                .executeShellCommand(cmd);
+        byte[] buf = new byte[512];
+        int bytesRead;
+        FileInputStream fis = new ParcelFileDescriptor.AutoCloseInputStream(pfd);
+        StringBuilder stdout = new StringBuilder();
+        while ((bytesRead = fis.read(buf)) != -1) {
+            stdout.append(new String(buf, 0, bytesRead));
         }
-        String stdout = inputStreamToString(p.getInputStream());
-        String stderr = inputStreamToString(p.getErrorStream());
-        long elapsedTime = System.nanoTime() - startTime;
-        Log.i(TAG, String.format("ran command: '%s' in %d ms with return code %d", cmd,
-                TimeUnit.NANOSECONDS.toMillis(elapsedTime), res));
+        fis.close();
         Log.i(TAG, "stdout");
-        Log.i(TAG, stdout);
-        Log.i(TAG, "stderr");
-        Log.i(TAG, stderr);
-        if (res != 0) {
-            throw new RuntimeException(String.format("failed command: '%s'", cmd));
-        }
-        return stdout;
+        Log.i(TAG, stdout.toString());
+        return stdout.toString();
     }
 
     // Run the command and return the stdout split by lines.
@@ -173,7 +168,7 @@ public final class BackgroundDexOptServiceIntegrationTests {
     private static String getCompilerFilter(String pkg) throws IOException {
         String cmd = String.format("dumpsys package %s", pkg);
         String[] lines = runShellCommandSplitLines(cmd);
-        final String substr = "compilation_filter=";
+        final String substr = "[status=";
         for (String line : lines) {
             int startIndex = line.indexOf(substr);
             if (startIndex < 0) {
@@ -207,9 +202,17 @@ public final class BackgroundDexOptServiceIntegrationTests {
         fillUpStorage((long) (getStorageLowBytes() * LOW_STORAGE_MULTIPLIER));
     }
 
-    // TODO(aeubanks): figure out how to get scheduled bg-dexopt to run
     private static void runBackgroundDexOpt() throws IOException {
-        runShellCommand("cmd package bg-dexopt-job " + PACKAGE_NAME);
+        runBackgroundDexOpt("Success");
+    }
+
+    // TODO(aeubanks): figure out how to get scheduled bg-dexopt to run
+    private static void runBackgroundDexOpt(String expectedStatus) throws IOException {
+        String result = runShellCommand("cmd package bg-dexopt-job " + PACKAGE_NAME);
+        if (!result.trim().equals(expectedStatus)) {
+            throw new IllegalStateException("Expected status: " + expectedStatus
+                + "; Received: " + result.trim());
+        }
     }
 
     // Set the time ahead of the last use time of the test app in days.
@@ -245,6 +248,16 @@ public final class BackgroundDexOptServiceIntegrationTests {
         runShellCommand(String.format("cmd package compile -f -m %s %s", filter, pkg));
     }
 
+    // Override the thermal status of the device
+    public static void overrideThermalStatus(int status) throws IOException {
+        runShellCommand("cmd thermalservice override-status " + status);
+    }
+
+    // Reset the thermal status of the device
+    public static void resetThermalStatus() throws IOException {
+        runShellCommand("cmd thermalservice reset");
+    }
+
     // Test that background dexopt under normal conditions succeeds.
     @Test
     public void testBackgroundDexOpt() throws IOException {
@@ -267,9 +280,9 @@ public final class BackgroundDexOptServiceIntegrationTests {
             // Set time to future.
             setTimeFutureDays(deltaDays);
 
-            // Set filter to quicken.
-            compilePackageWithFilter(PACKAGE_NAME, "quicken");
-            Assert.assertEquals("quicken", getCompilerFilter(PACKAGE_NAME));
+            // Set filter to verify.
+            compilePackageWithFilter(PACKAGE_NAME, "verify");
+            Assert.assertEquals("verify", getCompilerFilter(PACKAGE_NAME));
 
             // Fill up storage to trigger low storage threshold.
             fillUpToLowStorage();
@@ -293,9 +306,9 @@ public final class BackgroundDexOptServiceIntegrationTests {
             // Set time to future.
             setTimeFutureDays(deltaDays);
 
-            // Set filter to quicken.
-            compilePackageWithFilter(PACKAGE_NAME, "quicken");
-            Assert.assertEquals("quicken", getCompilerFilter(PACKAGE_NAME));
+            // Set filter to speed-profile.
+            compilePackageWithFilter(PACKAGE_NAME, "speed-profile");
+            Assert.assertEquals("speed-profile", getCompilerFilter(PACKAGE_NAME));
 
             // Fill up storage to trigger low storage threshold.
             fillUpToLowStorage();
@@ -310,4 +323,17 @@ public final class BackgroundDexOptServiceIntegrationTests {
         }
     }
 
+    // Test that background dexopt job doesn't trigger if the device is under thermal throttling.
+    @Test
+    public void testBackgroundDexOptThermalThrottling() throws IOException {
+        try {
+            compilePackageWithFilter(PACKAGE_NAME, "verify");
+            overrideThermalStatus(PowerManager.THERMAL_STATUS_MODERATE);
+            // The bgdexopt task should fail when onStartJob is run
+            runBackgroundDexOpt("Failure");
+            Assert.assertEquals("verify", getCompilerFilter(PACKAGE_NAME));
+        } finally {
+            resetThermalStatus();
+        }
+    }
 }

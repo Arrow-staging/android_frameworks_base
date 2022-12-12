@@ -41,7 +41,7 @@ public class ImportanceExtractor implements NotificationSignalExtractor {
             if (DBG) Slog.d(TAG, "missing config");
             return null;
         }
-        record.setUserImportance(record.getChannel().getImportance());
+        record.calculateImportance();
 
         return null;
     }
@@ -49,5 +49,10 @@ public class ImportanceExtractor implements NotificationSignalExtractor {
     @Override
     public void setConfig(RankingConfig config) {
         mConfig = config;
+    }
+
+    @Override
+    public void setZenHelper(ZenModeHelper helper) {
+
     }
 }

@@ -17,15 +17,13 @@
 #ifndef CACHEMANAGER_H
 #define CACHEMANAGER_H
 
-#include <GrContext.h>
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+#include <GrDirectContext.h>
+#endif
 #include <SkSurface.h>
-#include <ui/DisplayInfo.h>
 #include <utils/String8.h>
 #include <vector>
-
-#include "pipeline/skia/VectorDrawableAtlas.h"
-#include "thread/TaskManager.h"
-#include "thread/TaskProcessor.h"
+#include "utils/TimeUtils.h"
 
 namespace android {
 
@@ -44,44 +42,41 @@ class CacheManager {
 public:
     enum class TrimMemoryMode { Complete, UiHidden };
 
-    void configureContext(GrContextOptions* context);
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+    void configureContext(GrContextOptions* context, const void* identity, ssize_t size);
+#endif
     void trimMemory(TrimMemoryMode mode);
     void trimStaleResources();
     void dumpMemoryUsage(String8& log, const RenderState* renderState = nullptr);
-
-    sp<skiapipeline::VectorDrawableAtlas> acquireVectorDrawableAtlas();
+    void getMemoryUsage(size_t* cpuUsage, size_t* gpuUsage);
 
     size_t getCacheSize() const { return mMaxResourceBytes; }
     size_t getBackgroundCacheSize() const { return mBackgroundResourceBytes; }
+    void onFrameCompleted();
 
-    TaskManager* getTaskManager() { return &mTaskManager; }
+    void performDeferredCleanup(nsecs_t cleanupOlderThanMillis);
 
 private:
     friend class RenderThread;
 
-    CacheManager(const DisplayInfo& display);
+    explicit CacheManager();
 
-    void reset(sk_sp<GrContext> grContext);
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+    void reset(sk_sp<GrDirectContext> grContext);
+#endif
     void destroy();
-    void updateContextCacheSizes();
 
     const size_t mMaxSurfaceArea;
-    sk_sp<GrContext> mGrContext;
+#ifdef __ANDROID__ // Layoutlib does not support hardware acceleration
+    sk_sp<GrDirectContext> mGrContext;
+#endif
 
-    int mMaxResources = 0;
-    size_t mMaxResourceBytes = 0;
-    size_t mBackgroundResourceBytes = 0;
+    const size_t mMaxResourceBytes;
+    const size_t mBackgroundResourceBytes;
 
-    struct PipelineProps {
-        const void* pipelineKey = nullptr;
-        size_t surfaceArea = 0;
-    };
-
-    sp<skiapipeline::VectorDrawableAtlas> mVectorDrawableAtlas;
-
-    class SkiaTaskProcessor;
-    sp<SkiaTaskProcessor> mTaskProcessor;
-    TaskManager mTaskManager;
+    const size_t mMaxGpuFontAtlasBytes;
+    const size_t mMaxCpuFontCacheBytes;
+    const size_t mBackgroundCpuFontCacheBytes;
 };
 
 } /* namespace renderthread */

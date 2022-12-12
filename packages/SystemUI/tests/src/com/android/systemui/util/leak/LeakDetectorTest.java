@@ -17,18 +17,19 @@
 package com.android.systemui.util.leak;
 
 
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.dump.DumpManager;
 import com.android.systemui.util.leak.ReferenceTestUtils.CollectionWaiter;
 
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mockito;
 
-import java.io.FileDescriptor;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -51,6 +52,8 @@ public class LeakDetectorTest extends SysuiTestCase {
     private Object mObject;
     private Collection<?> mCollection;
 
+
+
     private CollectionWaiter trackObjectWith(Consumer<Object> tracker) {
         mObject = new Object();
         CollectionWaiter collectionWaiter = ReferenceTestUtils.createCollectionWaiter(mObject);
@@ -68,7 +71,9 @@ public class LeakDetectorTest extends SysuiTestCase {
 
     @Before
     public void setup() {
-        mLeakDetector = LeakDetector.create();
+        TrackedCollections collections = new TrackedCollections();
+        mLeakDetector = new LeakDetector(collections, new TrackedGarbage(collections),
+                new TrackedObjects(collections), Mockito.mock(DumpManager.class));
 
         // Note: Do not try to factor out object / collection waiter creation. The optimizer will
         // try and cache accesses to fields and thus create a GC root for the duration of the test
@@ -82,6 +87,7 @@ public class LeakDetectorTest extends SysuiTestCase {
         collectionWaiter.waitForCollection();
     }
 
+    @Ignore("b/75329085")
     @Test
     public void trackCollection_doesNotLeakTrackedObject() {
         CollectionWaiter collectionWaiter = trackCollectionWith(mLeakDetector::trackCollection);
@@ -107,12 +113,12 @@ public class LeakDetectorTest extends SysuiTestCase {
         mLeakDetector.trackGarbage(o2);
 
         FileOutputStream fos = new FileOutputStream("/dev/null");
-        mLeakDetector.dump(fos.getFD(), new PrintWriter(fos), new String[0]);
+        mLeakDetector.dump(new PrintWriter(fos), new String[0]);
     }
 
     @Test
     public void testDisabled() throws Exception {
-        mLeakDetector = new LeakDetector(null, null, null);
+        mLeakDetector = new LeakDetector(null, null, null, Mockito.mock(DumpManager.class));
 
         Object o1 = new Object();
         Object o2 = new Object();
@@ -123,6 +129,6 @@ public class LeakDetectorTest extends SysuiTestCase {
         mLeakDetector.trackGarbage(o2);
 
         FileOutputStream fos = new FileOutputStream("/dev/null");
-        mLeakDetector.dump(fos.getFD(), new PrintWriter(fos), new String[0]);
+        mLeakDetector.dump(new PrintWriter(fos), new String[0]);
     }
 }

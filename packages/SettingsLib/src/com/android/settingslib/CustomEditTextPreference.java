@@ -15,18 +15,28 @@
  */
 package com.android.settingslib;
 
+import static android.text.InputType.TYPE_CLASS_TEXT;
+import static android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.os.Bundle;
-import android.support.annotation.CallSuper;
-import android.support.v14.preference.EditTextPreferenceDialogFragment;
-import android.support.v7.preference.EditTextPreference;
 import android.util.AttributeSet;
 import android.view.View;
 import android.widget.EditText;
 
+import androidx.annotation.CallSuper;
+import androidx.preference.EditTextPreference;
+import androidx.preference.EditTextPreferenceDialogFragment;
+
+/**
+ * Framework version is deprecated, use the compat version instead.
+ *
+ * @deprecated
+ */
+@Deprecated
 public class CustomEditTextPreference extends EditTextPreference {
 
     private CustomPreferenceDialogFragment mFragment;
@@ -80,6 +90,7 @@ public class CustomEditTextPreference extends EditTextPreference {
     protected void onBindDialogView(View view) {
         final EditText editText = view.findViewById(android.R.id.edit);
         if (editText != null) {
+            editText.setInputType(TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_CAP_SENTENCES);
             editText.requestFocus();
         }
     }

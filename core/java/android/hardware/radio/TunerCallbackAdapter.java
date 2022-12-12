@@ -53,6 +53,12 @@ class TunerCallbackAdapter extends ITunerCallback.Stub {
         }
     }
 
+    void close() {
+        synchronized (mLock) {
+            if (mProgramList != null) mProgramList.close();
+        }
+    }
+
     void setProgramListObserver(@Nullable ProgramList programList,
             @NonNull ProgramList.OnCloseListener closeListener) {
         Objects.requireNonNull(closeListener);
@@ -205,14 +211,16 @@ class TunerCallbackAdapter extends ITunerCallback.Stub {
 
     @Override
     public void onProgramListUpdated(ProgramList.Chunk chunk) {
-        synchronized (mLock) {
-            if (mProgramList == null) return;
-            mProgramList.apply(Objects.requireNonNull(chunk));
-        }
+        mHandler.post(() -> {
+            synchronized (mLock) {
+                if (mProgramList == null) return;
+                mProgramList.apply(Objects.requireNonNull(chunk));
+            }
+        });
     }
 
     @Override
-    public void onParametersUpdated(Map parameters) {
+    public void onParametersUpdated(Map<String, String> parameters) {
         mHandler.post(() -> mCallback.onParametersUpdated(parameters));
     }
 }

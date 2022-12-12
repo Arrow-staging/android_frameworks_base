@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package android.content.res;
 
 import static android.content.res.FontResourcesParser.FamilyResourceEntry;
@@ -26,9 +27,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
 import android.app.Instrumentation;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.platform.test.annotations.Presubmit;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.frameworks.coretests.R;
 
@@ -43,6 +46,7 @@ import java.util.List;
 /**
  * Tests for {@link FontResourcesParser}.
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class FontResourcesParserTest {
@@ -103,6 +107,7 @@ public class FontResourcesParserTest {
         assertEquals("com.example.test.fontprovider.authority", providerEntry.getAuthority());
         assertEquals("com.example.test.fontprovider.package", providerEntry.getPackage());
         assertEquals("MyRequestedFont", providerEntry.getQuery());
+        assertEquals("my-request-font", providerEntry.getSystemFontFamilyName());
     }
 
     @Test

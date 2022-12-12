@@ -17,24 +17,26 @@
 package android.graphics.drawable;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.pm.ActivityInfo.Config;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
 import android.content.res.TypedArray;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.BitmapShader;
+import android.graphics.BlendMode;
+import android.graphics.BlendModeColorFilter;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
+import android.graphics.ImageDecoder;
 import android.graphics.Insets;
 import android.graphics.Matrix;
 import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
-import android.graphics.PorterDuff;
 import android.graphics.PorterDuff.Mode;
-import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Xfermode;
@@ -49,6 +51,7 @@ import com.android.internal.R;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -86,8 +89,9 @@ public class BitmapDrawable extends Drawable {
 
     private final Rect mDstRect = new Rect();   // #updateDstRectAndInsetsIfDirty() sets this
 
+    @UnsupportedAppUsage
     private BitmapState mBitmapState;
-    private PorterDuffColorFilter mTintFilter;
+    private BlendModeColorFilter mBlendModeFilter;
 
     private int mTargetDensity = DisplayMetrics.DENSITY_DEFAULT;
 
@@ -111,7 +115,7 @@ public class BitmapDrawable extends Drawable {
      */
     @Deprecated
     public BitmapDrawable() {
-        mBitmapState = new BitmapState((Bitmap) null);
+        init(new BitmapState((Bitmap) null), null);
     }
 
     /**
@@ -124,8 +128,7 @@ public class BitmapDrawable extends Drawable {
     @SuppressWarnings("unused")
     @Deprecated
     public BitmapDrawable(Resources res) {
-        mBitmapState = new BitmapState((Bitmap) null);
-        mBitmapState.mTargetDensity = mTargetDensity;
+        init(new BitmapState((Bitmap) null), res);
     }
 
     /**
@@ -135,7 +138,7 @@ public class BitmapDrawable extends Drawable {
      */
     @Deprecated
     public BitmapDrawable(Bitmap bitmap) {
-        this(new BitmapState(bitmap), null);
+        init(new BitmapState(bitmap), null);
     }
 
     /**
@@ -143,8 +146,7 @@ public class BitmapDrawable extends Drawable {
      * the display metrics of the resources.
      */
     public BitmapDrawable(Resources res, Bitmap bitmap) {
-        this(new BitmapState(bitmap), res);
-        mBitmapState.mTargetDensity = mTargetDensity;
+        init(new BitmapState(bitmap), res);
     }
 
     /**
@@ -154,10 +156,7 @@ public class BitmapDrawable extends Drawable {
      */
     @Deprecated
     public BitmapDrawable(String filepath) {
-        this(new BitmapState(BitmapFactory.decodeFile(filepath)), null);
-        if (mBitmapState.mBitmap == null) {
-            android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + filepath);
-        }
+        this(null, filepath);
     }
 
     /**
@@ -165,10 +164,21 @@ public class BitmapDrawable extends Drawable {
      */
     @SuppressWarnings({ "unused", "ChainingConstructorIgnoresParameter" })
     public BitmapDrawable(Resources res, String filepath) {
-        this(new BitmapState(BitmapFactory.decodeFile(filepath)), null);
-        mBitmapState.mTargetDensity = mTargetDensity;
-        if (mBitmapState.mBitmap == null) {
-            android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + filepath);
+        Bitmap bitmap = null;
+        try (FileInputStream stream = new FileInputStream(filepath)) {
+            bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(res, stream),
+                    (decoder, info, src) -> {
+                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            });
+        } catch (Exception e) {
+            /*  do nothing. This matches the behavior of BitmapFactory.decodeFile()
+                If the exception happened on decode, mBitmapState.mBitmap will be null.
+            */
+        } finally {
+            init(new BitmapState(bitmap), res);
+            if (mBitmapState.mBitmap == null) {
+                android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + filepath);
+            }
         }
     }
 
@@ -179,10 +189,7 @@ public class BitmapDrawable extends Drawable {
      */
     @Deprecated
     public BitmapDrawable(java.io.InputStream is) {
-        this(new BitmapState(BitmapFactory.decodeStream(is)), null);
-        if (mBitmapState.mBitmap == null) {
-            android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + is);
-        }
+        this(null, is);
     }
 
     /**
@@ -190,10 +197,21 @@ public class BitmapDrawable extends Drawable {
      */
     @SuppressWarnings({ "unused", "ChainingConstructorIgnoresParameter" })
     public BitmapDrawable(Resources res, java.io.InputStream is) {
-        this(new BitmapState(BitmapFactory.decodeStream(is)), null);
-        mBitmapState.mTargetDensity = mTargetDensity;
-        if (mBitmapState.mBitmap == null) {
-            android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + is);
+        Bitmap bitmap = null;
+        try {
+            bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(res, is),
+                    (decoder, info, src) -> {
+                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            });
+        } catch (Exception e) {
+            /*  do nothing. This matches the behavior of BitmapFactory.decodeStream()
+                If the exception happened on decode, mBitmapState.mBitmap will be null.
+            */
+        } finally {
+            init(new BitmapState(bitmap), res);
+            if (mBitmapState.mBitmap == null) {
+                android.util.Log.w("BitmapDrawable", "BitmapDrawable cannot decode " + is);
+            }
         }
     }
 
@@ -221,8 +239,10 @@ public class BitmapDrawable extends Drawable {
         }
     }
 
-    /** @hide */
-    public void setBitmap(Bitmap bitmap) {
+    /**
+     * Switch to a new Bitmap object.
+     */
+    public void setBitmap(@Nullable Bitmap bitmap) {
         if (mBitmapState.mBitmap != bitmap) {
             mBitmapState.mBitmap = bitmap;
             computeBitmapSize();
@@ -508,8 +528,8 @@ public class BitmapDrawable extends Drawable {
         }
 
         final boolean clearColorFilter;
-        if (mTintFilter != null && paint.getColorFilter() == null) {
-            paint.setColorFilter(mTintFilter);
+        if (mBlendModeFilter != null && paint.getColorFilter() == null) {
+            paint.setColorFilter(mBlendModeFilter);
             clearColorFilter = true;
         } else {
             clearColorFilter = false;
@@ -611,9 +631,6 @@ public class BitmapDrawable extends Drawable {
         mDstRectAndInsetsDirty = false;
     }
 
-    /**
-     * @hide
-     */
     @Override
     public Insets getOpticalInsets() {
         updateDstRectAndInsetsIfDirty();
@@ -662,33 +679,37 @@ public class BitmapDrawable extends Drawable {
         final BitmapState state = mBitmapState;
         if (state.mTint != tint) {
             state.mTint = tint;
-            mTintFilter = updateTintFilter(mTintFilter, tint, mBitmapState.mTintMode);
+            mBlendModeFilter = updateBlendModeFilter(mBlendModeFilter, tint,
+                      mBitmapState.mBlendMode);
             invalidateSelf();
         }
     }
 
     @Override
-    public void setTintMode(PorterDuff.Mode tintMode) {
+    public void setTintBlendMode(@NonNull BlendMode blendMode) {
         final BitmapState state = mBitmapState;
-        if (state.mTintMode != tintMode) {
-            state.mTintMode = tintMode;
-            mTintFilter = updateTintFilter(mTintFilter, mBitmapState.mTint, tintMode);
+        if (state.mBlendMode != blendMode) {
+            state.mBlendMode = blendMode;
+            mBlendModeFilter = updateBlendModeFilter(mBlendModeFilter, mBitmapState.mTint,
+                    blendMode);
             invalidateSelf();
         }
     }
 
     /**
-     * @hide only needed by a hack within ProgressBar
+     * No longer needed by ProgressBar, but still here due to UnsupportedAppUsage.
      */
-    public ColorStateList getTint() {
+    @UnsupportedAppUsage
+    private ColorStateList getTint() {
         return mBitmapState.mTint;
     }
 
     /**
-     * @hide only needed by a hack within ProgressBar
+     * No longer needed by ProgressBar, but still here due to UnsupportedAppUsage.
      */
-    public Mode getTintMode() {
-        return mBitmapState.mTintMode;
+    @UnsupportedAppUsage
+    private Mode getTintMode() {
+        return BlendMode.blendModeToPorterDuffMode(mBitmapState.mBlendMode);
     }
 
     /**
@@ -726,8 +747,9 @@ public class BitmapDrawable extends Drawable {
     @Override
     protected boolean onStateChange(int[] stateSet) {
         final BitmapState state = mBitmapState;
-        if (state.mTint != null && state.mTintMode != null) {
-            mTintFilter = updateTintFilter(mTintFilter, state.mTint, state.mTintMode);
+        if (state.mTint != null && state.mBlendMode != null) {
+            mBlendModeFilter = updateBlendModeFilter(mBlendModeFilter, state.mTint,
+                    state.mBlendMode);
             return true;
         }
         return false;
@@ -739,7 +761,6 @@ public class BitmapDrawable extends Drawable {
                 || super.isStateful();
     }
 
-    /** @hide */
     @Override
     public boolean hasFocusStateSpecified() {
         return mBitmapState.mTint != null && mBitmapState.mTint.hasFocusStateSpecified();
@@ -812,9 +833,19 @@ public class BitmapDrawable extends Drawable {
                 }
             }
 
+            int density = Bitmap.DENSITY_NONE;
+            if (value.density == TypedValue.DENSITY_DEFAULT) {
+                density = DisplayMetrics.DENSITY_DEFAULT;
+            } else if (value.density != TypedValue.DENSITY_NONE) {
+                density = value.density;
+            }
+
             Bitmap bitmap = null;
             try (InputStream is = r.openRawResource(srcResId, value)) {
-                bitmap = BitmapFactory.decodeResourceStream(r, value, is, null, null);
+                ImageDecoder.Source source = ImageDecoder.createSource(r, is, density);
+                bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> {
+                    decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                });
             } catch (Exception e) {
                 // Do nothing and pick up the error below.
             }
@@ -836,7 +867,7 @@ public class BitmapDrawable extends Drawable {
 
         final int tintMode = a.getInt(R.styleable.BitmapDrawable_tintMode, -1);
         if (tintMode != -1) {
-            state.mTintMode = Drawable.parseTintMode(tintMode, Mode.SRC_IN);
+            state.mBlendMode = Drawable.parseBlendMode(tintMode, BlendMode.SRC_IN);
         }
 
         final ColorStateList tint = a.getColorStateList(R.styleable.BitmapDrawable_tint);
@@ -951,7 +982,8 @@ public class BitmapDrawable extends Drawable {
         int[] mThemeAttrs = null;
         Bitmap mBitmap = null;
         ColorStateList mTint = null;
-        Mode mTintMode = DEFAULT_TINT_MODE;
+        BlendMode mBlendMode = DEFAULT_BLEND_MODE;
+
         int mGravity = Gravity.FILL;
         float mBaseAlpha = 1.0f;
         Shader.TileMode mTileModeX = null;
@@ -977,7 +1009,7 @@ public class BitmapDrawable extends Drawable {
         BitmapState(BitmapState bitmapState) {
             mBitmap = bitmapState.mBitmap;
             mTint = bitmapState.mTint;
-            mTintMode = bitmapState.mTintMode;
+            mBlendMode = bitmapState.mBlendMode;
             mThemeAttrs = bitmapState.mThemeAttrs;
             mChangingConfigurations = bitmapState.mChangingConfigurations;
             mGravity = bitmapState.mGravity;
@@ -1013,14 +1045,21 @@ public class BitmapDrawable extends Drawable {
         }
     }
 
+    private BitmapDrawable(BitmapState state, Resources res) {
+        init(state, res);
+    }
+
     /**
-     * The one constructor to rule them all. This is called by all public
+     * The one helper to rule them all. This is called by all public & private
      * constructors to set the state and initialize local properties.
      */
-    private BitmapDrawable(BitmapState state, Resources res) {
+    private void init(BitmapState state, Resources res) {
         mBitmapState = state;
-
         updateLocalState(res);
+
+        if (mBitmapState != null && res != null) {
+            mBitmapState.mTargetDensity = mTargetDensity;
+        }
     }
 
     /**
@@ -1030,7 +1069,8 @@ public class BitmapDrawable extends Drawable {
      */
     private void updateLocalState(Resources res) {
         mTargetDensity = resolveDensity(res, mBitmapState.mTargetDensity);
-        mTintFilter = updateTintFilter(mTintFilter, mBitmapState.mTint, mBitmapState.mTintMode);
+        mBlendModeFilter = updateBlendModeFilter(mBlendModeFilter, mBitmapState.mTint,
+                mBitmapState.mBlendMode);
         computeBitmapSize();
     }
 }

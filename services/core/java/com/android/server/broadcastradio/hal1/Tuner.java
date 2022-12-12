@@ -28,10 +28,8 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.util.Slog;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 class Tuner extends ITuner.Stub {
     private static final String TAG = "BroadcastRadioService.Tuner";
@@ -80,8 +78,6 @@ class Tuner extends ITuner.Stub {
             @NonNull RadioManager.BandConfig config);
     private native RadioManager.BandConfig nativeGetConfiguration(long nativeContext, int region);
 
-    private native void nativeSetMuted(long nativeContext, boolean mute);
-
     private native void nativeStep(long nativeContext, boolean directionDown, boolean skipSubChannel);
     private native void nativeScan(long nativeContext, boolean directionDown, boolean skipSubChannel);
     private native void nativeTune(long nativeContext, @NonNull ProgramSelector selector);
@@ -120,6 +116,12 @@ class Tuner extends ITuner.Stub {
         }
     }
 
+    private boolean checkConfiguredLocked() {
+        if (mTunerCallback.isInitialConfigurationDone()) return true;
+        Slog.w(TAG, "Initial configuration is still pending, skipping the operation");
+        return false;
+    }
+
     @Override
     public void setConfiguration(RadioManager.BandConfig config) {
         if (config == null) {
@@ -149,8 +151,7 @@ class Tuner extends ITuner.Stub {
             checkNotClosedLocked();
             if (mIsMuted == mute) return;
             mIsMuted = mute;
-
-            nativeSetMuted(mNativeContext, mute);
+            Slog.w(TAG, "Mute via RadioService is not implemented - please handle it via app");
         }
     }
 
@@ -170,6 +171,7 @@ class Tuner extends ITuner.Stub {
     public void step(boolean directionDown, boolean skipSubChannel) {
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeStep(mNativeContext, directionDown, skipSubChannel);
         }
     }
@@ -178,6 +180,7 @@ class Tuner extends ITuner.Stub {
     public void scan(boolean directionDown, boolean skipSubChannel) {
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeScan(mNativeContext, directionDown, skipSubChannel);
         }
     }
@@ -190,6 +193,7 @@ class Tuner extends ITuner.Stub {
         Slog.i(TAG, "Tuning to " + selector);
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeTune(mNativeContext, selector);
         }
     }
@@ -286,12 +290,12 @@ class Tuner extends ITuner.Stub {
     }
 
     @Override
-    public Map setParameters(Map parameters) {
+    public Map<String, String> setParameters(Map<String, String> parameters) {
         throw new UnsupportedOperationException("Not supported by HAL 1.x");
     }
 
     @Override
-    public Map getParameters(List<String> keys) {
+    public Map<String, String> getParameters(List<String> keys) {
         throw new UnsupportedOperationException("Not supported by HAL 1.x");
     }
 }

@@ -34,7 +34,6 @@ public class TestSystemImpl implements SystemInterface {
     List<Integer> mUsers = new ArrayList<>();
     // Package -> [user, package]
     Map<String, Map<Integer, PackageInfo>> mPackages = new HashMap();
-    private boolean mFallbackLogicEnabled;
     private final int mNumRelros;
     private final boolean mIsDebuggable;
     private int mMultiProcessSetting;
@@ -42,10 +41,9 @@ public class TestSystemImpl implements SystemInterface {
 
     public static final int PRIMARY_USER_ID = 0;
 
-    public TestSystemImpl(WebViewProviderInfo[] packageConfigs, boolean fallbackLogicEnabled,
-            int numRelros, boolean isDebuggable, boolean multiProcessDefault) {
+    public TestSystemImpl(WebViewProviderInfo[] packageConfigs, int numRelros, boolean isDebuggable,
+            boolean multiProcessDefault) {
         mPackageConfigs = packageConfigs;
-        mFallbackLogicEnabled = fallbackLogicEnabled;
         mNumRelros = numRelros;
         mIsDebuggable = isDebuggable;
         mUsers.add(PRIMARY_USER_ID);
@@ -78,29 +76,13 @@ public class TestSystemImpl implements SystemInterface {
     public void killPackageDependents(String packageName) {}
 
     @Override
-    public boolean isFallbackLogicEnabled() {
-        return mFallbackLogicEnabled;
-    }
-
-    @Override
-    public void enableFallbackLogic(boolean enable) {
-        mFallbackLogicEnabled = enable;
-    }
-
-    @Override
-    public void uninstallAndDisablePackageForAllUsers(Context context, String packageName) {
-        enablePackageForAllUsers(context, packageName, false);
-    }
-
-    @Override
     public void enablePackageForAllUsers(Context context, String packageName, boolean enable) {
         for(int userId : mUsers) {
             enablePackageForUser(packageName, enable, userId);
         }
     }
 
-    @Override
-    public void enablePackageForUser(String packageName, boolean enable, int userId) {
+    private void enablePackageForUser(String packageName, boolean enable, int userId) {
         Map<Integer, PackageInfo> userPackages = mPackages.get(packageName);
         if (userPackages == null) {
             throw new IllegalArgumentException("There is no package called " + packageName);
@@ -172,7 +154,7 @@ public class TestSystemImpl implements SystemInterface {
 
         pi = userPackages.get(PRIMARY_USER_ID);
         if (pi != null && pi.applicationInfo.isSystemApp()) {
-            return pi.applicationInfo.versionCode;
+            return pi.applicationInfo.longVersionCode;
         }
         throw new NameNotFoundException();
     }
@@ -189,6 +171,9 @@ public class TestSystemImpl implements SystemInterface {
 
     @Override
     public void notifyZygote(boolean enableMultiProcess) {}
+
+    @Override
+    public void ensureZygoteStarted() {}
 
     @Override
     public boolean isMultiProcessDefaultEnabled() {

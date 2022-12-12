@@ -13,15 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
 #ifndef PRIVACY_H
 #define PRIVACY_H
 
+#include <android/os/IncidentReportArgs.h>
+
 #include <stdint.h>
 
-// This is the default value of DEST enum, sync with privacy.proto
-const uint8_t DEST_UNSET = 255; // DEST_UNSET is not exposed to libincident
-const uint8_t DEST_DEFAULT_VALUE = DEST_UNSET;
+namespace android {
+namespace os {
+namespace incidentd {
+
+using namespace android::os;
 
 /*
  * In order to NOT auto-generate large chuck of code by proto compiler in incidentd,
@@ -43,10 +48,13 @@ struct Privacy {
     // This array is NULL-terminated.
     Privacy** children;
 
-    // DESTINATION Enum in frameworks/base/libs/incident/proto/android/privacy.proto.
-    uint8_t dest;
+    // DESTINATION Enum in frameworks/base/core/proto/android/privacy.proto.
+    uint8_t policy;
+
     // A list of regexp rules for stripping string fields in proto.
     const char** patterns;
+
+    string toString() const;
 };
 
 // Encode field id used by ProtoOutputStream.
@@ -58,26 +66,37 @@ const Privacy* lookup(const Privacy* p, uint32_t fieldId);
 /**
  * PrivacySpec defines the request has what level of privacy authorization.
  * For example, a device without user consent should only be able to upload AUTOMATIC fields.
- * DEST_UNSET are treated as DEST_EXPLICIT.
+ * PRIVACY_POLICY_UNSET are treated as PRIVACY_POLICY_EXPLICIT.
  */
 class PrivacySpec {
 public:
-    const uint8_t dest;
+    explicit PrivacySpec(uint8_t argPolicy);
 
-    PrivacySpec() : dest(DEST_DEFAULT_VALUE) {}
     bool operator<(const PrivacySpec& other) const;
 
     // check permission of a policy, if returns true, don't strip the data.
-    bool CheckPremission(const Privacy* privacy, const uint8_t defaultDest = DEST_DEFAULT_VALUE) const;
+    bool CheckPremission(const Privacy* privacy,
+                         const uint8_t defaultPrivacyPolicy = PRIVACY_POLICY_UNSET) const;
 
     // if returns true, no data need to be stripped.
     bool RequireAll() const;
 
-    // Constructs spec using static methods below.
-    static PrivacySpec new_spec(int dest);
-    static PrivacySpec get_default_dropbox_spec();
+    uint8_t getPolicy() const;
+
 private:
-    PrivacySpec(uint8_t dest) : dest(dest) {}
+    // unimplemented constructors
+    explicit PrivacySpec();
+
+    uint8_t mPolicy;
 };
 
-#endif // PRIVACY_H
+/**
+ * If a privacy policy is other than the defined values, update it to a real one.
+ */
+uint8_t cleanup_privacy_policy(uint8_t policy);
+
+}  // namespace incidentd
+}  // namespace os
+}  // namespace android
+
+#endif  // PRIVACY_H

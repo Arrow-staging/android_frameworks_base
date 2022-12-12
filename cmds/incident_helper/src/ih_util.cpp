@@ -97,10 +97,10 @@ bool getColumnIndices(std::vector<int>& indices, const char** headerNames, const
 
     size_t lastIndex = 0;
     int i = 0;
-    while (headerNames[i] != NULL) {
-        string s = headerNames[i];
+    while (headerNames[i] != nullptr) {
+        std::string s = headerNames[i];
         lastIndex = line.find(s, lastIndex);
-        if (lastIndex == string::npos) {
+        if (lastIndex == std::string::npos) {
             fprintf(stderr, "Bad Task Header: %s\n", line.c_str());
             return false;
         }
@@ -142,7 +142,7 @@ record_t parseRecordByColumns(const std::string& line, const std::vector<int>& i
     }
     if (lineSize - lastIndex > 0) {
         int beginning = lastIndex;
-        if (record.size() == indices.size()) {
+        if (record.size() == indices.size() && !record.empty()) {
             // We've already encountered all of the columns...put whatever is
             // left in the last column.
             record.pop_back();
@@ -237,33 +237,38 @@ double toDouble(const std::string& s) {
 Reader::Reader(const int fd)
 {
     mFile = fdopen(fd, "r");
-    mStatus = mFile == NULL ? "Invalid fd " + std::to_string(fd) : "";
+    mBuffer = new char[1024];
+    mStatus = mFile == nullptr ? "Invalid fd " + std::to_string(fd) : "";
 }
 
 Reader::~Reader()
 {
-    if (mFile != NULL) fclose(mFile);
+    if (mFile != nullptr) fclose(mFile);
+    delete[] mBuffer;
 }
 
 bool Reader::readLine(std::string* line) {
-    if (mFile == NULL) return false;
+    if (mFile == nullptr) return false;
 
-    char* buf = NULL;
     size_t len = 0;
-    ssize_t read = getline(&buf, &len, mFile);
+    ssize_t read = getline(&mBuffer, &len, mFile);
     if (read != -1) {
-        std::string s(buf);
+        std::string s(mBuffer);
         line->assign(trim(s, DEFAULT_NEWLINE));
-    } else if (errno == EINVAL) {
-        mStatus = "Bad Argument";
+        return true;
     }
-    free(buf);
-    return read != -1;
+    if (!feof(mFile)) {
+        mStatus = "Error reading file. Ferror: " + std::to_string(ferror(mFile));
+    }
+    return false;
 }
 
 bool Reader::ok(std::string* error) {
+    if (mStatus.empty()) {
+        return true;
+    }
     error->assign(mStatus);
-    return mStatus.empty();
+    return false;
 }
 
 // ==============================================================================
@@ -271,7 +276,7 @@ Table::Table(const char* names[], const uint64_t ids[], const int count)
         :mEnums(),
          mEnumValuesByName()
 {
-    map<std::string, uint64_t> fields;
+    std::map<std::string, uint64_t> fields;
     for (int i = 0; i < count; i++) {
         fields[names[i]] = ids[i];
     }
@@ -286,11 +291,11 @@ void
 Table::addEnumTypeMap(const char* field, const char* enumNames[], const int enumValues[], const int enumSize)
 {
     if (mFields.find(field) == mFields.end()) {
-        fprintf(stderr, "Field '%s' not found", string(field).c_str());
+        fprintf(stderr, "Field '%s' not found", field);
         return;
     }
 
-    map<std::string, int> enu;
+    std::map<std::string, int> enu;
     for (int i = 0; i < enumSize; i++) {
         enu[enumNames[i]] = enumValues[i];
     }
@@ -420,10 +425,10 @@ Message::insertField(ProtoOutputStream* proto, const std::string& name, const st
 
     // Try to find the message field which is the prefix of name, so the value would be inserted
     // recursively into the submessage.
-    string mutableName = name;
+    std::string mutableName = name;
     for (auto iter = mSubMessages.begin(); iter != mSubMessages.end(); iter++) {
-        string fieldName = iter->first;
-        string prefix = fieldName + "_"; // underscore is the delimiter in the name
+        std::string fieldName = iter->first;
+        std::string prefix = fieldName + "_"; // underscore is the delimiter in the name
         if (stripPrefix(&mutableName, prefix.c_str())) {
             if (mPreviousField != fieldName) {
                 endSession(proto);
@@ -437,10 +442,10 @@ Message::insertField(ProtoOutputStream* proto, const std::string& name, const st
 }
 
 void
-Message::startSession(ProtoOutputStream* proto, const string& name)
+Message::startSession(ProtoOutputStream* proto, const std::string& name)
 {
     uint64_t fieldId = mTable->mFields[name];
-    long long token = proto->start(fieldId);
+    uint64_t token = proto->start(fieldId);
     mPreviousField = name;
     mTokens.push(token);
 }

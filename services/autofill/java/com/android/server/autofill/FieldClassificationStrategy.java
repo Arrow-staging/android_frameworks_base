@@ -15,12 +15,11 @@
  */
 package com.android.server.autofill;
 
-import static android.view.autofill.AutofillManager.FC_SERVICE_TIMEOUT;
+import static android.service.autofill.AutofillFieldClassificationService.SERVICE_META_DATA_KEY_AVAILABLE_ALGORITHMS;
+import static android.service.autofill.AutofillFieldClassificationService.SERVICE_META_DATA_KEY_DEFAULT_ALGORITHM;
 
 import static com.android.server.autofill.Helper.sDebug;
 import static com.android.server.autofill.Helper.sVerbose;
-import static android.service.autofill.AutofillFieldClassificationService.SERVICE_META_DATA_KEY_AVAILABLE_ALGORITHMS;
-import static android.service.autofill.AutofillFieldClassificationService.SERVICE_META_DATA_KEY_DEFAULT_ALGORITHM;
 
 import android.Manifest;
 import android.annotation.MainThread;
@@ -42,6 +41,7 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import android.service.autofill.AutofillFieldClassificationService;
 import android.service.autofill.IAutofillFieldClassificationService;
+import android.util.ArrayMap;
 import android.util.Log;
 import android.util.Slog;
 import android.view.autofill.AutofillValue;
@@ -52,8 +52,6 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Strategy used to bridge the field classification algorithms provided by a service in an external
@@ -83,7 +81,7 @@ final class FieldClassificationStrategy {
     }
 
     @Nullable
-    private ServiceInfo getServiceInfo() {
+    ServiceInfo getServiceInfo() {
         final String packageName =
                 mContext.getPackageManager().getServicesSystemSharedLibraryPackageName();
         if (packageName == null) {
@@ -117,6 +115,23 @@ final class FieldClassificationStrategy {
 
         if (sVerbose) Slog.v(TAG, "getServiceComponentName(): " + name);
         return name;
+    }
+
+    void reset() {
+        synchronized (mLock) {
+            if (mServiceConnection != null) {
+                if (sDebug) Slog.d(TAG, "reset(): unbinding service.");
+                try {
+                    mContext.unbindService(mServiceConnection);
+                } catch (IllegalArgumentException e) {
+                    // no-op, just log the error message.
+                    Slog.w(TAG, "reset(): " + e.getMessage());
+                }
+                mServiceConnection = null;
+            } else {
+                if (sDebug) Slog.d(TAG, "reset(): service is not bound. Do nothing.");
+            }
+        }
     }
 
     /**
@@ -249,13 +264,13 @@ final class FieldClassificationStrategy {
         return parser.get(res, resourceId);
     }
 
-    //TODO(b/70291841): rename this method (and all others in the chain) to something like
-    // calculateScores() ?
-    void getScores(RemoteCallback callback, @Nullable String algorithmName,
-            @Nullable Bundle algorithmArgs, @NonNull List<AutofillValue> actualValues,
-            @NonNull String[] userDataValues) {
-        connectAndRun((service) -> service.getScores(callback, algorithmName,
-                algorithmArgs, actualValues, userDataValues));
+    void calculateScores(RemoteCallback callback, @NonNull List<AutofillValue> actualValues,
+            @NonNull String[] userDataValues, @NonNull String[] categoryIds,
+            @Nullable String defaultAlgorithm, @Nullable Bundle defaultArgs,
+            @Nullable ArrayMap<String, String> algorithms,
+            @Nullable ArrayMap<String, Bundle> args) {
+        connectAndRun((service) -> service.calculateScores(callback, actualValues,
+                userDataValues, categoryIds, defaultAlgorithm, defaultArgs, algorithms, args));
     }
 
     void dump(String prefix, PrintWriter pw) {
@@ -274,9 +289,13 @@ final class FieldClassificationStrategy {
         }
         pw.println(impl.flattenToShortString());
 
-        pw.print(prefix); pw.print("Available algorithms: ");
-        pw.println(Arrays.toString(getAvailableAlgorithms()));
-        pw.print(prefix); pw.print("Default algorithm: "); pw.println(getDefaultAlgorithm());
+        try {
+            pw.print(prefix); pw.print("Available algorithms: ");
+            pw.println(Arrays.toString(getAvailableAlgorithms()));
+            pw.print(prefix); pw.print("Default algorithm: "); pw.println(getDefaultAlgorithm());
+        } catch (Exception e) {
+            pw.print("ERROR CALLING SERVICE: " ); pw.println(e);
+        }
     }
 
     private static interface Command {

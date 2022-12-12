@@ -25,8 +25,8 @@ import android.service.autofill.FillResponse;
  *
  * @hide
  */
-interface IFillCallback {
+oneway interface IFillCallback {
     void onCancellable(in ICancellationSignal cancellation);
     void onSuccess(in FillResponse response);
-    void onFailure(CharSequence message);
+    void onFailure(int requestId, CharSequence message);
 }

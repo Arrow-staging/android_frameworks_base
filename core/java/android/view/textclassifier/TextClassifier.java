@@ -26,21 +26,34 @@ import android.os.LocaleList;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.util.ArraySet;
-import android.util.Slog;
-import android.view.textclassifier.logging.Logger;
+import android.text.Spannable;
+import android.text.SpannableString;
+import android.text.style.URLSpan;
+import android.text.util.Linkify;
+import android.text.util.Linkify.LinkifyMask;
+import android.util.ArrayMap;
 
+import com.android.internal.annotations.GuardedBy;
+import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Preconditions;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.text.BreakIterator;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Interface for providing text classification related features.
+ * <p>
+ * The TextClassifier may be used to understand the meaning of text, as well as generating predicted
+ * next actions based on the text.
  *
  * <p><strong>NOTE: </strong>Unless otherwise stated, methods of this interface are blocking
  * operations. Call on a worker thread.
@@ -48,7 +61,32 @@ import java.util.List;
 public interface TextClassifier {
 
     /** @hide */
-    String DEFAULT_LOG_TAG = "androidtc";
+    String LOG_TAG = "androidtc";
+
+
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(value = {LOCAL, SYSTEM, DEFAULT_SYSTEM})
+    @interface TextClassifierType {}  // TODO: Expose as system APIs.
+    /** Specifies a TextClassifier that runs locally in the app's process. @hide */
+    int LOCAL = 0;
+    /** Specifies a TextClassifier that runs in the system process and serves all apps. @hide */
+    int SYSTEM = 1;
+    /** Specifies the default TextClassifier that runs in the system process. @hide */
+    int DEFAULT_SYSTEM = 2;
+
+    /** @hide */
+    static String typeToString(@TextClassifierType int type) {
+        switch (type) {
+            case LOCAL:
+                return "Local";
+            case SYSTEM:
+                return "System";
+            case DEFAULT_SYSTEM:
+                return "Default system";
+        }
+        return "Unknown";
+    }
 
     /** The TextClassifier failed to run. */
     String TYPE_UNKNOWN = "";
@@ -70,6 +108,11 @@ public interface TextClassifier {
     String TYPE_DATE_TIME = "datetime";
     /** Flight number in IATA format. */
     String TYPE_FLIGHT_NUMBER = "flight";
+    /**
+     * Word that users may be interested to look up for meaning.
+     * @hide
+     */
+    String TYPE_DICTIONARY = "dictionary";
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -83,28 +126,76 @@ public interface TextClassifier {
             TYPE_DATE,
             TYPE_DATE_TIME,
             TYPE_FLIGHT_NUMBER,
+            TYPE_DICTIONARY
     })
     @interface EntityType {}
 
-    /** Designates that the TextClassifier should identify all entity types it can. **/
-    int ENTITY_PRESET_ALL = 0;
-    /** Designates that the TextClassifier should identify no entities. **/
-    int ENTITY_PRESET_NONE = 1;
-    /** Designates that the TextClassifier should identify a base set of entities determined by the
-     * TextClassifier. **/
-    int ENTITY_PRESET_BASE = 2;
+    /** Designates that the text in question is editable. **/
+    String HINT_TEXT_IS_EDITABLE = "android.text_is_editable";
+    /** Designates that the text in question is not editable. **/
+    String HINT_TEXT_IS_NOT_EDITABLE = "android.text_is_not_editable";
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef(prefix = { "ENTITY_CONFIG_" },
-            value = {ENTITY_PRESET_ALL, ENTITY_PRESET_NONE, ENTITY_PRESET_BASE})
-    @interface EntityPreset {}
+    @StringDef(prefix = { "HINT_" }, value = {HINT_TEXT_IS_EDITABLE, HINT_TEXT_IS_NOT_EDITABLE})
+    @interface Hints {}
+
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @StringDef({WIDGET_TYPE_TEXTVIEW, WIDGET_TYPE_EDITTEXT, WIDGET_TYPE_UNSELECTABLE_TEXTVIEW,
+            WIDGET_TYPE_WEBVIEW, WIDGET_TYPE_EDIT_WEBVIEW, WIDGET_TYPE_CUSTOM_TEXTVIEW,
+            WIDGET_TYPE_CUSTOM_EDITTEXT, WIDGET_TYPE_CUSTOM_UNSELECTABLE_TEXTVIEW,
+            WIDGET_TYPE_NOTIFICATION, WIDGET_TYPE_CLIPBOARD, WIDGET_TYPE_UNKNOWN })
+    @interface WidgetType {}
+
+    /** The widget involved in the text classification context is a standard
+     * {@link android.widget.TextView}. */
+    String WIDGET_TYPE_TEXTVIEW = "textview";
+    /** The widget involved in the text classification context is a standard
+     * {@link android.widget.EditText}. */
+    String WIDGET_TYPE_EDITTEXT = "edittext";
+    /** The widget involved in the text classification context is a standard non-selectable
+     * {@link android.widget.TextView}. */
+    String WIDGET_TYPE_UNSELECTABLE_TEXTVIEW = "nosel-textview";
+    /** The widget involved in the text classification context is a standard
+     * {@link android.webkit.WebView}. */
+    String WIDGET_TYPE_WEBVIEW = "webview";
+    /** The widget involved in the text classification context is a standard editable
+     * {@link android.webkit.WebView}. */
+    String WIDGET_TYPE_EDIT_WEBVIEW = "edit-webview";
+    /** The widget involved in the text classification context is a custom text widget. */
+    String WIDGET_TYPE_CUSTOM_TEXTVIEW = "customview";
+    /** The widget involved in the text classification context is a custom editable text widget. */
+    String WIDGET_TYPE_CUSTOM_EDITTEXT = "customedit";
+    /** The widget involved in the text classification context is a custom non-selectable text
+     * widget. */
+    String WIDGET_TYPE_CUSTOM_UNSELECTABLE_TEXTVIEW = "nosel-customview";
+    /** The widget involved in the text classification context is a notification */
+    String WIDGET_TYPE_NOTIFICATION = "notification";
+    /** The text classification context is for use with the system clipboard. */
+    String WIDGET_TYPE_CLIPBOARD = "clipboard";
+    /** The widget involved in the text classification context is of an unknown/unspecified type. */
+    String WIDGET_TYPE_UNKNOWN = "unknown";
 
     /**
      * No-op TextClassifier.
      * This may be used to turn off TextClassifier features.
      */
-    TextClassifier NO_OP = new TextClassifier() {};
+    TextClassifier NO_OP = new TextClassifier() {
+        @Override
+        public String toString() {
+            return "TextClassifier.NO_OP";
+        }
+    };
+
+    /**
+     * Extra that is included on activity intents coming from a TextClassifier when
+     * it suggests actions to its caller.
+     * <p>
+     * All {@link TextClassifier} implementations should make sure this extra exists in their
+     * generated intents.
+     */
+    String EXTRA_FROM_TEXT_CLASSIFIER = "android.view.textclassifier.extra.FROM_TEXT_CLASSIFIER";
 
     /**
      * Returns suggested text selection start and end indices, recognized entity types, and their
@@ -112,67 +203,44 @@ public interface TextClassifier {
      *
      * <p><strong>NOTE: </strong>Call on a worker thread.
      *
-     * @param text text providing context for the selected text (which is specified
-     *      by the sub sequence starting at selectionStartIndex and ending at selectionEndIndex)
-     * @param selectionStartIndex start index of the selected part of text
-     * @param selectionEndIndex end index of the selected part of text
-     * @param options optional input parameters
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      *
-     * @throws IllegalArgumentException if text is null; selectionStartIndex is negative;
-     *      selectionEndIndex is greater than text.length() or not greater than selectionStartIndex
-     *
-     * @see #suggestSelection(CharSequence, int, int)
+     * @param request the text selection request
      */
     @WorkerThread
     @NonNull
-    default TextSelection suggestSelection(
-            @NonNull CharSequence text,
-            @IntRange(from = 0) int selectionStartIndex,
-            @IntRange(from = 0) int selectionEndIndex,
-            @Nullable TextSelection.Options options) {
-        Utils.validate(text, selectionStartIndex, selectionEndIndex, false);
-        return new TextSelection.Builder(selectionStartIndex, selectionEndIndex).build();
+    default TextSelection suggestSelection(@NonNull TextSelection.Request request) {
+        Objects.requireNonNull(request);
+        Utils.checkMainThread();
+        return new TextSelection.Builder(request.getStartIndex(), request.getEndIndex()).build();
     }
 
     /**
      * Returns suggested text selection start and end indices, recognized entity types, and their
      * associated confidence scores. The entity types are ordered from highest to lowest scoring.
      *
-     * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
-     * {@link #suggestSelection(CharSequence, int, int, TextSelection.Options)}. If that method
-     * calls this method, a stack overflow error will happen.
-     *
      * <p><strong>NOTE: </strong>Call on a worker thread.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
+     *
+     * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
+     * {@link #suggestSelection(TextSelection.Request)}. If that method calls this method,
+     * a stack overflow error will happen.
      *
      * @param text text providing context for the selected text (which is specified
      *      by the sub sequence starting at selectionStartIndex and ending at selectionEndIndex)
      * @param selectionStartIndex start index of the selected part of text
      * @param selectionEndIndex end index of the selected part of text
+     * @param defaultLocales ordered list of locale preferences that may be used to
+     *      disambiguate the provided text. If no locale preferences exist, set this to null
+     *      or an empty locale list.
      *
      * @throws IllegalArgumentException if text is null; selectionStartIndex is negative;
      *      selectionEndIndex is greater than text.length() or not greater than selectionStartIndex
      *
-     * @see #suggestSelection(CharSequence, int, int, TextSelection.Options)
-     */
-    @WorkerThread
-    @NonNull
-    default TextSelection suggestSelection(
-            @NonNull CharSequence text,
-            @IntRange(from = 0) int selectionStartIndex,
-            @IntRange(from = 0) int selectionEndIndex) {
-        return suggestSelection(text, selectionStartIndex, selectionEndIndex,
-                (TextSelection.Options) null);
-    }
-
-    /**
-     * See {@link #suggestSelection(CharSequence, int, int)} or
-     * {@link #suggestSelection(CharSequence, int, int, TextSelection.Options)}.
-     *
-     * <p><strong>NOTE: </strong>Call on a worker thread.
-     *
-     * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
-     * {@link #suggestSelection(CharSequence, int, int, TextSelection.Options)}. If that method
-     * calls this method, a stack overflow error will happen.
+     * @see #suggestSelection(TextSelection.Request)
      */
     @WorkerThread
     @NonNull
@@ -181,10 +249,11 @@ public interface TextClassifier {
             @IntRange(from = 0) int selectionStartIndex,
             @IntRange(from = 0) int selectionEndIndex,
             @Nullable LocaleList defaultLocales) {
-        final TextSelection.Options options = (defaultLocales != null)
-                ? new TextSelection.Options().setDefaultLocales(defaultLocales)
-                : null;
-        return suggestSelection(text, selectionStartIndex, selectionEndIndex, options);
+        final TextSelection.Request request = new TextSelection.Request.Builder(
+                text, selectionStartIndex, selectionEndIndex)
+                .setDefaultLocales(defaultLocales)
+                .build();
+        return suggestSelection(request);
     }
 
     /**
@@ -193,25 +262,16 @@ public interface TextClassifier {
      *
      * <p><strong>NOTE: </strong>Call on a worker thread.
      *
-     * @param text text providing context for the text to classify (which is specified
-     *      by the sub sequence starting at startIndex and ending at endIndex)
-     * @param startIndex start index of the text to classify
-     * @param endIndex end index of the text to classify
-     * @param options optional input parameters
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      *
-     * @throws IllegalArgumentException if text is null; startIndex is negative;
-     *      endIndex is greater than text.length() or not greater than startIndex
-     *
-     * @see #classifyText(CharSequence, int, int)
+     * @param request the text classification request
      */
     @WorkerThread
     @NonNull
-    default TextClassification classifyText(
-            @NonNull CharSequence text,
-            @IntRange(from = 0) int startIndex,
-            @IntRange(from = 0) int endIndex,
-            @Nullable TextClassification.Options options) {
-        Utils.validate(text, startIndex, endIndex, false);
+    default TextClassification classifyText(@NonNull TextClassification.Request request) {
+        Objects.requireNonNull(request);
+        Utils.checkMainThread();
         return TextClassification.EMPTY;
     }
 
@@ -222,37 +282,24 @@ public interface TextClassifier {
      * <p><strong>NOTE: </strong>Call on a worker thread.
      *
      * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
-     * {@link #classifyText(CharSequence, int, int, TextClassification.Options)}. If that method
-     * calls this method, a stack overflow error will happen.
+     * {@link #classifyText(TextClassification.Request)}. If that method calls this method,
+     * a stack overflow error will happen.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      *
      * @param text text providing context for the text to classify (which is specified
      *      by the sub sequence starting at startIndex and ending at endIndex)
      * @param startIndex start index of the text to classify
      * @param endIndex end index of the text to classify
+     * @param defaultLocales ordered list of locale preferences that may be used to
+     *      disambiguate the provided text. If no locale preferences exist, set this to null
+     *      or an empty locale list.
      *
      * @throws IllegalArgumentException if text is null; startIndex is negative;
      *      endIndex is greater than text.length() or not greater than startIndex
      *
-     * @see #classifyText(CharSequence, int, int, TextClassification.Options)
-     */
-    @WorkerThread
-    @NonNull
-    default TextClassification classifyText(
-            @NonNull CharSequence text,
-            @IntRange(from = 0) int startIndex,
-            @IntRange(from = 0) int endIndex) {
-        return classifyText(text, startIndex, endIndex, (TextClassification.Options) null);
-    }
-
-    /**
-     * See {@link #classifyText(CharSequence, int, int, TextClassification.Options)} or
-     * {@link #classifyText(CharSequence, int, int)}.
-     *
-     * <p><strong>NOTE: </strong>Call on a worker thread.
-     *
-     * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
-     * {@link #classifyText(CharSequence, int, int, TextClassification.Options)}. If that method
-     * calls this method, a stack overflow error will happen.
+     * @see #classifyText(TextClassification.Request)
      */
     @WorkerThread
     @NonNull
@@ -261,10 +308,11 @@ public interface TextClassifier {
             @IntRange(from = 0) int startIndex,
             @IntRange(from = 0) int endIndex,
             @Nullable LocaleList defaultLocales) {
-        final TextClassification.Options options = (defaultLocales != null)
-                ? new TextClassification.Options().setDefaultLocales(defaultLocales)
-                : null;
-        return classifyText(text, startIndex, endIndex, options);
+        final TextClassification.Request request = new TextClassification.Request.Builder(
+                text, startIndex, endIndex)
+                .setDefaultLocales(defaultLocales)
+                .build();
+        return classifyText(request);
     }
 
     /**
@@ -273,125 +321,249 @@ public interface TextClassifier {
      *
      * <p><strong>NOTE: </strong>Call on a worker thread.
      *
-     * @param text the text to generate annotations for
-     * @param options configuration for link generation
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      *
-     * @throws IllegalArgumentException if text is null
+     * @param request the text links request
      *
-     * @see #generateLinks(CharSequence)
+     * @see #getMaxGenerateLinksTextLength()
      */
     @WorkerThread
-    default TextLinks generateLinks(
-            @NonNull CharSequence text, @Nullable TextLinks.Options options) {
-        Utils.validate(text, false);
-        return new TextLinks.Builder(text.toString()).build();
+    @NonNull
+    default TextLinks generateLinks(@NonNull TextLinks.Request request) {
+        Objects.requireNonNull(request);
+        Utils.checkMainThread();
+        return new TextLinks.Builder(request.getText().toString()).build();
     }
 
     /**
-     * Generates and returns a {@link TextLinks} that may be applied to the text to annotate it with
-     * links information.
+     * Returns the maximal length of text that can be processed by generateLinks.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
+     *
+     * @see #generateLinks(TextLinks.Request)
+     */
+    @WorkerThread
+    default int getMaxGenerateLinksTextLength() {
+        return Integer.MAX_VALUE;
+    }
+
+    /**
+     * Detects the language of the text in the given request.
      *
      * <p><strong>NOTE: </strong>Call on a worker thread.
      *
-     * <p><b>NOTE:</b> Do not implement. The default implementation of this method calls
-     * {@link #generateLinks(CharSequence, TextLinks.Options)}. If that method calls this method,
-     * a stack overflow error will happen.
      *
-     * @param text the text to generate annotations for
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      *
-     * @throws IllegalArgumentException if text is null
-     *
-     * @see #generateLinks(CharSequence, TextLinks.Options)
+     * @param request the {@link TextLanguage} request.
+     * @return the {@link TextLanguage} result.
      */
     @WorkerThread
-    default TextLinks generateLinks(@NonNull CharSequence text) {
-        return generateLinks(text, null);
+    @NonNull
+    default TextLanguage detectLanguage(@NonNull TextLanguage.Request request) {
+        Objects.requireNonNull(request);
+        Utils.checkMainThread();
+        return TextLanguage.EMPTY;
     }
 
     /**
-     * Returns a {@link Collection} of the entity types in the specified preset.
-     *
-     * @see #ENTITY_PRESET_ALL
-     * @see #ENTITY_PRESET_NONE
-     * @see #ENTITY_PRESET_BASE
-     */
-    default Collection<String> getEntitiesForPreset(@EntityPreset int entityPreset) {
-        return Collections.EMPTY_LIST;
-    }
-
-    /**
-     * Returns a helper for logging TextClassifier related events.
-     *
-     * @param config logger configuration
+     * Suggests and returns a list of actions according to the given conversation.
      */
     @WorkerThread
-    default Logger getLogger(@NonNull Logger.Config config) {
-        Preconditions.checkNotNull(config);
-        return Logger.DISABLED;
+    @NonNull
+    default ConversationActions suggestConversationActions(
+            @NonNull ConversationActions.Request request) {
+        Objects.requireNonNull(request);
+        Utils.checkMainThread();
+        return new ConversationActions(Collections.emptyList(), null);
     }
 
     /**
-     * Returns this TextClassifier's settings.
-     * @hide
+     * <strong>NOTE: </strong>Use {@link #onTextClassifierEvent(TextClassifierEvent)} instead.
+     * <p>
+     * Reports a selection event.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to this method should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
      */
-    default TextClassifierConstants getSettings() {
-        return TextClassifierConstants.DEFAULT;
+    default void onSelectionEvent(@NonNull SelectionEvent event) {
+        // TODO: Consider rerouting to onTextClassifierEvent()
     }
 
     /**
-     * Configuration object for specifying what entities to identify.
+     * Reports a text classifier event.
+     * <p>
+     * <strong>NOTE: </strong>Call on a worker thread.
+     *
+     * @throws IllegalStateException if this TextClassifier has been destroyed.
+     * @see #isDestroyed()
+     */
+    default void onTextClassifierEvent(@NonNull TextClassifierEvent event) {}
+
+    /**
+     * Destroys this TextClassifier.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, calls to its methods should
+     * throw an {@link IllegalStateException}. See {@link #isDestroyed()}.
+     *
+     * <p>Subsequent calls to this method are no-ops.
+     */
+    default void destroy() {}
+
+    /**
+     * Returns whether or not this TextClassifier has been destroyed.
+     *
+     * <p><strong>NOTE: </strong>If a TextClassifier has been destroyed, caller should not interact
+     * with the classifier and an attempt to do so would throw an {@link IllegalStateException}.
+     * However, this method should never throw an {@link IllegalStateException}.
+     *
+     * @see #destroy()
+     */
+    default boolean isDestroyed() {
+        return false;
+    }
+
+    /** @hide **/
+    default void dump(@NonNull IndentingPrintWriter printWriter) {}
+
+    /**
+     * Configuration object for specifying what entity types to identify.
      *
      * Configs are initially based on a predefined preset, and can be modified from there.
      */
     final class EntityConfig implements Parcelable {
-        private final @TextClassifier.EntityPreset int mEntityPreset;
-        private final Collection<String> mExcludedEntityTypes;
-        private final Collection<String> mIncludedEntityTypes;
+        private final List<String> mIncludedTypes;
+        private final List<String> mExcludedTypes;
+        private final List<String> mHints;
+        private final boolean mIncludeTypesFromTextClassifier;
 
-        public EntityConfig(@TextClassifier.EntityPreset int mEntityPreset) {
-            this.mEntityPreset = mEntityPreset;
-            mExcludedEntityTypes = new ArraySet<>();
-            mIncludedEntityTypes = new ArraySet<>();
+        private EntityConfig(
+                List<String> includedEntityTypes,
+                List<String> excludedEntityTypes,
+                List<String> hints,
+                boolean includeTypesFromTextClassifier) {
+            mIncludedTypes = Objects.requireNonNull(includedEntityTypes);
+            mExcludedTypes = Objects.requireNonNull(excludedEntityTypes);
+            mHints = Objects.requireNonNull(hints);
+            mIncludeTypesFromTextClassifier = includeTypesFromTextClassifier;
+        }
+
+        private EntityConfig(Parcel in) {
+            mIncludedTypes = new ArrayList<>();
+            in.readStringList(mIncludedTypes);
+            mExcludedTypes = new ArrayList<>();
+            in.readStringList(mExcludedTypes);
+            List<String> tmpHints = new ArrayList<>();
+            in.readStringList(tmpHints);
+            mHints = Collections.unmodifiableList(tmpHints);
+            mIncludeTypesFromTextClassifier = in.readByte() != 0;
+        }
+
+        @Override
+        public void writeToParcel(Parcel parcel, int flags) {
+            parcel.writeStringList(mIncludedTypes);
+            parcel.writeStringList(mExcludedTypes);
+            parcel.writeStringList(mHints);
+            parcel.writeByte((byte) (mIncludeTypesFromTextClassifier ? 1 : 0));
         }
 
         /**
-         * Specifies an entity to include in addition to any specified by the enity preset.
+         * Creates an EntityConfig.
+         *
+         * @param hints Hints for the TextClassifier to determine what types of entities to find.
+         *
+         * @deprecated Use {@link Builder} instead.
+         */
+        @Deprecated
+        public static EntityConfig createWithHints(@Nullable Collection<String> hints) {
+            return new EntityConfig.Builder()
+                    .includeTypesFromTextClassifier(true)
+                    .setHints(hints)
+                    .build();
+        }
+
+        /**
+         * Creates an EntityConfig.
+         *
+         * @param hints Hints for the TextClassifier to determine what types of entities to find
+         * @param includedEntityTypes Entity types, e.g. {@link #TYPE_EMAIL}, to explicitly include
+         * @param excludedEntityTypes Entity types, e.g. {@link #TYPE_PHONE}, to explicitly exclude
+         *
          *
          * Note that if an entity has been excluded, the exclusion will take precedence.
+         *
+         * @deprecated Use {@link Builder} instead.
          */
-        public EntityConfig includeEntities(String... entities) {
-            for (String entity : entities) {
-                mIncludedEntityTypes.add(entity);
-            }
-            return this;
+        @Deprecated
+        public static EntityConfig create(@Nullable Collection<String> hints,
+                @Nullable Collection<String> includedEntityTypes,
+                @Nullable Collection<String> excludedEntityTypes) {
+            return new EntityConfig.Builder()
+                    .setIncludedTypes(includedEntityTypes)
+                    .setExcludedTypes(excludedEntityTypes)
+                    .setHints(hints)
+                    .includeTypesFromTextClassifier(true)
+                    .build();
         }
 
         /**
-         * Specifies an entity to be excluded.
+         * Creates an EntityConfig with an explicit entity list.
+         *
+         * @param entityTypes Complete set of entities, e.g. {@link #TYPE_URL} to find.
+         *
+         * @deprecated Use {@link Builder} instead.
          */
-        public EntityConfig excludeEntities(String... entities) {
-            for (String entity : entities) {
-                mExcludedEntityTypes.add(entity);
-            }
-            return this;
+        @Deprecated
+        public static EntityConfig createWithExplicitEntityList(
+                @Nullable Collection<String> entityTypes) {
+            return new EntityConfig.Builder()
+                    .setIncludedTypes(entityTypes)
+                    .includeTypesFromTextClassifier(false)
+                    .build();
         }
 
         /**
-         * Returns an unmodifiable list of the final set of entities to find.
+         * Returns a final list of entity types to find.
+         *
+         * @param entityTypes Entity types we think should be found before factoring in
+         *                    includes/excludes
+         *
+         * This method is intended for use by TextClassifier implementations.
          */
-        public List<String> getEntities(TextClassifier textClassifier) {
-            ArrayList<String> entities = new ArrayList<>();
-            for (String entity : textClassifier.getEntitiesForPreset(mEntityPreset)) {
-                if (!mExcludedEntityTypes.contains(entity)) {
-                    entities.add(entity);
-                }
+        public Collection<String> resolveEntityListModifications(
+                @NonNull Collection<String> entityTypes) {
+            final Set<String> finalSet = new HashSet<>();
+            if (mIncludeTypesFromTextClassifier) {
+                finalSet.addAll(entityTypes);
             }
-            for (String entity : mIncludedEntityTypes) {
-                if (!mExcludedEntityTypes.contains(entity) && !entities.contains(entity)) {
-                    entities.add(entity);
-                }
-            }
-            return Collections.unmodifiableList(entities);
+            finalSet.addAll(mIncludedTypes);
+            finalSet.removeAll(mExcludedTypes);
+            return finalSet;
+        }
+
+        /**
+         * Retrieves the list of hints.
+         *
+         * @return An unmodifiable collection of the hints.
+         */
+        public Collection<String> getHints() {
+            return mHints;
+        }
+
+        /**
+         * Return whether the client allows the text classifier to include its own list of
+         * default types. If this function returns {@code true}, a default list of types suggested
+         * from a text classifier will be taking into account.
+         *
+         * <p>NOTE: This method is intended for use by a text classifier.
+         *
+         * @see #resolveEntityListModifications(Collection)
+         */
+        public boolean shouldIncludeTypesFromTextClassifier() {
+            return mIncludeTypesFromTextClassifier;
         }
 
         @Override
@@ -399,14 +571,7 @@ public interface TextClassifier {
             return 0;
         }
 
-        @Override
-        public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(mEntityPreset);
-            dest.writeStringList(new ArrayList<>(mExcludedEntityTypes));
-            dest.writeStringList(new ArrayList<>(mIncludedEntityTypes));
-        }
-
-        public static final Parcelable.Creator<EntityConfig> CREATOR =
+        public static final @android.annotation.NonNull Parcelable.Creator<EntityConfig> CREATOR =
                 new Parcelable.Creator<EntityConfig>() {
                     @Override
                     public EntityConfig createFromParcel(Parcel in) {
@@ -419,10 +584,76 @@ public interface TextClassifier {
                     }
                 };
 
-        private EntityConfig(Parcel in) {
-            mEntityPreset = in.readInt();
-            mExcludedEntityTypes = new ArraySet<>(in.createStringArrayList());
-            mIncludedEntityTypes = new ArraySet<>(in.createStringArrayList());
+
+
+        /** Builder class to construct the {@link EntityConfig} object. */
+        public static final class Builder {
+            @Nullable
+            private Collection<String> mIncludedTypes;
+            @Nullable
+            private Collection<String> mExcludedTypes;
+            @Nullable
+            private Collection<String> mHints;
+            private boolean mIncludeTypesFromTextClassifier = true;
+
+            /**
+             * Sets a collection of types that are explicitly included.
+             */
+            @NonNull
+            public Builder setIncludedTypes(@Nullable Collection<String> includedTypes) {
+                mIncludedTypes = includedTypes;
+                return this;
+            }
+
+            /**
+             * Sets a collection of types that are explicitly excluded.
+             */
+            @NonNull
+            public Builder setExcludedTypes(@Nullable Collection<String> excludedTypes) {
+                mExcludedTypes = excludedTypes;
+                return this;
+            }
+
+            /**
+             * Specifies whether or not to include the types suggested by the text classifier. By
+             * default, it is included.
+             */
+            @NonNull
+            public Builder includeTypesFromTextClassifier(boolean includeTypesFromTextClassifier) {
+                mIncludeTypesFromTextClassifier = includeTypesFromTextClassifier;
+                return this;
+            }
+
+
+            /**
+             * Sets the hints for the TextClassifier to determine what types of entities to find.
+             * These hints will only be used if {@link #includeTypesFromTextClassifier} is
+             * set to be true.
+             */
+            @NonNull
+            public Builder setHints(@Nullable Collection<String> hints) {
+                mHints = hints;
+                return this;
+            }
+
+            /**
+             * Combines all of the options that have been set and returns a new {@link EntityConfig}
+             * object.
+             */
+            @NonNull
+            public EntityConfig build() {
+                return new EntityConfig(
+                        mIncludedTypes == null
+                                ? Collections.emptyList()
+                                : new ArrayList<>(mIncludedTypes),
+                        mExcludedTypes == null
+                                ? Collections.emptyList()
+                                : new ArrayList<>(mExcludedTypes),
+                        mHints == null
+                                ? Collections.emptyList()
+                                : Collections.unmodifiableList(new ArrayList<>(mHints)),
+                        mIncludeTypesFromTextClassifier);
+            }
         }
     }
 
@@ -433,37 +664,134 @@ public interface TextClassifier {
      *  <li>Provides validation of input parameters to TextClassifier methods
      * </ul>
      *
-     * Intended to be used only in this package.
+     * Intended to be used only for TextClassifier purposes.
      * @hide
      */
     final class Utils {
+
+        @GuardedBy("WORD_ITERATOR")
+        private static final BreakIterator WORD_ITERATOR = BreakIterator.getWordInstance();
 
         /**
          * @throws IllegalArgumentException if text is null; startIndex is negative;
          *      endIndex is greater than text.length() or is not greater than startIndex;
          *      options is null
          */
-        public static void validate(
-                @NonNull CharSequence text, int startIndex, int endIndex,
-                boolean allowInMainThread) {
+        static void checkArgument(@NonNull CharSequence text, int startIndex, int endIndex) {
             Preconditions.checkArgument(text != null);
             Preconditions.checkArgument(startIndex >= 0);
             Preconditions.checkArgument(endIndex <= text.length());
             Preconditions.checkArgument(endIndex > startIndex);
-            checkMainThread(allowInMainThread);
+        }
+
+        /** Returns if the length of the text is within the range. */
+        static boolean checkTextLength(CharSequence text, int maxLength) {
+            int textLength = text.length();
+            return textLength >= 0 && textLength <= maxLength;
         }
 
         /**
-         * @throws IllegalArgumentException if text is null or options is null
+         * Returns the substring of {@code text} that contains at least text from index
+         * {@code start} <i>(inclusive)</i> to index {@code end} <i><(exclusive)/i> with the goal of
+         * returning text that is at least {@code minimumLength}. If {@code text} is not long
+         * enough, this will return {@code text}. This method returns text at word boundaries.
+         *
+         * @param text the source text
+         * @param start the start index of text that must be included
+         * @param end the end index of text that must be included
+         * @param minimumLength minimum length of text to return if {@code text} is long enough
          */
-        public static void validate(@NonNull CharSequence text, boolean allowInMainThread) {
-            Preconditions.checkArgument(text != null);
-            checkMainThread(allowInMainThread);
+        public static String getSubString(
+                String text, int start, int end, int minimumLength) {
+            Preconditions.checkArgument(start >= 0);
+            Preconditions.checkArgument(end <= text.length());
+            Preconditions.checkArgument(start <= end);
+
+            if (text.length() < minimumLength) {
+                return text;
+            }
+
+            final int length = end - start;
+            if (length >= minimumLength) {
+                return text.substring(start, end);
+            }
+
+            final int offset = (minimumLength - length) / 2;
+            int iterStart = Math.max(0, Math.min(start - offset, text.length() - minimumLength));
+            int iterEnd = Math.min(text.length(), iterStart + minimumLength);
+
+            synchronized (WORD_ITERATOR) {
+                WORD_ITERATOR.setText(text);
+                iterStart = WORD_ITERATOR.isBoundary(iterStart)
+                        ? iterStart : Math.max(0, WORD_ITERATOR.preceding(iterStart));
+                iterEnd = WORD_ITERATOR.isBoundary(iterEnd)
+                        ? iterEnd : Math.max(iterEnd, WORD_ITERATOR.following(iterEnd));
+                WORD_ITERATOR.setText("");
+                return text.substring(iterStart, iterEnd);
+            }
         }
 
-        private static void checkMainThread(boolean allowInMainThread) {
-            if (!allowInMainThread && Looper.myLooper() == Looper.getMainLooper()) {
-                Slog.w(DEFAULT_LOG_TAG, "TextClassifier called on main thread");
+        /**
+         * Generates links using legacy {@link Linkify}.
+         */
+        public static TextLinks generateLegacyLinks(@NonNull TextLinks.Request request) {
+            final String string = request.getText().toString();
+            final TextLinks.Builder links = new TextLinks.Builder(string);
+
+            final Collection<String> entities = request.getEntityConfig()
+                    .resolveEntityListModifications(Collections.emptyList());
+            if (entities.contains(TextClassifier.TYPE_URL)) {
+                addLinks(links, string, TextClassifier.TYPE_URL);
+            }
+            if (entities.contains(TextClassifier.TYPE_PHONE)) {
+                addLinks(links, string, TextClassifier.TYPE_PHONE);
+            }
+            if (entities.contains(TextClassifier.TYPE_EMAIL)) {
+                addLinks(links, string, TextClassifier.TYPE_EMAIL);
+            }
+            // NOTE: Do not support MAP_ADDRESSES. Legacy version does not work well.
+            return links.build();
+        }
+
+        private static void addLinks(
+                TextLinks.Builder links, String string, @EntityType String entityType) {
+            final Spannable spannable = new SpannableString(string);
+            if (Linkify.addLinks(spannable, linkMask(entityType))) {
+                final URLSpan[] spans = spannable.getSpans(0, spannable.length(), URLSpan.class);
+                for (URLSpan urlSpan : spans) {
+                    links.addLink(
+                            spannable.getSpanStart(urlSpan),
+                            spannable.getSpanEnd(urlSpan),
+                            entityScores(entityType),
+                            urlSpan);
+                }
+            }
+        }
+
+        @LinkifyMask
+        private static int linkMask(@EntityType String entityType) {
+            switch (entityType) {
+                case TextClassifier.TYPE_URL:
+                    return Linkify.WEB_URLS;
+                case TextClassifier.TYPE_PHONE:
+                    return Linkify.PHONE_NUMBERS;
+                case TextClassifier.TYPE_EMAIL:
+                    return Linkify.EMAIL_ADDRESSES;
+                default:
+                    // NOTE: Do not support MAP_ADDRESSES. Legacy version does not work well.
+                    return 0;
+            }
+        }
+
+        private static Map<String, Float> entityScores(@EntityType String entityType) {
+            final Map<String, Float> scores = new ArrayMap<>();
+            scores.put(entityType, 1f);
+            return scores;
+        }
+
+        static void checkMainThread() {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                Log.w(LOG_TAG, "TextClassifier called on main thread");
             }
         }
     }

@@ -22,6 +22,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
@@ -29,6 +30,8 @@ import android.graphics.LightingColorFilter;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
+import android.graphics.RuntimeShader;
+import android.graphics.Shader;
 import android.os.Bundle;
 import android.view.View;
 
@@ -47,11 +50,21 @@ public class ColorFiltersMutateActivity extends Activity {
         private final Paint mColorMatrixPaint;
         private final Paint mLightingPaint;
         private final Paint mBlendPaint;
+        private final Paint mShaderPaint;
+        private final RuntimeShader mRuntimeShader;
 
         private float mSaturation = 0.0f;
         private int mLightAdd = 0;
         private int mLightMul = 0;
         private int mPorterDuffColor = 0;
+        private float mShaderParam1 = 0.0f;
+
+        static final String sSkSL =
+                "uniform shader bitmapShader;\n"
+                + "uniform float param1;\n"
+                + "half4 main(float2 xy) {\n"
+                + "  return half4(bitmapShader.eval(xy).rgb, param1);\n"
+                + "}\n";
 
         BitmapsView(Context c) {
             super(c);
@@ -69,6 +82,14 @@ public class ColorFiltersMutateActivity extends Activity {
 
             mBlendPaint = new Paint();
             mBlendPaint.setColorFilter(new PorterDuffColorFilter(0, PorterDuff.Mode.SRC_OVER));
+
+            mRuntimeShader = new RuntimeShader(sSkSL);
+            mRuntimeShader.setFloatUniform("param1", mShaderParam1);
+            mRuntimeShader.setInputShader("bitmapShader", new BitmapShader(mBitmap1,
+                                                                           Shader.TileMode.CLAMP,
+                                                                           Shader.TileMode.CLAMP));
+            mShaderPaint = new Paint();
+            mShaderPaint.setShader(mRuntimeShader);
 
             ObjectAnimator sat = ObjectAnimator.ofFloat(this, "saturation", 1.0f);
             sat.setDuration(1000);
@@ -96,6 +117,12 @@ public class ColorFiltersMutateActivity extends Activity {
             color.setRepeatCount(ObjectAnimator.INFINITE);
             color.setRepeatMode(ObjectAnimator.REVERSE);
             color.start();
+
+            ObjectAnimator shaderUniform = ObjectAnimator.ofFloat(this, "shaderParam1", 1.0f);
+            shaderUniform.setDuration(1000);
+            shaderUniform.setRepeatCount(ObjectAnimator.INFINITE);
+            shaderUniform.setRepeatMode(ObjectAnimator.REVERSE);
+            shaderUniform.start();
         }
 
         public int getPorterDuffColor() {
@@ -106,7 +133,7 @@ public class ColorFiltersMutateActivity extends Activity {
             mPorterDuffColor = porterDuffColor;
             final PorterDuffColorFilter filter =
                     (PorterDuffColorFilter) mBlendPaint.getColorFilter();
-            filter.setColor(mPorterDuffColor);
+            mBlendPaint.setColorFilter(new PorterDuffColorFilter(porterDuffColor, filter.getMode()));
             invalidate();
         }
 
@@ -148,6 +175,18 @@ public class ColorFiltersMutateActivity extends Activity {
             return mSaturation;
         }
 
+        public void setShaderParam1(float value) {
+            mShaderParam1 = value;
+            mRuntimeShader.setFloatUniform("param1", mShaderParam1);
+            invalidate();
+        }
+
+        // If either valueFrom or valueTo is null, then a getter function will also be derived
+        // and called by the animator class.
+        public float getShaderParam1() {
+            return mShaderParam1;
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
@@ -163,6 +202,10 @@ public class ColorFiltersMutateActivity extends Activity {
 
             canvas.translate(0.0f, 50.0f + mBitmap1.getHeight());
             canvas.drawBitmap(mBitmap1, 0.0f, 0.0f, mBlendPaint);
+
+            canvas.translate(0.0f, 50.0f + mBitmap1.getHeight());
+            canvas.drawRect(0.0f, 0.0f, mBitmap1.getWidth(), mBitmap1.getHeight(),
+                    mShaderPaint);
             canvas.restore();
 
             canvas.save();
@@ -174,6 +217,10 @@ public class ColorFiltersMutateActivity extends Activity {
 
             canvas.translate(0.0f, 50.0f + mBitmap2.getHeight());
             canvas.drawBitmap(mBitmap2, 0.0f, 0.0f, mBlendPaint);
+
+            canvas.translate(0.0f, 50.0f + mBitmap2.getHeight());
+            canvas.drawRoundRect(0.0f, 0.0f, mBitmap2.getWidth(), mBitmap2.getHeight(), 20, 20,
+                    mShaderPaint);
             canvas.restore();
         }
     }

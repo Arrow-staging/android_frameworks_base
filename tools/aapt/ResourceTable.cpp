@@ -18,13 +18,10 @@
 #include <utils/TypeHelpers.h>
 #include <stdarg.h>
 
-// SSIZE: mingw does not have signed size_t == ssize_t.
 // STATUST: mingw does seem to redefine UNKNOWN_ERROR from our enum value, so a cast is necessary.
 #if !defined(_WIN32)
-#  define SSIZE(x) x
 #  define STATUST(x) x
 #else
-#  define SSIZE(x) (signed size_t)x
 #  define STATUST(x) (status_t)x
 #endif
 
@@ -2478,11 +2475,10 @@ void ResourceTable::reportError(void* accessorCookie, const char* fmt, ...)
 {
     if (accessorCookie != NULL && fmt != NULL) {
         AccessorCookie* ac = (AccessorCookie*)accessorCookie;
-        int retval=0;
         char buf[1024];
         va_list ap;
         va_start(ap, fmt);
-        retval = vsnprintf(buf, sizeof(buf), fmt, ap);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
         va_end(ap);
         ac->sourcePos.error("Error: %s (at '%s' with value '%s').\n",
                             buf, ac->attr.string(), ac->value.string());
@@ -3040,7 +3036,7 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
         sp<AaptFile> strFile = p->getTypeStringsData();
         ssize_t amt = data->writeData(strFile->getData(), strFile->getSize());
         if (kPrintStringMetrics) {
-            fprintf(stderr, "**** type strings: %zd\n", SSIZE(amt));
+            fprintf(stderr, "**** type strings: %zd\n", amt);
         }
         strAmt += amt;
         if (amt < 0) {
@@ -3050,7 +3046,7 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
         strFile = p->getKeyStringsData();
         amt = data->writeData(strFile->getData(), strFile->getSize());
         if (kPrintStringMetrics) {
-            fprintf(stderr, "**** key strings: %zd\n", SSIZE(amt));
+            fprintf(stderr, "**** key strings: %zd\n", amt);
         }
         strAmt += amt;
         if (amt < 0) {
@@ -3069,7 +3065,7 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
         for (size_t ti=0; ti<N; ti++) {
             // Retrieve them in the same order as the type string block.
             size_t len;
-            String16 typeName(p->getTypeStrings().stringAt(ti, &len));
+            String16 typeName(UnpackOptionalString(p->getTypeStrings().stringAt(ti), &len));
             sp<Type> t = p->getTypes().valueFor(typeName);
             LOG_ALWAYS_FATAL_IF(t == NULL && typeName != String16("<empty>"),
                                 "Type name %s not found",
@@ -3322,8 +3318,8 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
     ssize_t amt = (dest->getSize()-strStart);
     strAmt += amt;
     if (kPrintStringMetrics) {
-        fprintf(stderr, "**** value strings: %zd\n", SSIZE(amt));
-        fprintf(stderr, "**** total strings: %zd\n", SSIZE(strAmt));
+        fprintf(stderr, "**** value strings: %zd\n", amt);
+        fprintf(stderr, "**** total strings: %zd\n", amt);
     }
 
     for (pi=0; pi<flatPackages.size(); pi++) {
@@ -4172,7 +4168,7 @@ status_t ResourceTable::Package::setStrings(const sp<AaptFile>& data,
         const size_t N = strings->size();
         for (size_t i=0; i<N; i++) {
             size_t len;
-            mappings->add(String16(strings->stringAt(i, &len)), i);
+            mappings->add(String16(UnpackOptionalString(strings->stringAt(i), &len)), i);
         }
     }
     return err;

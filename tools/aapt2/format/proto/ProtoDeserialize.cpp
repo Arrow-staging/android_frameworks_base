@@ -19,14 +19,18 @@
 #include "android-base/logging.h"
 #include "android-base/macros.h"
 #include "androidfw/ResourceTypes.h"
+#include "androidfw/Locale.h"
 
-#include "Locale.h"
 #include "ResourceTable.h"
 #include "ResourceUtils.h"
 #include "ResourceValues.h"
 #include "ValueVisitor.h"
 
+using ::android::ConfigDescription;
+using ::android::LocaleValue;
 using ::android::ResStringPool;
+
+using PolicyFlags = android::ResTable_overlayable_policy_header::PolicyFlags;
 
 namespace aapt {
 
@@ -371,18 +375,59 @@ static Visibility::Level DeserializeVisibilityFromPb(const pb::Visibility::Level
   return Visibility::Level::kUndefined;
 }
 
-static bool DeserializePackageFromPb(const pb::Package& pb_package, const ResStringPool& src_pool,
-                                     io::IFileCollection* files, ResourceTable* out_table,
-                                     std::string* out_error) {
-  Maybe<uint8_t> id;
-  if (pb_package.has_package_id()) {
-    id = static_cast<uint8_t>(pb_package.package_id().id());
+bool DeserializeOverlayableItemFromPb(const pb::OverlayableItem& pb_overlayable,
+                                      const android::ResStringPool& src_pool,
+                                      OverlayableItem* out_overlayable, std::string* out_error) {
+  for (const int policy : pb_overlayable.policy()) {
+    switch (policy) {
+      case pb::OverlayableItem::PUBLIC:
+        out_overlayable->policies |= PolicyFlags::PUBLIC;
+        break;
+      case pb::OverlayableItem::SYSTEM:
+        out_overlayable->policies |= PolicyFlags::SYSTEM_PARTITION;
+        break;
+      case pb::OverlayableItem::VENDOR:
+        out_overlayable->policies |= PolicyFlags::VENDOR_PARTITION;
+        break;
+      case pb::OverlayableItem::PRODUCT:
+        out_overlayable->policies |= PolicyFlags::PRODUCT_PARTITION;
+        break;
+      case pb::OverlayableItem::SIGNATURE:
+        out_overlayable->policies |= PolicyFlags::SIGNATURE;
+        break;
+      case pb::OverlayableItem::ODM:
+        out_overlayable->policies |= PolicyFlags::ODM_PARTITION;
+        break;
+      case pb::OverlayableItem::OEM:
+        out_overlayable->policies |= PolicyFlags::OEM_PARTITION;
+        break;
+      case pb::OverlayableItem::ACTOR:
+        out_overlayable->policies |= PolicyFlags::ACTOR_SIGNATURE;
+        break;
+      case pb::OverlayableItem::CONFIG_SIGNATURE:
+        out_overlayable->policies |= PolicyFlags::CONFIG_SIGNATURE;
+        break;
+      default:
+        *out_error = "unknown overlayable policy";
+        return false;
+    }
   }
 
+  if (pb_overlayable.has_source()) {
+    DeserializeSourceFromPb(pb_overlayable.source(), src_pool, &out_overlayable->source);
+  }
+
+  out_overlayable->comment = pb_overlayable.comment();
+  return true;
+}
+
+static bool DeserializePackageFromPb(const pb::Package& pb_package, const ResStringPool& src_pool,
+                                     io::IFileCollection* files,
+                                     const std::vector<std::shared_ptr<Overlayable>>& overlayables,
+                                     ResourceTable* out_table, std::string* out_error) {
   std::map<ResourceId, ResourceNameRef> id_index;
 
-  ResourceTablePackage* pkg =
-      out_table->CreatePackageAllowingDuplicateNames(pb_package.package_name(), id);
+  ResourceTablePackage* pkg = out_table->FindOrCreatePackage(pb_package.package_name());
   for (const pb::Type& pb_type : pb_package.type()) {
     const ResourceType* res_type = ParseResourceType(pb_type.name());
     if (res_type == nullptr) {
@@ -393,14 +438,15 @@ static bool DeserializePackageFromPb(const pb::Package& pb_package, const ResStr
     }
 
     ResourceTableType* type = pkg->FindOrCreateType(*res_type);
-    if (pb_type.has_type_id()) {
-      type->id = static_cast<uint8_t>(pb_type.type_id().id());
-    }
 
     for (const pb::Entry& pb_entry : pb_type.entry()) {
-      ResourceEntry* entry = type->FindOrCreateEntry(pb_entry.name());
-      if (pb_entry.has_entry_id()) {
-        entry->id = static_cast<uint16_t>(pb_entry.entry_id().id());
+      ResourceEntry* entry = type->CreateEntry(pb_entry.name());
+      const ResourceId resource_id(
+          pb_package.has_package_id() ? static_cast<uint8_t>(pb_package.package_id().id()) : 0u,
+          pb_type.has_type_id() ? static_cast<uint8_t>(pb_type.type_id().id()) : 0u,
+          pb_entry.has_entry_id() ? static_cast<uint16_t>(pb_entry.entry_id().id()) : 0u);
+      if (resource_id.id != 0u) {
+        entry->id = resource_id;
       }
 
       // Deserialize the symbol status (public/private with source and comments).
@@ -410,6 +456,7 @@ static bool DeserializePackageFromPb(const pb::Package& pb_package, const ResStr
           DeserializeSourceFromPb(pb_visibility.source(), src_pool, &entry->visibility.source);
         }
         entry->visibility.comment = pb_visibility.comment();
+        entry->visibility.staged_api = pb_visibility.staged_api();
 
         const Visibility::Level level = DeserializeVisibilityFromPb(pb_visibility.level());
         entry->visibility.level = level;
@@ -435,15 +482,34 @@ static bool DeserializePackageFromPb(const pb::Package& pb_package, const ResStr
         entry->allow_new = std::move(allow_new);
       }
 
-      if (pb_entry.has_overlayable()) {
-        const pb::Overlayable& pb_overlayable = pb_entry.overlayable();
-
-        Overlayable overlayable;
-        if (pb_overlayable.has_source()) {
-          DeserializeSourceFromPb(pb_overlayable.source(), src_pool, &overlayable.source);
+      if (pb_entry.has_overlayable_item()) {
+        // Find the overlayable to which this item belongs
+        pb::OverlayableItem pb_overlayable_item = pb_entry.overlayable_item();
+        if (pb_overlayable_item.overlayable_idx() >= overlayables.size()) {
+          *out_error =
+              android::base::StringPrintf("invalid overlayable_idx value %d for entry %s/%s",
+                                          pb_overlayable_item.overlayable_idx(),
+                                          pb_type.name().c_str(), pb_entry.name().c_str());
+          return false;
         }
-        overlayable.comment = pb_overlayable.comment();
-        entry->overlayable = std::move(overlayable);
+
+        OverlayableItem overlayable_item(overlayables[pb_overlayable_item.overlayable_idx()]);
+        if (!DeserializeOverlayableItemFromPb(pb_overlayable_item, src_pool, &overlayable_item,
+                                              out_error)) {
+          return false;
+        }
+        entry->overlayable_item = std::move(overlayable_item);
+      }
+
+      if (pb_entry.has_staged_id()) {
+        const pb::StagedId& pb_staged_id = pb_entry.staged_id();
+
+        StagedId staged_id;
+        if (pb_staged_id.has_source()) {
+          DeserializeSourceFromPb(pb_staged_id.source(), src_pool, &staged_id.source);
+        }
+        staged_id.id = pb_staged_id.staged_id();
+        entry->staged_id = std::move(staged_id);
       }
 
       ResourceId resid(pb_package.package_id().id(), pb_type.type_id().id(),
@@ -496,8 +562,19 @@ bool DeserializeTableFromPb(const pb::ResourceTable& pb_table, io::IFileCollecti
     }
   }
 
+  // Deserialize the overlayable groups of the table
+  std::vector<std::shared_ptr<Overlayable>> overlayables;
+  for (const pb::Overlayable& pb_overlayable : pb_table.overlayable()) {
+    auto group = std::make_shared<Overlayable>(pb_overlayable.name(), pb_overlayable.actor());
+    if (pb_overlayable.has_source()) {
+      DeserializeSourceFromPb(pb_overlayable.source(), source_pool, &group->source);
+    }
+    overlayables.push_back(group);
+  }
+
   for (const pb::Package& pb_package : pb_table.package()) {
-    if (!DeserializePackageFromPb(pb_package, source_pool, files, out_table, out_error)) {
+    if (!DeserializePackageFromPb(pb_package, source_pool, files, overlayables, out_table,
+                                  out_error)) {
       return false;
     }
   }
@@ -573,6 +650,7 @@ static bool DeserializeReferenceFromPb(const pb::Reference& pb_ref, Reference* o
                                        std::string* out_error) {
   out_ref->reference_type = DeserializeReferenceTypeFromPb(pb_ref.type());
   out_ref->private_reference = pb_ref.private_();
+  out_ref->is_dynamic = pb_ref.is_dynamic().value();
 
   if (pb_ref.id() != 0) {
     out_ref->id = ResourceId(pb_ref.id());
@@ -588,6 +666,38 @@ static bool DeserializeReferenceFromPb(const pb::Reference& pb_ref, Reference* o
     }
     out_ref->name = name_ref.ToResourceName();
   }
+  if (pb_ref.type_flags() != 0) {
+    out_ref->type_flags = pb_ref.type_flags();
+  }
+  out_ref->allow_raw = pb_ref.allow_raw();
+  return true;
+}
+
+static bool DeserializeMacroFromPb(const pb::MacroBody& pb_ref, Macro* out_ref,
+                                   std::string* out_error) {
+  out_ref->raw_value = pb_ref.raw_string();
+
+  if (pb_ref.has_style_string()) {
+    out_ref->style_string.str = pb_ref.style_string().str();
+    for (const auto& span : pb_ref.style_string().spans()) {
+      out_ref->style_string.spans.emplace_back(Span{
+          .name = span.name(), .first_char = span.start_index(), .last_char = span.end_index()});
+    }
+  }
+
+  for (const auto& untranslatable_section : pb_ref.untranslatable_sections()) {
+    out_ref->untranslatable_sections.emplace_back(
+        UntranslatableSection{.start = static_cast<size_t>(untranslatable_section.start_index()),
+                              .end = static_cast<size_t>(untranslatable_section.end_index())});
+  }
+
+  for (const auto& namespace_decls : pb_ref.namespace_stack()) {
+    out_ref->alias_namespaces.emplace_back(
+        Macro::Namespace{.alias = namespace_decls.prefix(),
+                         .package_name = namespace_decls.package_name(),
+                         .is_private = namespace_decls.is_private()});
+  }
+
   return true;
 }
 
@@ -647,6 +757,8 @@ std::unique_ptr<Value> DeserializeValueFromPb(const pb::Value& pb_value,
             return {};
           }
           symbol.value = pb_symbol.value();
+          symbol.type = pb_symbol.type() != 0U ? pb_symbol.type()
+                                               : android::Res_value::TYPE_INT_DEC;
           attr->symbols.push_back(std::move(symbol));
         }
         value = std::move(attr);
@@ -731,6 +843,15 @@ std::unique_ptr<Value> DeserializeValueFromPb(const pb::Value& pb_value,
         value = std::move(plural);
       } break;
 
+      case pb::CompoundValue::kMacro: {
+        const pb::MacroBody& pb_macro = pb_compound_value.macro();
+        auto macro = std::make_unique<Macro>();
+        if (!DeserializeMacroFromPb(pb_macro, macro.get(), out_error)) {
+          return {};
+        }
+        value = std::move(macro);
+      } break;
+
       default:
         LOG(FATAL) << "unknown compound value: " << (int)pb_compound_value.value_case();
         break;
@@ -780,13 +901,11 @@ std::unique_ptr<Item> DeserializeItemFromPb(const pb::Item& pb_item,
         } break;
         case pb::Primitive::kDimensionValue: {
           val.dataType = android::Res_value::TYPE_DIMENSION;
-          float dimen_val = pb_prim.dimension_value();
-          val.data = *(uint32_t*)&dimen_val;
+          val.data  = pb_prim.dimension_value();
         } break;
         case pb::Primitive::kFractionValue: {
           val.dataType = android::Res_value::TYPE_FRACTION;
-          float fraction_val = pb_prim.fraction_value();
-          val.data = *(uint32_t*)&fraction_val;
+          val.data  = pb_prim.fraction_value();
         } break;
         case pb::Primitive::kIntDecimalValue: {
           val.dataType = android::Res_value::TYPE_INT_DEC;
@@ -815,6 +934,16 @@ std::unique_ptr<Item> DeserializeItemFromPb(const pb::Item& pb_item,
         case pb::Primitive::kColorRgb4Value: {
           val.dataType = android::Res_value::TYPE_INT_COLOR_RGB4;
           val.data = pb_prim.color_rgb4_value();
+        } break;
+        case pb::Primitive::kDimensionValueDeprecated: {  // DEPRECATED
+          val.dataType = android::Res_value::TYPE_DIMENSION;
+          float dimen_val = pb_prim.dimension_value_deprecated();
+          val.data = *(uint32_t*)&dimen_val;
+        } break;
+        case pb::Primitive::kFractionValueDeprecated: {  // DEPRECATED
+          val.dataType = android::Res_value::TYPE_FRACTION;
+          float fraction_val = pb_prim.fraction_value_deprecated();
+          val.data = *(uint32_t*)&fraction_val;
         } break;
         default: {
           LOG(FATAL) << "Unexpected Primitive type: "

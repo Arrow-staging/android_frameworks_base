@@ -16,18 +16,22 @@
 
 package android.app;
 
+import android.app.ContentProviderHolder;
 import android.app.IInstrumentationWatcher;
 import android.app.IUiAutomationConnection;
 import android.app.ProfilerInfo;
 import android.app.ResultInfo;
 import android.app.servertransaction.ClientTransaction;
+import android.content.AutofillOptions;
 import android.content.ComponentName;
+import android.content.ContentCaptureOptions;
 import android.content.IIntentReceiver;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ProviderInfo;
+import android.content.pm.ProviderInfoList;
 import android.content.pm.ServiceInfo;
 import android.content.res.CompatibilityInfo;
 import android.content.res.Configuration;
@@ -38,6 +42,11 @@ import android.os.IBinder;
 import android.os.IInterface;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
+import android.os.RemoteCallback;
+import android.os.SharedMemory;
+import android.view.autofill.AutofillId;
+import android.view.translation.TranslationSpec;
+import android.view.translation.UiTranslationSpec;
 
 import com.android.internal.app.IVoiceInteractor;
 import com.android.internal.content.ReferrerIntent;
@@ -57,24 +66,32 @@ oneway interface IApplicationThread {
             in CompatibilityInfo compatInfo,
             int resultCode, in String data, in Bundle extras, boolean sync,
             int sendingUser, int processState);
+    @UnsupportedAppUsage
     void scheduleCreateService(IBinder token, in ServiceInfo info,
             in CompatibilityInfo compatInfo, int processState);
+    @UnsupportedAppUsage
     void scheduleStopService(IBinder token);
     void bindApplication(in String packageName, in ApplicationInfo info,
-            in List<ProviderInfo> providers, in ComponentName testName,
+            in String sdkSandboxClientAppVolumeUuid, in String sdkSandboxClientAppPackage,
+            in ProviderInfoList providerList, in ComponentName testName,
             in ProfilerInfo profilerInfo, in Bundle testArguments,
             IInstrumentationWatcher testWatcher, IUiAutomationConnection uiAutomationConnection,
             int debugMode, boolean enableBinderTracking, boolean trackAllocation,
             boolean restrictedBackupMode, boolean persistent, in Configuration config,
             in CompatibilityInfo compatInfo, in Map services,
-            in Bundle coreSettings, in String buildSerial, boolean isAutofillCompatEnabled);
+            in Bundle coreSettings, in String buildSerial, in AutofillOptions autofillOptions,
+            in ContentCaptureOptions contentCaptureOptions, in long[] disabledCompatChanges,
+            in SharedMemory serializedSystemFontMap,
+            long startRequestedElapsedTime, long startRequestedUptime);
     void runIsolatedEntryPoint(in String entryPoint, in String[] entryPointArgs);
     void scheduleExit();
     void scheduleServiceArgs(IBinder token, in ParceledListSlice args);
     void updateTimeZone();
     void processInBackground();
+    @UnsupportedAppUsage
     void scheduleBindService(IBinder token,
             in Intent intent, boolean rebind, int processState);
+    @UnsupportedAppUsage
     void scheduleUnbindService(IBinder token,
             in Intent intent);
     void dumpService(in ParcelFileDescriptor fd, IBinder servicetoken,
@@ -83,26 +100,26 @@ oneway interface IApplicationThread {
             int resultCode, in String data, in Bundle extras, boolean ordered,
             boolean sticky, int sendingUser, int processState);
     void scheduleLowMemory();
-    void scheduleSleeping(IBinder token, boolean sleeping);
     void profilerControl(boolean start, in ProfilerInfo profilerInfo, int profileType);
     void setSchedulingGroup(int group);
     void scheduleCreateBackupAgent(in ApplicationInfo app, in CompatibilityInfo compatInfo,
-            int backupMode);
+            int backupMode, int userId, int operationType);
     void scheduleDestroyBackupAgent(in ApplicationInfo app,
-            in CompatibilityInfo compatInfo);
+            in CompatibilityInfo compatInfo, int userId);
     void scheduleOnNewActivityOptions(IBinder token, in Bundle options);
     void scheduleSuicide();
     void dispatchPackageBroadcast(int cmd, in String[] packages);
-    void scheduleCrash(in String msg);
+    void scheduleCrash(in String msg, int typeId, in Bundle extras);
     void dumpHeap(boolean managed, boolean mallocInfo, boolean runGc, in String path,
-            in ParcelFileDescriptor fd);
+            in ParcelFileDescriptor fd, in RemoteCallback finishCallback);
     void dumpActivity(in ParcelFileDescriptor fd, IBinder servicetoken, in String prefix,
             in String[] args);
+    void dumpResources(in ParcelFileDescriptor fd, in RemoteCallback finishCallback);
     void clearDnsCache();
-    void setHttpProxy(in String proxy, in String port, in String exclList,
-            in Uri pacFileUrl);
+    void updateHttpProxy();
     void setCoreSettings(in Bundle coreSettings);
     void updatePackageCompatibilityInfo(in String pkg, in CompatibilityInfo info);
+    @UnsupportedAppUsage
     void scheduleTrimMemory(int level);
     void dumpMemInfo(in ParcelFileDescriptor fd, in Debug.MemoryInfo mem, boolean checkin,
             boolean dumpInfo, boolean dumpDalvik, boolean dumpSummaryOnly, boolean dumpUnreachable,
@@ -111,6 +128,7 @@ oneway interface IApplicationThread {
             boolean dumpInfo, boolean dumpDalvik, boolean dumpSummaryOnly, boolean dumpUnreachable,
             in String[] args);
     void dumpGfxInfo(in ParcelFileDescriptor fd, in String[] args);
+    void dumpCacheInfo(in ParcelFileDescriptor fd, in String[] args);
     void dumpProvider(in ParcelFileDescriptor fd, IBinder servicetoken,
             in String[] args);
     void dumpDbInfo(in ParcelFileDescriptor fd, in String[] args);
@@ -129,7 +147,23 @@ oneway interface IApplicationThread {
             IVoiceInteractor voiceInteractor);
     void handleTrustStorageUpdate();
     void attachAgent(String path);
+    void attachStartupAgents(String dataDir);
     void scheduleApplicationInfoChanged(in ApplicationInfo ai);
     void setNetworkBlockSeq(long procStateSeq);
     void scheduleTransaction(in ClientTransaction transaction);
+    void requestDirectActions(IBinder activityToken, IVoiceInteractor intractor,
+            in RemoteCallback cancellationCallback, in RemoteCallback callback);
+    void performDirectAction(IBinder activityToken, String actionId,
+            in Bundle arguments, in RemoteCallback cancellationCallback,
+            in RemoteCallback resultCallback);
+    void notifyContentProviderPublishStatus(in ContentProviderHolder holder, String authorities,
+            int userId, boolean published);
+    void instrumentWithoutRestart(in ComponentName instrumentationName,
+            in Bundle instrumentationArgs,
+            IInstrumentationWatcher instrumentationWatcher,
+            IUiAutomationConnection instrumentationUiConnection,
+            in ApplicationInfo targetInfo);
+    void updateUiTranslationState(IBinder activityToken, int state, in TranslationSpec sourceSpec,
+            in TranslationSpec targetSpec, in List<AutofillId> viewIds,
+            in UiTranslationSpec uiTranslationSpec);
 }

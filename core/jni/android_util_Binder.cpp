@@ -23,20 +23,24 @@
 #include <atomic>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <mutex>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <android-base/stringprintf.h>
-#include <binder/IInterface.h>
-#include <binder/IServiceManager.h>
-#include <binder/IPCThreadState.h>
-#include <binder/Parcel.h>
 #include <binder/BpBinder.h>
+#include <binder/IInterface.h>
+#include <binder/IPCThreadState.h>
+#include <binder/IServiceManager.h>
+#include <binder/Parcel.h>
 #include <binder/ProcessState.h>
+#include <binder/Stability.h>
+#include <binderthreadstate/CallerUtils.h>
+#include <cutils/atomic.h>
+#include <cutils/threads.h>
 #include <log/log.h>
-#include <utils/Atomic.h>
 #include <utils/KeyedVector.h>
 #include <utils/List.h>
 #include <utils/Log.h>
@@ -69,6 +73,7 @@ static struct bindernative_offsets_t
     // Class state.
     jclass mClass;
     jmethodID mExecTransact;
+    jmethodID mGetInterfaceDescriptor;
 
     // Object state.
     jfieldID mObject;
@@ -97,7 +102,9 @@ static struct sparseintarray_offsets_t
 
 static struct error_offsets_t
 {
-    jclass mClass;
+    jclass mError;
+    jclass mOutOfMemory;
+    jclass mStackOverflow;
 } gErrorOffsets;
 
 // ----------------------------------------------------------------------------
@@ -154,9 +161,8 @@ static struct thread_dispatch_offsets_t
 static constexpr int32_t PROXY_WARN_INTERVAL = 5000;
 static constexpr uint32_t GC_INTERVAL = 1000;
 
-// Protected by gProxyLock. We warn if this gets too large.
-static int32_t gNumProxies = 0;
-static int32_t gProxiesWarned = 0;
+static std::atomic<uint32_t> gNumProxies(0);
+static std::atomic<uint32_t> gProxiesWarned(0);
 
 // Number of GlobalRefs held by JavaBBinders.
 static std::atomic<uint32_t> gNumLocalRefsCreated(0);
@@ -206,6 +212,16 @@ static JNIEnv* javavm_to_jnienv(JavaVM* vm)
     return vm->GetEnv((void **)&env, JNI_VERSION_1_4) >= 0 ? env : NULL;
 }
 
+static const char* GetErrorTypeName(JNIEnv* env, jthrowable error) {
+  if (env->IsInstanceOf(error, gErrorOffsets.mOutOfMemory)) {
+    return "OutOfMemoryError";
+  }
+  if (env->IsInstanceOf(error, gErrorOffsets.mStackOverflow)) {
+    return "StackOverflowError";
+  }
+  return nullptr;
+}
+
 // Report a java.lang.Error (or subclass). This will terminate the runtime by
 // calling FatalError with a message derived from the given error.
 static void report_java_lang_error_fatal_error(JNIEnv* env, jthrowable error,
@@ -215,7 +231,7 @@ static void report_java_lang_error_fatal_error(JNIEnv* env, jthrowable error,
 
     // Try to get the exception string. Sometimes logcat isn't available,
     // so try to add it to the abort message.
-    std::string exc_msg = "(Unknown exception message)";
+    std::string exc_msg;
     {
         ScopedLocalRef<jclass> exc_class(env, env->GetObjectClass(error));
         jmethodID method_id = env->GetMethodID(exc_class.get(), "toString",
@@ -224,13 +240,34 @@ static void report_java_lang_error_fatal_error(JNIEnv* env, jthrowable error,
                 env,
                 reinterpret_cast<jstring>(
                         env->CallObjectMethod(error, method_id)));
-        env->ExceptionClear();  // Just for good measure.
+        ScopedLocalRef<jthrowable> new_error(env, nullptr);
+        bool got_jstr = false;
+        if (env->ExceptionCheck()) {
+            new_error = ScopedLocalRef<jthrowable>(env, env->ExceptionOccurred());
+            env->ExceptionClear();
+        }
         if (jstr.get() != nullptr) {
             ScopedUtfChars jstr_utf(env, jstr.get());
             if (jstr_utf.c_str() != nullptr) {
                 exc_msg = jstr_utf.c_str();
+                got_jstr = true;
             } else {
+                new_error = ScopedLocalRef<jthrowable>(env, env->ExceptionOccurred());
                 env->ExceptionClear();
+            }
+        }
+        if (!got_jstr) {
+            exc_msg = "(Unknown exception message)";
+            const char* orig_type = GetErrorTypeName(env, error);
+            if (orig_type != nullptr) {
+                exc_msg = base::StringPrintf("%s (Error was %s)", exc_msg.c_str(), orig_type);
+            }
+            const char* new_type =
+                new_error == nullptr ? nullptr : GetErrorTypeName(env, new_error.get());
+            if (new_type != nullptr) {
+                exc_msg = base::StringPrintf("%s (toString() error was %s)",
+                                             exc_msg.c_str(),
+                                             new_type);
             }
         }
     }
@@ -266,8 +303,9 @@ static void report_java_lang_error(JNIEnv* env, jthrowable error, const char* ms
     report_java_lang_error_fatal_error(env, error, msg);
 }
 
-static void report_exception(JNIEnv* env, jthrowable excep, const char* msg)
-{
+namespace android {
+
+void binder_report_exception(JNIEnv* env, jthrowable excep, const char* msg) {
     env->ExceptionClear();
 
     ScopedLocalRef<jstring> tagstr(env, env->NewStringUTF(LOG_TAG));
@@ -290,10 +328,12 @@ static void report_exception(JNIEnv* env, jthrowable excep, const char* msg)
         ALOGE("%s", msg);
     }
 
-    if (env->IsInstanceOf(excep, gErrorOffsets.mClass)) {
+    if (env->IsInstanceOf(excep, gErrorOffsets.mError)) {
         report_java_lang_error(env, excep, msg);
     }
 }
+
+} // namespace android
 
 class JavaBBinderHolder;
 
@@ -327,10 +367,37 @@ protected:
         env->DeleteGlobalRef(mObject);
     }
 
-    virtual status_t onTransact(
-        uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags = 0)
+    const String16& getInterfaceDescriptor() const override
+    {
+        call_once(mPopulateDescriptor, [this] {
+            JNIEnv* env = javavm_to_jnienv(mVM);
+
+            ALOGV("getInterfaceDescriptor() on %p calling object %p in env %p vm %p\n", this, mObject, env, mVM);
+
+            jstring descriptor = (jstring)env->CallObjectMethod(mObject, gBinderOffsets.mGetInterfaceDescriptor);
+
+            if (descriptor == nullptr) {
+                return;
+            }
+
+            static_assert(sizeof(jchar) == sizeof(char16_t), "");
+            const jchar* descriptorChars = env->GetStringChars(descriptor, nullptr);
+            const char16_t* rawDescriptor = reinterpret_cast<const char16_t*>(descriptorChars);
+            jsize rawDescriptorLen = env->GetStringLength(descriptor);
+            mDescriptor = String16(rawDescriptor, rawDescriptorLen);
+            env->ReleaseStringChars(descriptor, descriptorChars);
+        });
+
+        return mDescriptor;
+    }
+
+    status_t onTransact(
+        uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags = 0) override
     {
         JNIEnv* env = javavm_to_jnienv(mVM);
+
+        LOG_ALWAYS_FATAL_IF(env == nullptr,
+                            "Binder thread started or Java binder used, but env null. Attach JVM?");
 
         ALOGV("onTransact() on %p calling object %p in env %p vm %p\n", this, mObject, env, mVM);
 
@@ -345,9 +412,9 @@ protected:
 
         if (env->ExceptionCheck()) {
             ScopedLocalRef<jthrowable> excep(env, env->ExceptionOccurred());
-            report_exception(env, excep.get(),
-                "*** Uncaught remote exception!  "
-                "(Exceptions are not yet supported across processes.)");
+            binder_report_exception(env, excep.get(),
+                                    "*** Uncaught remote exception!  "
+                                    "(Exceptions are not yet supported across processes.)");
             res = JNI_FALSE;
         }
 
@@ -361,8 +428,8 @@ protected:
 
         if (env->ExceptionCheck()) {
             ScopedLocalRef<jthrowable> excep(env, env->ExceptionOccurred());
-            report_exception(env, excep.get(),
-                "*** Uncaught exception in onBinderStrictModePolicyChange");
+            binder_report_exception(env, excep.get(),
+                                    "*** Uncaught exception in onBinderStrictModePolicyChange");
         }
 
         // Need to always call through the native implementation of
@@ -377,7 +444,7 @@ protected:
         return res != JNI_FALSE ? NO_ERROR : UNKNOWN_TRANSACTION;
     }
 
-    virtual status_t dump(int fd, const Vector<String16>& args)
+    status_t dump(int fd, const Vector<String16>& args) override
     {
         return 0;
     }
@@ -385,6 +452,9 @@ protected:
 private:
     JavaVM* const   mVM;
     jobject const   mObject;  // GlobalRef to Java Binder
+
+    mutable std::once_flag mPopulateDescriptor;
+    mutable String16 mDescriptor;
 };
 
 // ----------------------------------------------------------------------------
@@ -398,6 +468,12 @@ public:
         sp<JavaBBinder> b = mBinder.promote();
         if (b == NULL) {
             b = new JavaBBinder(env, obj);
+            if (mVintf) {
+                ::android::internal::Stability::markVintf(b.get());
+            }
+            if (mExtension != nullptr) {
+                b.get()->setExtension(mExtension);
+            }
             mBinder = b;
             ALOGV("Creating JavaBinder %p (refs %p) for Object %p, weakCount=%" PRId32 "\n",
                  b.get(), b->getWeakRefs(), obj, b->getWeakRefs()->getWeakCount());
@@ -412,9 +488,44 @@ public:
         return mBinder.promote();
     }
 
+    void markVintf() {
+        AutoMutex _l(mLock);
+        mVintf = true;
+    }
+
+    void forceDowngradeToSystemStability() {
+        AutoMutex _l(mLock);
+        mVintf = false;
+    }
+
+    sp<IBinder> getExtension() {
+        AutoMutex _l(mLock);
+        sp<JavaBBinder> b = mBinder.promote();
+        if (b != nullptr) {
+            return b.get()->getExtension();
+        }
+        return mExtension;
+    }
+
+    void setExtension(const sp<IBinder>& extension) {
+        AutoMutex _l(mLock);
+        mExtension = extension;
+        sp<JavaBBinder> b = mBinder.promote();
+        if (b != nullptr) {
+            b.get()->setExtension(mExtension);
+        }
+    }
+
 private:
     Mutex           mLock;
     wp<JavaBBinder> mBinder;
+
+    // in the future, we might condense this into int32_t stability, or if there
+    // is too much binder state here, we can think about making JavaBBinder an
+    // sp here (avoid recreating it)
+    bool            mVintf = false;
+
+    sp<IBinder>     mExtension;
 };
 
 // ----------------------------------------------------------------------------
@@ -463,13 +574,14 @@ public:
         LOGDEATH("Receiving binderDied() on JavaDeathRecipient %p\n", this);
         if (mObject != NULL) {
             JNIEnv* env = javavm_to_jnienv(mVM);
-
+            ScopedLocalRef<jobject> jBinderProxy(env, javaObjectForIBinder(env, who.promote()));
             env->CallStaticVoidMethod(gBinderProxyOffsets.mClass,
-                    gBinderProxyOffsets.mSendDeathNotice, mObject);
+                                      gBinderProxyOffsets.mSendDeathNotice, mObject,
+                                      jBinderProxy.get());
             if (env->ExceptionCheck()) {
                 jthrowable excep = env->ExceptionOccurred();
-                report_exception(env, excep,
-                        "*** Uncaught exception returned from death notification!");
+                binder_report_exception(env, excep,
+                                        "*** Uncaught exception returned from death notification!");
             }
 
             // Serialize with our containing DeathRecipientList so that we can't
@@ -631,17 +743,14 @@ BinderProxyNativeData* getBPNativeData(JNIEnv* env, jobject obj) {
     return (BinderProxyNativeData *) env->GetLongField(obj, gBinderProxyOffsets.mNativeData);
 }
 
-static Mutex gProxyLock;
-
-// We may cache a single BinderProxyNativeData node to avoid repeat allocation.
-// All fields are null. Protected by gProxyLock.
-static BinderProxyNativeData *gNativeDataCache;
-
 // If the argument is a JavaBBinder, return the Java object that was used to create it.
 // Otherwise return a BinderProxy for the IBinder. If a previous call was passed the
 // same IBinder, and the original BinderProxy is still alive, return the same BinderProxy.
 jobject javaObjectForIBinder(JNIEnv* env, const sp<IBinder>& val)
 {
+    // N.B. This function is called from a @FastNative JNI method, so don't take locks around
+    // calls to Java code or block the calling thread for a long time for any reason.
+
     if (val == NULL) return NULL;
 
     if (val->checkSubclass(&gBinderOffsets)) {
@@ -651,35 +760,31 @@ jobject javaObjectForIBinder(JNIEnv* env, const sp<IBinder>& val)
         return object;
     }
 
-    // For the rest of the function we will hold this lock, to serialize
-    // looking/creation/destruction of Java proxies for native Binder proxies.
-    AutoMutex _l(gProxyLock);
+    BinderProxyNativeData* nativeData = new BinderProxyNativeData();
+    nativeData->mOrgue = new DeathRecipientList;
+    nativeData->mObject = val;
 
-    BinderProxyNativeData* nativeData = gNativeDataCache;
-    if (nativeData == nullptr) {
-        nativeData = new BinderProxyNativeData();
-    }
-    // gNativeDataCache is now logically empty.
     jobject object = env->CallStaticObjectMethod(gBinderProxyOffsets.mClass,
             gBinderProxyOffsets.mGetInstance, (jlong) nativeData, (jlong) val.get());
     if (env->ExceptionCheck()) {
-        gNativeDataCache = nativeData;
+        // In the exception case, getInstance still took ownership of nativeData.
         return NULL;
     }
     BinderProxyNativeData* actualNativeData = getBPNativeData(env, object);
     if (actualNativeData == nativeData) {
-        // New BinderProxy; we still have exclusive access.
-        nativeData->mOrgue = new DeathRecipientList;
-        nativeData->mObject = val;
-        gNativeDataCache = nullptr;
-        ++gNumProxies;
-        if (gNumProxies >= gProxiesWarned + PROXY_WARN_INTERVAL) {
-            ALOGW("Unexpectedly many live BinderProxies: %d\n", gNumProxies);
-            gProxiesWarned = gNumProxies;
+        // Created a new Proxy
+        uint32_t numProxies = gNumProxies.fetch_add(1, std::memory_order_relaxed);
+        uint32_t numLastWarned = gProxiesWarned.load(std::memory_order_relaxed);
+        if (numProxies >= numLastWarned + PROXY_WARN_INTERVAL) {
+            // Multiple threads can get here, make sure only one of them gets to
+            // update the warn counter.
+            if (gProxiesWarned.compare_exchange_strong(numLastWarned,
+                        numLastWarned + PROXY_WARN_INTERVAL, std::memory_order_relaxed)) {
+                ALOGW("Unexpectedly many live BinderProxies: %d\n", numProxies);
+            }
         }
     } else {
-        // nativeData wasn't used. Reuse it the next time.
-        gNativeDataCache = nativeData;
+        delete nativeData;
     }
 
     return object;
@@ -771,7 +876,7 @@ void signalExceptionForError(JNIEnv* env, jobject obj, status_t err,
             const char* exceptionToThrow;
             char msg[128];
             // TransactionTooLargeException is a checked exception, only throw from certain methods.
-            // FIXME: Transaction too large is the most common reason for FAILED_TRANSACTION
+            // TODO(b/28321379): Transaction size is the most common cause for FAILED_TRANSACTION
             //        but it is not the only one.  The Binder driver can return BR_FAILED_REPLY
             //        for other reasons also, such as if the transaction is malformed or
             //        refers to an FD that has been closed.  We should change the driver
@@ -788,8 +893,9 @@ void signalExceptionForError(JNIEnv* env, jobject obj, status_t err,
                 exceptionToThrow = (canThrowRemoteException)
                         ? "android/os/DeadObjectException"
                         : "java/lang/RuntimeException";
-                snprintf(msg, sizeof(msg)-1,
-                        "Transaction failed on small parcel; remote process probably died");
+                snprintf(msg, sizeof(msg) - 1,
+                         "Transaction failed on small parcel; remote process probably died, but "
+                         "this could also be caused by running out of binder buffer space");
             }
             jniThrowException(env, exceptionToThrow, msg);
         } break;
@@ -847,43 +953,70 @@ void signalExceptionForError(JNIEnv* env, jobject obj, status_t err,
 
 // ----------------------------------------------------------------------------
 
-static jint android_os_Binder_getCallingPid(JNIEnv* env, jobject clazz)
+static jint android_os_Binder_getCallingPid()
 {
     return IPCThreadState::self()->getCallingPid();
 }
 
-static jint android_os_Binder_getCallingUid(JNIEnv* env, jobject clazz)
+static jint android_os_Binder_getCallingUid()
 {
     return IPCThreadState::self()->getCallingUid();
 }
 
-static jlong android_os_Binder_clearCallingIdentity(JNIEnv* env, jobject clazz)
+static jboolean android_os_Binder_isDirectlyHandlingTransaction() {
+    return getCurrentServingCall() == BinderCallType::BINDER;
+}
+
+static jlong android_os_Binder_clearCallingIdentity()
 {
     return IPCThreadState::self()->clearCallingIdentity();
 }
 
-static void android_os_Binder_restoreCallingIdentity(JNIEnv* env, jobject clazz, jlong token)
+static void android_os_Binder_restoreCallingIdentity(jlong token)
 {
-    // XXX temporary sanity check to debug crashes.
-    int uid = (int)(token>>32);
-    if (uid > 0 && uid < 999) {
-        // In Android currently there are no uids in this range.
-        char buf[128];
-        sprintf(buf, "Restoring bad calling ident: 0x%" PRIx64, token);
-        jniThrowException(env, "java/lang/IllegalStateException", buf);
-        return;
-    }
     IPCThreadState::self()->restoreCallingIdentity(token);
 }
 
-static void android_os_Binder_setThreadStrictModePolicy(JNIEnv* env, jobject clazz, jint policyMask)
+static void android_os_Binder_setThreadStrictModePolicy(jint policyMask)
 {
     IPCThreadState::self()->setStrictModePolicy(policyMask);
 }
 
-static jint android_os_Binder_getThreadStrictModePolicy(JNIEnv* env, jobject clazz)
+static jint android_os_Binder_getThreadStrictModePolicy()
 {
     return IPCThreadState::self()->getStrictModePolicy();
+}
+
+static jlong android_os_Binder_setCallingWorkSourceUid(jint workSource)
+{
+    return IPCThreadState::self()->setCallingWorkSourceUid(workSource);
+}
+
+static jlong android_os_Binder_getCallingWorkSourceUid()
+{
+    return IPCThreadState::self()->getCallingWorkSourceUid();
+}
+
+static jlong android_os_Binder_clearCallingWorkSource()
+{
+    return IPCThreadState::self()->clearCallingWorkSource();
+}
+
+static void android_os_Binder_restoreCallingWorkSource(jlong token)
+{
+    IPCThreadState::self()->restoreCallingWorkSource(token);
+}
+
+static void android_os_Binder_markVintfStability(JNIEnv* env, jobject clazz) {
+    JavaBBinderHolder* jbh =
+        (JavaBBinderHolder*) env->GetLongField(clazz, gBinderOffsets.mObject);
+    jbh->markVintf();
+}
+
+static void android_os_Binder_forceDowngradeToSystemStability(JNIEnv* env, jobject clazz) {
+    JavaBBinderHolder* jbh =
+        (JavaBBinderHolder*) env->GetLongField(clazz, gBinderOffsets.mObject);
+    jbh->forceDowngradeToSystemStability();
 }
 
 static void android_os_Binder_flushPendingCommands(JNIEnv* env, jobject clazz)
@@ -913,21 +1046,53 @@ static void android_os_Binder_blockUntilThreadAvailable(JNIEnv* env, jobject cla
     return IPCThreadState::self()->blockUntilThreadAvailable();
 }
 
+static jobject android_os_Binder_getExtension(JNIEnv* env, jobject obj) {
+    JavaBBinderHolder* jbh = (JavaBBinderHolder*) env->GetLongField(obj, gBinderOffsets.mObject);
+    return javaObjectForIBinder(env, jbh->getExtension());
+}
+
+static void android_os_Binder_setExtension(JNIEnv* env, jobject obj, jobject extensionObject) {
+    JavaBBinderHolder* jbh = (JavaBBinderHolder*) env->GetLongField(obj, gBinderOffsets.mObject);
+    sp<IBinder> extension = ibinderForJavaObject(env, extensionObject);
+    jbh->setExtension(extension);
+}
+
 // ----------------------------------------------------------------------------
 
+// clang-format off
 static const JNINativeMethod gBinderMethods[] = {
      /* name, signature, funcPtr */
+    // @CriticalNative
     { "getCallingPid", "()I", (void*)android_os_Binder_getCallingPid },
+    // @CriticalNative
     { "getCallingUid", "()I", (void*)android_os_Binder_getCallingUid },
+    // @CriticalNative
+    { "isDirectlyHandlingTransaction", "()Z", (void*)android_os_Binder_isDirectlyHandlingTransaction },
+    // @CriticalNative
     { "clearCallingIdentity", "()J", (void*)android_os_Binder_clearCallingIdentity },
+    // @CriticalNative
     { "restoreCallingIdentity", "(J)V", (void*)android_os_Binder_restoreCallingIdentity },
+    // @CriticalNative
     { "setThreadStrictModePolicy", "(I)V", (void*)android_os_Binder_setThreadStrictModePolicy },
+    // @CriticalNative
     { "getThreadStrictModePolicy", "()I", (void*)android_os_Binder_getThreadStrictModePolicy },
+    // @CriticalNative
+    { "setCallingWorkSourceUid", "(I)J", (void*)android_os_Binder_setCallingWorkSourceUid },
+    // @CriticalNative
+    { "getCallingWorkSourceUid", "()I", (void*)android_os_Binder_getCallingWorkSourceUid },
+    // @CriticalNative
+    { "clearCallingWorkSource", "()J", (void*)android_os_Binder_clearCallingWorkSource },
+    { "restoreCallingWorkSource", "(J)V", (void*)android_os_Binder_restoreCallingWorkSource },
+    { "markVintfStability", "()V", (void*)android_os_Binder_markVintfStability},
+    { "forceDowngradeToSystemStability", "()V", (void*)android_os_Binder_forceDowngradeToSystemStability},
     { "flushPendingCommands", "()V", (void*)android_os_Binder_flushPendingCommands },
     { "getNativeBBinderHolder", "()J", (void*)android_os_Binder_getNativeBBinderHolder },
     { "getNativeFinalizer", "()J", (void*)android_os_Binder_getNativeFinalizer },
-    { "blockUntilThreadAvailable", "()V", (void*)android_os_Binder_blockUntilThreadAvailable }
+    { "blockUntilThreadAvailable", "()V", (void*)android_os_Binder_blockUntilThreadAvailable },
+    { "getExtension", "()Landroid/os/IBinder;", (void*)android_os_Binder_getExtension },
+    { "setExtension", "(Landroid/os/IBinder;)V", (void*)android_os_Binder_setExtension },
 };
+// clang-format on
 
 const char* const kBinderPathName = "android/os/Binder";
 
@@ -937,6 +1102,8 @@ static int int_register_android_os_Binder(JNIEnv* env)
 
     gBinderOffsets.mClass = MakeGlobalRefOrDie(env, clazz);
     gBinderOffsets.mExecTransact = GetMethodIDOrDie(env, clazz, "execTransact", "(IJJI)Z");
+    gBinderOffsets.mGetInterfaceDescriptor = GetMethodIDOrDie(env, clazz, "getInterfaceDescriptor",
+        "()Ljava/lang/String;");
     gBinderOffsets.mObject = GetFieldIDOrDie(env, clazz, "mObject", "J");
 
     return RegisterMethodsOrDie(
@@ -957,8 +1124,7 @@ jint android_os_Debug_getLocalObjectCount(JNIEnv* env, jobject clazz)
 
 jint android_os_Debug_getProxyObjectCount(JNIEnv* env, jobject clazz)
 {
-    AutoMutex _l(gProxyLock);
-    return gNumProxies;
+    return gNumProxies.load();
 }
 
 jint android_os_Debug_getDeathObjectCount(JNIEnv* env, jobject clazz)
@@ -1008,6 +1174,12 @@ static void android_os_BinderInternal_proxyLimitcallback(int uid)
     env->CallStaticVoidMethod(gBinderInternalOffsets.mClass,
                               gBinderInternalOffsets.mProxyLimitCallback,
                               uid);
+
+    if (env->ExceptionCheck()) {
+        ScopedLocalRef<jthrowable> excep(env, env->ExceptionOccurred());
+        binder_report_exception(env, excep.get(),
+                                "*** Uncaught exception in binderProxyLimitCallbackFromNative");
+    }
 }
 
 static void android_os_BinderInternal_setBinderProxyCountEnabled(JNIEnv* env, jobject clazz,
@@ -1120,7 +1292,7 @@ static int getprocname(pid_t pid, char *buf, size_t len) {
     FILE *f;
 
     snprintf(filename, sizeof(filename), "/proc/%d/cmdline", pid);
-    f = fopen(filename, "r");
+    f = fopen(filename, "re");
     if (!f) {
         *buf = '\0';
         return 1;
@@ -1338,7 +1510,9 @@ static jboolean android_os_BinderProxy_unlinkToDeath(JNIEnv* env, jobject obj,
             res = JNI_TRUE;
         } else {
             jniThrowException(env, "java/util/NoSuchElementException",
-                              "Death link does not exist");
+                              base::StringPrintf("Death link does not exist (%s)",
+                                                 statusToString(err).c_str())
+                                      .c_str());
         }
     }
 
@@ -1347,9 +1521,6 @@ static jboolean android_os_BinderProxy_unlinkToDeath(JNIEnv* env, jobject obj,
 
 static void BinderProxy_destroy(void* rawNativeData)
 {
-    // Don't race with construction/initialization
-    AutoMutex _l(gProxyLock);
-
     BinderProxyNativeData * nativeData = (BinderProxyNativeData *) rawNativeData;
     LOGDEATH("Destroying BinderProxy: binder=%p drl=%p\n",
             nativeData->mObject.get(), nativeData->mOrgue.get());
@@ -1360,6 +1531,21 @@ static void BinderProxy_destroy(void* rawNativeData)
 
 JNIEXPORT jlong JNICALL android_os_BinderProxy_getNativeFinalizer(JNIEnv*, jclass) {
     return (jlong) BinderProxy_destroy;
+}
+
+static jobject android_os_BinderProxy_getExtension(JNIEnv* env, jobject obj) {
+    IBinder* binder = getBPNativeData(env, obj)->mObject.get();
+    if (binder == nullptr) {
+        jniThrowException(env, "java/lang/IllegalStateException", "Native IBinder is null");
+        return nullptr;
+    }
+    sp<IBinder> extension;
+    status_t err = binder->getExtension(&extension);
+    if (err != OK) {
+        signalExceptionForError(env, obj, err, true /* canThrowRemoteException */);
+        return nullptr;
+    }
+    return javaObjectForIBinder(env, extension);
 }
 
 // ----------------------------------------------------------------------------
@@ -1373,21 +1559,26 @@ static const JNINativeMethod gBinderProxyMethods[] = {
     {"linkToDeath",         "(Landroid/os/IBinder$DeathRecipient;I)V", (void*)android_os_BinderProxy_linkToDeath},
     {"unlinkToDeath",       "(Landroid/os/IBinder$DeathRecipient;I)Z", (void*)android_os_BinderProxy_unlinkToDeath},
     {"getNativeFinalizer",  "()J", (void*)android_os_BinderProxy_getNativeFinalizer},
+    {"getExtension",        "()Landroid/os/IBinder;", (void*)android_os_BinderProxy_getExtension},
 };
 
 const char* const kBinderProxyPathName = "android/os/BinderProxy";
 
 static int int_register_android_os_BinderProxy(JNIEnv* env)
 {
-    jclass clazz = FindClassOrDie(env, "java/lang/Error");
-    gErrorOffsets.mClass = MakeGlobalRefOrDie(env, clazz);
+    gErrorOffsets.mError = MakeGlobalRefOrDie(env, FindClassOrDie(env, "java/lang/Error"));
+    gErrorOffsets.mOutOfMemory =
+        MakeGlobalRefOrDie(env, FindClassOrDie(env, "java/lang/OutOfMemoryError"));
+    gErrorOffsets.mStackOverflow =
+        MakeGlobalRefOrDie(env, FindClassOrDie(env, "java/lang/StackOverflowError"));
 
-    clazz = FindClassOrDie(env, kBinderProxyPathName);
+    jclass clazz = FindClassOrDie(env, kBinderProxyPathName);
     gBinderProxyOffsets.mClass = MakeGlobalRefOrDie(env, clazz);
     gBinderProxyOffsets.mGetInstance = GetStaticMethodIDOrDie(env, clazz, "getInstance",
             "(JJ)Landroid/os/BinderProxy;");
-    gBinderProxyOffsets.mSendDeathNotice = GetStaticMethodIDOrDie(env, clazz, "sendDeathNotice",
-            "(Landroid/os/IBinder$DeathRecipient;)V");
+    gBinderProxyOffsets.mSendDeathNotice =
+            GetStaticMethodIDOrDie(env, clazz, "sendDeathNotice",
+                                   "(Landroid/os/IBinder$DeathRecipient;Landroid/os/IBinder;)V");
     gBinderProxyOffsets.mNativeData = GetFieldIDOrDie(env, clazz, "mNativeData", "J");
 
     clazz = FindClassOrDie(env, "java/lang/Class");

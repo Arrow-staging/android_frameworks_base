@@ -16,15 +16,21 @@
 
 package android.telephony;
 
+import android.annotation.ElapsedRealtimeLong;
+import android.annotation.NonNull;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.telephony.CarrierConfigManager;
-import android.util.Log;
-import android.content.res.Resources;
+import android.os.PersistableBundle;
+import android.os.SystemClock;
+
+import com.android.telephony.Rlog;
 
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * Contains phone signal strength related information.
@@ -35,71 +41,67 @@ public class SignalStrength implements Parcelable {
     private static final boolean DBG = false;
 
     /** @hide */
-    public static final int SIGNAL_STRENGTH_NONE_OR_UNKNOWN
-            = TelephonyProtoEnums.SIGNAL_STRENGTH_NONE_OR_UNKNOWN; // = 0
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+    public static final int SIGNAL_STRENGTH_NONE_OR_UNKNOWN =
+            CellSignalStrength.SIGNAL_STRENGTH_NONE_OR_UNKNOWN; // = 0
     /** @hide */
-    public static final int SIGNAL_STRENGTH_POOR
-            = TelephonyProtoEnums.SIGNAL_STRENGTH_POOR; // = 1
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+    public static final int SIGNAL_STRENGTH_POOR =
+            CellSignalStrength.SIGNAL_STRENGTH_POOR; // = 1
     /** @hide */
-    public static final int SIGNAL_STRENGTH_MODERATE
-            = TelephonyProtoEnums.SIGNAL_STRENGTH_MODERATE; // = 2
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+    public static final int SIGNAL_STRENGTH_MODERATE =
+            CellSignalStrength.SIGNAL_STRENGTH_MODERATE; // = 2
     /** @hide */
-    public static final int SIGNAL_STRENGTH_GOOD
-            = TelephonyProtoEnums.SIGNAL_STRENGTH_GOOD; // = 3
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+    public static final int SIGNAL_STRENGTH_GOOD =
+            CellSignalStrength.SIGNAL_STRENGTH_GOOD; // = 3
     /** @hide */
-    public static final int SIGNAL_STRENGTH_GREAT
-            = TelephonyProtoEnums.SIGNAL_STRENGTH_GREAT; // = 4
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
+    public static final int SIGNAL_STRENGTH_GREAT =
+            CellSignalStrength.SIGNAL_STRENGTH_GREAT; // = 4
     /** @hide */
+    @UnsupportedAppUsage
     public static final int NUM_SIGNAL_STRENGTH_BINS = 5;
-    /** @hide */
-    public static final String[] SIGNAL_STRENGTH_NAMES = {
-        "none", "poor", "moderate", "good", "great"
-    };
 
     /**
-     * Use Integer.MAX_VALUE because -1 is a valid value in signal strength.
-     * @hide
+     * Indicates the invalid measures of signal strength.
+     *
+     * For example, this can be returned by {@link #getEvdoDbm()} or {@link #getCdmaDbm()}
      */
     public static final int INVALID = Integer.MAX_VALUE;
 
-    private static final int LTE_RSRP_THRESHOLDS_NUM = 6;
+    private static final int LTE_RSRP_THRESHOLDS_NUM = 4;
 
-    /** Parameters reported by the Radio */
-    private int mGsmSignalStrength; // Valid values are (0-31, 99) as defined in TS 27.007 8.5
-    private int mGsmBitErrorRate;   // bit error rate (0-7, 99) as defined in TS 27.007 8.5
-    private int mCdmaDbm;   // This value is the RSSI value
-    private int mCdmaEcio;  // This value is the Ec/Io
-    private int mEvdoDbm;   // This value is the EVDO RSSI value
-    private int mEvdoEcio;  // This value is the EVDO Ec/Io
-    private int mEvdoSnr;   // Valid values are 0-8.  8 is the highest signal to noise ratio
-    private int mLteSignalStrength;
-    private int mLteRsrp;
-    private int mLteRsrq;
-    private int mLteRssnr;
-    private int mLteCqi;
-    private int mTdScdmaRscp;
+    private static final int WCDMA_RSCP_THRESHOLDS_NUM = 4;
 
-    /** Parameters from the framework */
-    private int mLteRsrpBoost; // offset to be reduced from the rsrp threshold while calculating
-                                // signal strength level
-    private boolean mIsGsm; // This value is set by the ServiceStateTracker
-                            // onSignalStrengthResult.
-    private boolean mUseOnlyRsrpForLteLevel; // Use only RSRP for the number of LTE signal bar.
+    /* The type of signal measurement */
+    private static final String MEASUREMENT_TYPE_RSCP = "rscp";
 
-    // The threshold of LTE RSRP for determining the display level of LTE signal bar.
-    private int mLteRsrpThresholds[] = new int[LTE_RSRP_THRESHOLDS_NUM];
+    // Timestamp of SignalStrength since boot
+    // Effectively final. Timestamp is set during construction of SignalStrength
+    private long mTimestampMillis;
+
+    private boolean mLteAsPrimaryInNrNsa = true;
+
+    CellSignalStrengthCdma mCdma;
+    CellSignalStrengthGsm mGsm;
+    CellSignalStrengthWcdma mWcdma;
+    CellSignalStrengthTdscdma mTdscdma;
+    CellSignalStrengthLte mLte;
+    CellSignalStrengthNr mNr;
 
     /**
      * Create a new SignalStrength from a intent notifier Bundle
      *
-     * This method is used by PhoneStateIntentReceiver and maybe by
-     * external applications.
+     * This method may be used by external applications.
      *
      * @param m Bundle from intent notifier
      * @return newly created SignalStrength
      *
      * @hide
      */
+    @UnsupportedAppUsage
     public static SignalStrength newFromBundle(Bundle m) {
         SignalStrength ret;
         ret = new SignalStrength();
@@ -108,40 +110,17 @@ public class SignalStrength implements Parcelable {
     }
 
     /**
-     * Empty constructor
-     *
-     * @hide
-     */
-    public SignalStrength() {
-        this(true);
-    }
-
-    /**
      * This constructor is used to create SignalStrength with default
-     * values and set the gsmFlag with the value passed in the input
+     * values.
      *
-     * @param gsmFlag true if Gsm Phone,false if Cdma phone
      * @return newly created SignalStrength
      * @hide
      */
-    public SignalStrength(boolean gsmFlag) {
-        mGsmSignalStrength = 99;
-        mGsmBitErrorRate = -1;
-        mCdmaDbm = -1;
-        mCdmaEcio = -1;
-        mEvdoDbm = -1;
-        mEvdoEcio = -1;
-        mEvdoSnr = -1;
-        mLteSignalStrength = 99;
-        mLteRsrp = INVALID;
-        mLteRsrq = INVALID;
-        mLteRssnr = INVALID;
-        mLteCqi = INVALID;
-        mTdScdmaRscp = INVALID;
-        mLteRsrpBoost = 0;
-        mIsGsm = gsmFlag;
-        mUseOnlyRsrpForLteLevel = false;
-        setLteRsrpThresholds(getDefaultLteRsrpThresholds());
+    @UnsupportedAppUsage
+    public SignalStrength() {
+        this(new CellSignalStrengthCdma(), new CellSignalStrengthGsm(),
+                new CellSignalStrengthWcdma(), new CellSignalStrengthTdscdma(),
+                new CellSignalStrengthLte(), new CellSignalStrengthNr());
     }
 
     /**
@@ -150,80 +129,141 @@ public class SignalStrength implements Parcelable {
      * @hide
      */
     public SignalStrength(
-            int gsmSignalStrength, int gsmBitErrorRate,
-            int cdmaDbm, int cdmaEcio,
-            int evdoDbm, int evdoEcio, int evdoSnr,
-            int lteSignalStrength, int lteRsrp, int lteRsrq, int lteRssnr, int lteCqi,
-            int tdScdmaRscp,
-            // values Added by config
-            int lteRsrpBoost, boolean gsmFlag, boolean lteLevelBaseOnRsrp) {
-        mGsmSignalStrength = gsmSignalStrength;
-        mGsmBitErrorRate = gsmBitErrorRate;
-        mCdmaDbm = cdmaDbm;
-        mCdmaEcio = cdmaEcio;
-        mEvdoDbm = evdoDbm;
-        mEvdoEcio = evdoEcio;
-        mEvdoSnr = evdoSnr;
-        mLteSignalStrength = lteSignalStrength;
-        mLteRsrp = lteRsrp;
-        mLteRsrq = lteRsrq;
-        mLteRssnr = lteRssnr;
-        mLteCqi = lteCqi;
-        mTdScdmaRscp = INVALID;
-        mLteRsrpBoost = lteRsrpBoost;
-        mIsGsm = gsmFlag;
-        mUseOnlyRsrpForLteLevel = lteLevelBaseOnRsrp;
-        setLteRsrpThresholds(getDefaultLteRsrpThresholds());
-        if (DBG) log("initialize: " + toString());
+            @NonNull CellSignalStrengthCdma cdma,
+            @NonNull CellSignalStrengthGsm gsm,
+            @NonNull CellSignalStrengthWcdma wcdma,
+            @NonNull CellSignalStrengthTdscdma tdscdma,
+            @NonNull CellSignalStrengthLte lte,
+            @NonNull CellSignalStrengthNr nr) {
+        mCdma = cdma;
+        mGsm = gsm;
+        mWcdma = wcdma;
+        mTdscdma = tdscdma;
+        mLte = lte;
+        mNr = nr;
+        mTimestampMillis = SystemClock.elapsedRealtime();
+    }
+
+    private CellSignalStrength getPrimary() {
+        // This behavior is intended to replicate the legacy behavior of getLevel() by prioritizing
+        // newer faster RATs for default/for display purposes.
+
+        if (mLteAsPrimaryInNrNsa) {
+            if (mLte.isValid()) return mLte;
+        }
+        if (mNr.isValid()) return mNr;
+        if (mLte.isValid()) return mLte;
+        if (mCdma.isValid()) return mCdma;
+        if (mTdscdma.isValid()) return mTdscdma;
+        if (mWcdma.isValid()) return mWcdma;
+        if (mGsm.isValid()) return mGsm;
+        return mLte;
     }
 
     /**
-     * Constructor for only values provided by Radio HAL
+     * Returns a List of CellSignalStrength Components of this SignalStrength Report.
      *
-     * @hide
+     * Use this API to access underlying
+     * {@link android.telephony#CellSignalStrength CellSignalStrength} objects that provide more
+     * granular information about the SignalStrength report. Only valid (non-empty)
+     * CellSignalStrengths will be returned. The order of any returned elements is not guaranteed,
+     * and the list may contain more than one instance of a CellSignalStrength type.
+     *
+     * @return a List of CellSignalStrength or an empty List if there are no valid measurements.
+     *
+     * @see android.telephony#CellSignalStrength
+     * @see android.telephony#CellSignalStrengthNr
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony#CellSignalStrengthTdscdma
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony#CellSignalStrengthGsm
      */
-    public SignalStrength(int gsmSignalStrength, int gsmBitErrorRate,
-            int cdmaDbm, int cdmaEcio,
-            int evdoDbm, int evdoEcio, int evdoSnr,
-            int lteSignalStrength, int lteRsrp, int lteRsrq, int lteRssnr, int lteCqi,
-            int tdScdmaRscp) {
-        this(gsmSignalStrength, gsmBitErrorRate, cdmaDbm, cdmaEcio,
-                evdoDbm, evdoEcio, evdoSnr, lteSignalStrength, lteRsrp,
-                lteRsrq, lteRssnr, lteCqi, tdScdmaRscp, 0, true, false);
+    @NonNull public List<CellSignalStrength> getCellSignalStrengths() {
+        return getCellSignalStrengths(CellSignalStrength.class);
     }
 
     /**
-     * Copy constructors
+     * Returns a List of CellSignalStrength Components of this SignalStrength Report.
+     *
+     * Use this API to access underlying
+     * {@link android.telephony#CellSignalStrength CellSignalStrength} objects that provide more
+     * granular information about the SignalStrength report. Only valid (non-empty)
+     * CellSignalStrengths will be returned. The order of any returned elements is not guaranteed,
+     * and the list may contain more than one instance of a CellSignalStrength type.
+     *
+     * @param clazz a class type that extends
+     *        {@link android.telephony.CellSignalStrength CellSignalStrength} to filter possible
+     *        return values.
+     * @return a List of CellSignalStrength or an empty List if there are no valid measurements.
+     *
+     * @see android.telephony#CellSignalStrength
+     * @see android.telephony#CellSignalStrengthNr
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony#CellSignalStrengthTdscdma
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony#CellSignalStrengthGsm
+     */
+    @NonNull public <T extends CellSignalStrength> List<T> getCellSignalStrengths(
+            @NonNull Class<T> clazz) {
+        List<T> cssList = new ArrayList<>(2); // Usually have 2 or fewer elems
+        if (mLte.isValid() && clazz.isAssignableFrom(CellSignalStrengthLte.class)) {
+            cssList.add((T) mLte);
+        }
+        if (mCdma.isValid() && clazz.isAssignableFrom(CellSignalStrengthCdma.class)) {
+            cssList.add((T) mCdma);
+        }
+        if (mTdscdma.isValid() && clazz.isAssignableFrom(CellSignalStrengthTdscdma.class)) {
+            cssList.add((T) mTdscdma);
+        }
+        if (mWcdma.isValid() && clazz.isAssignableFrom(CellSignalStrengthWcdma.class)) {
+            cssList.add((T) mWcdma);
+        }
+        if (mGsm.isValid() && clazz.isAssignableFrom(CellSignalStrengthGsm.class)) {
+            cssList.add((T) mGsm);
+        }
+        if (mNr.isValid() && clazz.isAssignableFrom(CellSignalStrengthNr.class)) {
+            cssList.add((T) mNr);
+        }
+        return cssList;
+    }
+
+    /** @hide */
+    public void updateLevel(PersistableBundle cc, ServiceState ss) {
+        if (cc != null) {
+            mLteAsPrimaryInNrNsa = cc.getBoolean(
+                    CarrierConfigManager.KEY_SIGNAL_STRENGTH_NR_NSA_USE_LTE_AS_PRIMARY_BOOL, true);
+        }
+        mCdma.updateLevel(cc, ss);
+        mGsm.updateLevel(cc, ss);
+        mWcdma.updateLevel(cc, ss);
+        mTdscdma.updateLevel(cc, ss);
+        mLte.updateLevel(cc, ss);
+        mNr.updateLevel(cc, ss);
+    }
+
+    /**
+     * This constructor is used to create a copy of an existing SignalStrength object.
      *
      * @param s Source SignalStrength
-     *
-     * @hide
      */
-    public SignalStrength(SignalStrength s) {
+    public SignalStrength(@NonNull SignalStrength s) {
         copyFrom(s);
     }
 
     /**
      * @hide
      */
+    @UnsupportedAppUsage
     protected void copyFrom(SignalStrength s) {
-        mGsmSignalStrength = s.mGsmSignalStrength;
-        mGsmBitErrorRate = s.mGsmBitErrorRate;
-        mCdmaDbm = s.mCdmaDbm;
-        mCdmaEcio = s.mCdmaEcio;
-        mEvdoDbm = s.mEvdoDbm;
-        mEvdoEcio = s.mEvdoEcio;
-        mEvdoSnr = s.mEvdoSnr;
-        mLteSignalStrength = s.mLteSignalStrength;
-        mLteRsrp = s.mLteRsrp;
-        mLteRsrq = s.mLteRsrq;
-        mLteRssnr = s.mLteRssnr;
-        mLteCqi = s.mLteCqi;
-        mTdScdmaRscp = s.mTdScdmaRscp;
-        mLteRsrpBoost = s.mLteRsrpBoost;
-        mIsGsm = s.mIsGsm;
-        mUseOnlyRsrpForLteLevel = s.mUseOnlyRsrpForLteLevel;
-        setLteRsrpThresholds(s.mLteRsrpThresholds);
+        mCdma = new CellSignalStrengthCdma(s.mCdma);
+        mGsm = new CellSignalStrengthGsm(s.mGsm);
+        mWcdma = new CellSignalStrengthWcdma(s.mWcdma);
+        mTdscdma = new CellSignalStrengthTdscdma(s.mTdscdma);
+        mLte = new CellSignalStrengthLte(s.mLte);
+        mNr = new CellSignalStrengthNr(s.mNr);
+        mTimestampMillis = s.getTimestampMillis();
     }
 
     /**
@@ -231,52 +271,43 @@ public class SignalStrength implements Parcelable {
      *
      * @hide
      */
+    @UnsupportedAppUsage
     public SignalStrength(Parcel in) {
         if (DBG) log("Size of signalstrength parcel:" + in.dataSize());
 
-        mGsmSignalStrength = in.readInt();
-        mGsmBitErrorRate = in.readInt();
-        mCdmaDbm = in.readInt();
-        mCdmaEcio = in.readInt();
-        mEvdoDbm = in.readInt();
-        mEvdoEcio = in.readInt();
-        mEvdoSnr = in.readInt();
-        mLteSignalStrength = in.readInt();
-        mLteRsrp = in.readInt();
-        mLteRsrq = in.readInt();
-        mLteRssnr = in.readInt();
-        mLteCqi = in.readInt();
-        mTdScdmaRscp = in.readInt();
-        mLteRsrpBoost = in.readInt();
-        mIsGsm = in.readBoolean();
-        mUseOnlyRsrpForLteLevel = in.readBoolean();
-        in.readIntArray(mLteRsrpThresholds);
+        mCdma = in.readParcelable(CellSignalStrengthCdma.class.getClassLoader(), android.telephony.CellSignalStrengthCdma.class);
+        mGsm = in.readParcelable(CellSignalStrengthGsm.class.getClassLoader(), android.telephony.CellSignalStrengthGsm.class);
+        mWcdma = in.readParcelable(CellSignalStrengthWcdma.class.getClassLoader(), android.telephony.CellSignalStrengthWcdma.class);
+        mTdscdma = in.readParcelable(CellSignalStrengthTdscdma.class.getClassLoader(), android.telephony.CellSignalStrengthTdscdma.class);
+        mLte = in.readParcelable(CellSignalStrengthLte.class.getClassLoader(), android.telephony.CellSignalStrengthLte.class);
+        mNr = in.readParcelable(CellSignalStrengthLte.class.getClassLoader(), android.telephony.CellSignalStrengthNr.class);
+        mTimestampMillis = in.readLong();
     }
 
     /**
      * {@link Parcelable#writeToParcel}
      */
     public void writeToParcel(Parcel out, int flags) {
-        out.writeInt(mGsmSignalStrength);
-        out.writeInt(mGsmBitErrorRate);
-        out.writeInt(mCdmaDbm);
-        out.writeInt(mCdmaEcio);
-        out.writeInt(mEvdoDbm);
-        out.writeInt(mEvdoEcio);
-        out.writeInt(mEvdoSnr);
-        out.writeInt(mLteSignalStrength);
-        out.writeInt(mLteRsrp);
-        out.writeInt(mLteRsrq);
-        out.writeInt(mLteRssnr);
-        out.writeInt(mLteCqi);
-        out.writeInt(mTdScdmaRscp);
-        out.writeInt(mLteRsrpBoost);
-        out.writeBoolean(mIsGsm);
-        out.writeBoolean(mUseOnlyRsrpForLteLevel);
-        out.writeIntArray(mLteRsrpThresholds);
+        out.writeParcelable(mCdma, flags);
+        out.writeParcelable(mGsm, flags);
+        out.writeParcelable(mWcdma, flags);
+        out.writeParcelable(mTdscdma, flags);
+        out.writeParcelable(mLte, flags);
+        out.writeParcelable(mNr, flags);
+        out.writeLong(mTimestampMillis);
     }
 
     /**
+     * @return timestamp in milliseconds since boot for {@link SignalStrength}.
+     * This timestamp reports the approximate time that the signal was measured and reported
+     * by the modem. It can be used to compare the recency of {@link SignalStrength} instances.
+     */
+    @ElapsedRealtimeLong
+    public long getTimestampMillis() {
+        return mTimestampMillis;
+    }
+
+   /**
      * {@link Parcelable#describeContents}
      */
     public int describeContents() {
@@ -286,193 +317,191 @@ public class SignalStrength implements Parcelable {
     /**
      * {@link Parcelable.Creator}
      *
-     * @hide
      */
-    public static final Parcelable.Creator<SignalStrength> CREATOR = new Parcelable.Creator() {
-        public SignalStrength createFromParcel(Parcel in) {
-            return new SignalStrength(in);
-        }
+    public static final @android.annotation.NonNull Parcelable.Creator<SignalStrength> CREATOR =
+            new Parcelable.Creator<SignalStrength>() {
+                public SignalStrength createFromParcel(Parcel in) {
+                    return new SignalStrength(in);
+                }
 
-        public SignalStrength[] newArray(int size) {
-            return new SignalStrength[size];
-        }
+                public SignalStrength[] newArray(int size) {
+                    return new SignalStrength[size];
+                }
     };
 
     /**
-     * Validate the individual signal strength fields as per the range
-     * specified in ril.h
-     * Set to invalid any field that is not in the valid range
-     * Cdma, evdo, lte rsrp & rsrq values are sign converted
-     * when received from ril interface
+     * Get the GSM RSSI in ASU.
      *
-     * @return
-     *      Valid values for all signalstrength fields
-     * @hide
+     * Asu is calculated based on 3GPP RSRP. Refer to 3GPP 27.007 (Ver 10.3.0) Sec 8.69
+     *
+     * @return RSSI in ASU 0..31, 99, or UNAVAILABLE
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthGsm#getAsuLevel}.
+     * @see android.telephony#CellSignalStrengthGsm
+     * @see android.telephony.SignalStrength#getCellSignalStrengths
      */
-    public void validateInput() {
-        if (DBG) log("Signal before validate=" + this);
-        // TS 27.007 8.5
-        mGsmSignalStrength = mGsmSignalStrength >= 0 ? mGsmSignalStrength : 99;
-        // BER no change;
-
-        mCdmaDbm = mCdmaDbm > 0 ? -mCdmaDbm : -120;
-        mCdmaEcio = (mCdmaEcio > 0) ? -mCdmaEcio : -160;
-
-        mEvdoDbm = (mEvdoDbm > 0) ? -mEvdoDbm : -120;
-        mEvdoEcio = (mEvdoEcio >= 0) ? -mEvdoEcio : -1;
-        mEvdoSnr = ((mEvdoSnr > 0) && (mEvdoSnr <= 8)) ? mEvdoSnr : -1;
-
-        // TS 36.214 Physical Layer Section 5.1.3, TS 36.331 RRC
-        mLteSignalStrength = (mLteSignalStrength >= 0) ? mLteSignalStrength : 99;
-        mLteRsrp = ((mLteRsrp >= 44) && (mLteRsrp <= 140)) ? -mLteRsrp : SignalStrength.INVALID;
-        mLteRsrq = ((mLteRsrq >= 3) && (mLteRsrq <= 20)) ? -mLteRsrq : SignalStrength.INVALID;
-        mLteRssnr = ((mLteRssnr >= -200) && (mLteRssnr <= 300)) ? mLteRssnr
-                : SignalStrength.INVALID;
-
-        mTdScdmaRscp = ((mTdScdmaRscp >= 25) && (mTdScdmaRscp <= 120))
-                ? -mTdScdmaRscp : SignalStrength.INVALID;
-        // Cqi no change
-        if (DBG) log("Signal after validate=" + this);
-    }
-
-    /**
-     * Fix {@link #mIsGsm} based on the signal strength data.
-     *
-     * @hide
-     */
-    public void fixType() {
-        mIsGsm = getCdmaRelatedSignalStrength() == SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-    }
-
-    /**
-     * @param true - Gsm, Lte phones
-     *        false - Cdma phones
-     *
-     * Used by voice phone to set the mIsGsm
-     *        flag
-     * @hide
-     */
-    public void setGsm(boolean gsmFlag) {
-        mIsGsm = gsmFlag;
-    }
-
-    /**
-     * @param useOnlyRsrpForLteLevel true if it uses only RSRP for the number of LTE signal bar,
-     * otherwise false.
-     *
-     * Used by phone to use only RSRP or not for the number of LTE signal bar.
-     * @hide
-     */
-    public void setUseOnlyRsrpForLteLevel(boolean useOnlyRsrpForLteLevel) {
-        mUseOnlyRsrpForLteLevel = useOnlyRsrpForLteLevel;
-    }
-
-    /**
-     * @param lteRsrpBoost - signal strength offset
-     *
-     * Used by phone to set the lte signal strength offset which will be
-     * reduced from rsrp threshold while calculating signal strength level
-     *
-     * @hide
-     */
-    public void setLteRsrpBoost(int lteRsrpBoost) {
-        mLteRsrpBoost = lteRsrpBoost;
-    }
-
-    /**
-     * Sets the threshold array for determining the display level of LTE signal bar.
-     *
-     * @param lteRsrpThresholds int array for determining the display level.
-     *
-     * @hide
-     */
-    public void setLteRsrpThresholds(int[] lteRsrpThresholds) {
-        if ((lteRsrpThresholds == null)
-                || (lteRsrpThresholds.length != LTE_RSRP_THRESHOLDS_NUM)) {
-            Log.wtf(LOG_TAG, "setLteRsrpThresholds - lteRsrpThresholds is invalid.");
-            return;
-        }
-        System.arraycopy(lteRsrpThresholds, 0, mLteRsrpThresholds, 0, LTE_RSRP_THRESHOLDS_NUM);
-    }
-
-    /**
-     * Get the GSM Signal Strength, valid values are (0-31, 99) as defined in TS
-     * 27.007 8.5
-     */
+    @Deprecated
     public int getGsmSignalStrength() {
-        return this.mGsmSignalStrength;
+        return mGsm.getAsuLevel();
     }
 
     /**
      * Get the GSM bit error rate (0-7, 99) as defined in TS 27.007 8.5
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthGsm#getBitErrorRate}.
+     *
+     * @see android.telephony#CellSignalStrengthGsm
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getGsmBitErrorRate() {
-        return this.mGsmBitErrorRate;
+        return mGsm.getBitErrorRate();
     }
 
     /**
      * Get the CDMA RSSI value in dBm
+     *
+     * @return the CDMA RSSI value or {@link #INVALID} if invalid
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getCdmaDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getCdmaDbm() {
-        return this.mCdmaDbm;
+        return mCdma.getCdmaDbm();
     }
 
     /**
      * Get the CDMA Ec/Io value in dB*10
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getCdmaEcio}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getCdmaEcio() {
-        return this.mCdmaEcio;
+        return mCdma.getCdmaEcio();
     }
 
     /**
      * Get the EVDO RSSI value in dBm
+     *
+     * @return the EVDO RSSI value or {@link #INVALID} if invalid
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getEvdoDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getEvdoDbm() {
-        return this.mEvdoDbm;
+        return mCdma.getEvdoDbm();
     }
 
     /**
      * Get the EVDO Ec/Io value in dB*10
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getEvdoEcio}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getEvdoEcio() {
-        return this.mEvdoEcio;
+        return mCdma.getEvdoEcio();
     }
 
     /**
      * Get the signal to noise ratio. Valid values are 0-8. 8 is the highest.
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getEvdoSnr}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      */
+    @Deprecated
     public int getEvdoSnr() {
-        return this.mEvdoSnr;
+        return mCdma.getEvdoSnr();
     }
 
-    /** @hide */
+    /**
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getRssi}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteSignalStrength() {
-        return mLteSignalStrength;
+        return mLte.getRssi();
     }
 
-    /** @hide */
+    /**
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getRsrp}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteRsrp() {
-        return mLteRsrp;
+        return mLte.getRsrp();
     }
 
-    /** @hide */
+    /**
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getRsrq}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteRsrq() {
-        return mLteRsrq;
+        return mLte.getRsrq();
     }
 
-    /** @hide */
+    /**
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getRssnr}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteRssnr() {
-        return mLteRssnr;
+        return mLte.getRssnr();
     }
 
-    /** @hide */
+    /**
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getCqi}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteCqi() {
-        return mLteCqi;
-    }
-
-    /** @hide */
-    public int getLteRsrpBoost() {
-        return mLteRsrpBoost;
+        return mLte.getCqi();
     }
 
     /**
@@ -484,385 +513,240 @@ public class SignalStrength implements Parcelable {
      *     while 4 represents a very strong signal strength.
      */
     public int getLevel() {
-        int level = mIsGsm ? getGsmRelatedSignalStrength() : getCdmaRelatedSignalStrength();
-        if (DBG) log("getLevel=" + level);
-        return level;
+        int level = getPrimary().getLevel();
+        if (level < SIGNAL_STRENGTH_NONE_OR_UNKNOWN || level > SIGNAL_STRENGTH_GREAT) {
+            loge("Invalid Level " + level + ", this=" + this);
+            return SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
+        }
+        return getPrimary().getLevel();
     }
 
     /**
-     * Get the signal level as an asu value between 0..31, 99 is unknown
+     * Get the signal level as an asu value with a range dependent on the underlying technology.
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrength#getAsuLevel}. Because the levels vary by technology,
+     *             this method is misleading and should not be used.
+     * @see android.telephony#CellSignalStrength
+     * @see android.telephony.SignalStrength#getCellSignalStrengths
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getAsuLevel() {
-        int asuLevel = 0;
-        if (mIsGsm) {
-            if (mLteRsrp != SignalStrength.INVALID) {
-                asuLevel = getLteAsuLevel();
-            } else if (mTdScdmaRscp != SignalStrength.INVALID) {
-                asuLevel = getTdScdmaAsuLevel();
-            } else {
-                asuLevel = getGsmAsuLevel();
-            }
-        } else {
-            int cdmaAsuLevel = getCdmaAsuLevel();
-            int evdoAsuLevel = getEvdoAsuLevel();
-            if (evdoAsuLevel == 0) {
-                /* We don't know evdo use, cdma */
-                asuLevel = cdmaAsuLevel;
-            } else if (cdmaAsuLevel == 0) {
-                /* We don't know cdma use, evdo */
-                asuLevel = evdoAsuLevel;
-            } else {
-                /* We know both, use the lowest level */
-                asuLevel = cdmaAsuLevel < evdoAsuLevel ? cdmaAsuLevel : evdoAsuLevel;
-            }
-        }
-        if (DBG) log("getAsuLevel=" + asuLevel);
-        return asuLevel;
+        return getPrimary().getAsuLevel();
     }
 
     /**
      * Get the signal strength as dBm
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrength#getDbm()}. Because the levels vary by technology,
+     *             this method is misleading and should not be used.
+     * @see android.telephony#CellSignalStrength
+     * @see android.telephony.SignalStrength#getCellSignalStrengths
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getDbm() {
-        int dBm = INVALID;
-
-        if(isGsm()) {
-            dBm = getLteDbm();
-            if (dBm == INVALID) {
-                if (getTdScdmaLevel() == SIGNAL_STRENGTH_NONE_OR_UNKNOWN) {
-                    dBm = getGsmDbm();
-                } else {
-                    dBm = getTdScdmaDbm();
-                }
-            }
-        } else {
-            int cdmaDbm = getCdmaDbm();
-            int evdoDbm = getEvdoDbm();
-
-            return (evdoDbm == -120) ? cdmaDbm : ((cdmaDbm == -120) ? evdoDbm
-                    : (cdmaDbm < evdoDbm ? cdmaDbm : evdoDbm));
-        }
-        if (DBG) log("getDbm=" + dBm);
-        return dBm;
+        return getPrimary().getDbm();
     }
 
     /**
      * Get Gsm signal strength as dBm
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthGsm#getDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthGsm
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getGsmDbm() {
-        int dBm;
-
-        int gsmSignalStrength = getGsmSignalStrength();
-        int asu = (gsmSignalStrength == 99 ? -1 : gsmSignalStrength);
-        if (asu != -1) {
-            dBm = -113 + (2 * asu);
-        } else {
-            dBm = -1;
-        }
-        if (DBG) log("getGsmDbm=" + dBm);
-        return dBm;
+        return mGsm.getDbm();
     }
 
     /**
      * Get gsm as level 0..4
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthGsm#getLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthGsm
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getGsmLevel() {
-        int level;
-
-        // ASU ranges from 0 to 31 - TS 27.007 Sec 8.5
-        // asu = 0 (-113dB or less) is very weak
-        // signal, its better to show 0 bars to the user in such cases.
-        // asu = 99 is a special case, where the signal strength is unknown.
-        int asu = getGsmSignalStrength();
-        if (asu <= 2 || asu == 99) level = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-        else if (asu >= 12) level = SIGNAL_STRENGTH_GREAT;
-        else if (asu >= 8)  level = SIGNAL_STRENGTH_GOOD;
-        else if (asu >= 5)  level = SIGNAL_STRENGTH_MODERATE;
-        else level = SIGNAL_STRENGTH_POOR;
-        if (DBG) log("getGsmLevel=" + level);
-        return level;
+        return mGsm.getLevel();
     }
 
     /**
      * Get the gsm signal level as an asu value between 0..31, 99 is unknown
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthGsm#getAsuLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthGsm
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getGsmAsuLevel() {
-        // ASU ranges from 0 to 31 - TS 27.007 Sec 8.5
-        // asu = 0 (-113dB or less) is very weak
-        // signal, its better to show 0 bars to the user in such cases.
-        // asu = 99 is a special case, where the signal strength is unknown.
-        int level = getGsmSignalStrength();
-        if (DBG) log("getGsmAsuLevel=" + level);
-        return level;
+        return mGsm.getAsuLevel();
     }
 
     /**
      * Get cdma as level 0..4
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getCdmaLevel() {
-        final int cdmaDbm = getCdmaDbm();
-        final int cdmaEcio = getCdmaEcio();
-        int levelDbm;
-        int levelEcio;
-
-        if (cdmaDbm >= -75) levelDbm = SIGNAL_STRENGTH_GREAT;
-        else if (cdmaDbm >= -85) levelDbm = SIGNAL_STRENGTH_GOOD;
-        else if (cdmaDbm >= -95) levelDbm = SIGNAL_STRENGTH_MODERATE;
-        else if (cdmaDbm >= -100) levelDbm = SIGNAL_STRENGTH_POOR;
-        else levelDbm = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        // Ec/Io are in dB*10
-        if (cdmaEcio >= -90) levelEcio = SIGNAL_STRENGTH_GREAT;
-        else if (cdmaEcio >= -110) levelEcio = SIGNAL_STRENGTH_GOOD;
-        else if (cdmaEcio >= -130) levelEcio = SIGNAL_STRENGTH_MODERATE;
-        else if (cdmaEcio >= -150) levelEcio = SIGNAL_STRENGTH_POOR;
-        else levelEcio = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        int level = (levelDbm < levelEcio) ? levelDbm : levelEcio;
-        if (DBG) log("getCdmaLevel=" + level);
-        return level;
+        return mCdma.getLevel();
     }
 
     /**
      * Get the cdma signal level as an asu value between 0..31, 99 is unknown
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getAsuLevel}. Since there is no definition of
+     *             ASU for CDMA, the resultant value is Android-specific and is not recommended
+     *             for use.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getCdmaAsuLevel() {
-        final int cdmaDbm = getCdmaDbm();
-        final int cdmaEcio = getCdmaEcio();
-        int cdmaAsuLevel;
-        int ecioAsuLevel;
-
-        if (cdmaDbm >= -75) cdmaAsuLevel = 16;
-        else if (cdmaDbm >= -82) cdmaAsuLevel = 8;
-        else if (cdmaDbm >= -90) cdmaAsuLevel = 4;
-        else if (cdmaDbm >= -95) cdmaAsuLevel = 2;
-        else if (cdmaDbm >= -100) cdmaAsuLevel = 1;
-        else cdmaAsuLevel = 99;
-
-        // Ec/Io are in dB*10
-        if (cdmaEcio >= -90) ecioAsuLevel = 16;
-        else if (cdmaEcio >= -100) ecioAsuLevel = 8;
-        else if (cdmaEcio >= -115) ecioAsuLevel = 4;
-        else if (cdmaEcio >= -130) ecioAsuLevel = 2;
-        else if (cdmaEcio >= -150) ecioAsuLevel = 1;
-        else ecioAsuLevel = 99;
-
-        int level = (cdmaAsuLevel < ecioAsuLevel) ? cdmaAsuLevel : ecioAsuLevel;
-        if (DBG) log("getCdmaAsuLevel=" + level);
-        return level;
+        return mCdma.getAsuLevel();
     }
 
     /**
      * Get Evdo as level 0..4
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getEvdoLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getEvdoLevel() {
-        int evdoDbm = getEvdoDbm();
-        int evdoSnr = getEvdoSnr();
-        int levelEvdoDbm;
-        int levelEvdoSnr;
-
-        if (evdoDbm >= -65) levelEvdoDbm = SIGNAL_STRENGTH_GREAT;
-        else if (evdoDbm >= -75) levelEvdoDbm = SIGNAL_STRENGTH_GOOD;
-        else if (evdoDbm >= -90) levelEvdoDbm = SIGNAL_STRENGTH_MODERATE;
-        else if (evdoDbm >= -105) levelEvdoDbm = SIGNAL_STRENGTH_POOR;
-        else levelEvdoDbm = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        if (evdoSnr >= 7) levelEvdoSnr = SIGNAL_STRENGTH_GREAT;
-        else if (evdoSnr >= 5) levelEvdoSnr = SIGNAL_STRENGTH_GOOD;
-        else if (evdoSnr >= 3) levelEvdoSnr = SIGNAL_STRENGTH_MODERATE;
-        else if (evdoSnr >= 1) levelEvdoSnr = SIGNAL_STRENGTH_POOR;
-        else levelEvdoSnr = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        int level = (levelEvdoDbm < levelEvdoSnr) ? levelEvdoDbm : levelEvdoSnr;
-        if (DBG) log("getEvdoLevel=" + level);
-        return level;
+        return mCdma.getEvdoLevel();
     }
 
     /**
      * Get the evdo signal level as an asu value between 0..31, 99 is unknown
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthCdma#getEvdoAsuLevel}. Since there is no definition of
+     *             ASU for EvDO, the resultant value is Android-specific and is not recommended
+     *             for use.
+     *
+     * @see android.telephony#CellSignalStrengthCdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getEvdoAsuLevel() {
-        int evdoDbm = getEvdoDbm();
-        int evdoSnr = getEvdoSnr();
-        int levelEvdoDbm;
-        int levelEvdoSnr;
-
-        if (evdoDbm >= -65) levelEvdoDbm = 16;
-        else if (evdoDbm >= -75) levelEvdoDbm = 8;
-        else if (evdoDbm >= -85) levelEvdoDbm = 4;
-        else if (evdoDbm >= -95) levelEvdoDbm = 2;
-        else if (evdoDbm >= -105) levelEvdoDbm = 1;
-        else levelEvdoDbm = 99;
-
-        if (evdoSnr >= 7) levelEvdoSnr = 16;
-        else if (evdoSnr >= 6) levelEvdoSnr = 8;
-        else if (evdoSnr >= 5) levelEvdoSnr = 4;
-        else if (evdoSnr >= 3) levelEvdoSnr = 2;
-        else if (evdoSnr >= 1) levelEvdoSnr = 1;
-        else levelEvdoSnr = 99;
-
-        int level = (levelEvdoDbm < levelEvdoSnr) ? levelEvdoDbm : levelEvdoSnr;
-        if (DBG) log("getEvdoAsuLevel=" + level);
-        return level;
+        return mCdma.getEvdoAsuLevel();
     }
 
     /**
      * Get LTE as dBm
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteDbm() {
-        return mLteRsrp;
+        return mLte.getRsrp();
     }
 
     /**
      * Get LTE as level 0..4
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteLevel() {
-        /*
-         * TS 36.214 Physical Layer Section 5.1.3 TS 36.331 RRC RSSI = received
-         * signal + noise RSRP = reference signal dBm RSRQ = quality of signal
-         * dB= Number of Resource blocksxRSRP/RSSI SNR = gain=signal/noise ratio
-         * = -10log P1/P2 dB
-         */
-        int rssiIconLevel = SIGNAL_STRENGTH_NONE_OR_UNKNOWN, rsrpIconLevel = -1, snrIconLevel = -1;
-
-        if (mLteRsrp > mLteRsrpThresholds[5]) {
-            rsrpIconLevel = -1;
-        } else if (mLteRsrp >= (mLteRsrpThresholds[4] - mLteRsrpBoost)) {
-            rsrpIconLevel = SIGNAL_STRENGTH_GREAT;
-        } else if (mLteRsrp >= (mLteRsrpThresholds[3] - mLteRsrpBoost)) {
-            rsrpIconLevel = SIGNAL_STRENGTH_GOOD;
-        } else if (mLteRsrp >= (mLteRsrpThresholds[2] - mLteRsrpBoost)) {
-            rsrpIconLevel = SIGNAL_STRENGTH_MODERATE;
-        } else if (mLteRsrp >= (mLteRsrpThresholds[1] - mLteRsrpBoost)) {
-            rsrpIconLevel = SIGNAL_STRENGTH_POOR;
-        } else if (mLteRsrp >= mLteRsrpThresholds[0]) {
-            rsrpIconLevel = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-        }
-
-        if (useOnlyRsrpForLteLevel()) {
-            log("getLTELevel - rsrp = " + rsrpIconLevel);
-            if (rsrpIconLevel != -1) {
-                return rsrpIconLevel;
-            }
-        }
-
-        /*
-         * Values are -200 dB to +300 (SNR*10dB) RS_SNR >= 13.0 dB =>4 bars 4.5
-         * dB <= RS_SNR < 13.0 dB => 3 bars 1.0 dB <= RS_SNR < 4.5 dB => 2 bars
-         * -3.0 dB <= RS_SNR < 1.0 dB 1 bar RS_SNR < -3.0 dB/No Service Antenna
-         * Icon Only
-         */
-        if (mLteRssnr > 300) snrIconLevel = -1;
-        else if (mLteRssnr >= 130) snrIconLevel = SIGNAL_STRENGTH_GREAT;
-        else if (mLteRssnr >= 45) snrIconLevel = SIGNAL_STRENGTH_GOOD;
-        else if (mLteRssnr >= 10) snrIconLevel = SIGNAL_STRENGTH_MODERATE;
-        else if (mLteRssnr >= -30) snrIconLevel = SIGNAL_STRENGTH_POOR;
-        else if (mLteRssnr >= -200)
-            snrIconLevel = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        if (DBG) log("getLTELevel - rsrp:" + mLteRsrp + " snr:" + mLteRssnr + " rsrpIconLevel:"
-                + rsrpIconLevel + " snrIconLevel:" + snrIconLevel
-                + " lteRsrpBoost:" + mLteRsrpBoost);
-
-        /* Choose a measurement type to use for notification */
-        if (snrIconLevel != -1 && rsrpIconLevel != -1) {
-            /*
-             * The number of bars displayed shall be the smaller of the bars
-             * associated with LTE RSRP and the bars associated with the LTE
-             * RS_SNR
-             */
-            return (rsrpIconLevel < snrIconLevel ? rsrpIconLevel : snrIconLevel);
-        }
-
-        if (snrIconLevel != -1) return snrIconLevel;
-
-        if (rsrpIconLevel != -1) return rsrpIconLevel;
-
-        /* Valid values are (0-63, 99) as defined in TS 36.331 */
-        if (mLteSignalStrength > 63) rssiIconLevel = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-        else if (mLteSignalStrength >= 12) rssiIconLevel = SIGNAL_STRENGTH_GREAT;
-        else if (mLteSignalStrength >= 8) rssiIconLevel = SIGNAL_STRENGTH_GOOD;
-        else if (mLteSignalStrength >= 5) rssiIconLevel = SIGNAL_STRENGTH_MODERATE;
-        else if (mLteSignalStrength >= 0) rssiIconLevel = SIGNAL_STRENGTH_POOR;
-
-        if (DBG) log("getLTELevel - rssi:" + mLteSignalStrength + " rssiIconLevel:"
-                + rssiIconLevel);
-        return rssiIconLevel;
-
+        return mLte.getLevel();
     }
+
     /**
      * Get the LTE signal level as an asu value between 0..97, 99 is unknown
      * Asu is calculated based on 3GPP RSRP. Refer to 3GPP 27.007 (Ver 10.3.0) Sec 8.69
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthLte#getAsuLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthLte
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getLteAsuLevel() {
-        int lteAsuLevel = 99;
-        int lteDbm = getLteDbm();
-        /*
-         * 3GPP 27.007 (Ver 10.3.0) Sec 8.69
-         * 0   -140 dBm or less
-         * 1   -139 dBm
-         * 2...96  -138... -44 dBm
-         * 97  -43 dBm or greater
-         * 255 not known or not detectable
-         */
-        /*
-         * validateInput will always give a valid range between -140 t0 -44 as
-         * per ril.h. so RSRP >= -43 & <-140 will fall under asu level 255
-         * and not 97 or 0
-         */
-        if (lteDbm == SignalStrength.INVALID) lteAsuLevel = 255;
-        else lteAsuLevel = lteDbm + 140;
-        if (DBG) log("Lte Asu level: "+lteAsuLevel);
-        return lteAsuLevel;
+        return mLte.getAsuLevel();
     }
 
     /**
      * @return true if this is for GSM
+     *
+     * @deprecated This method returns true if there are any 3gpp type SignalStrength elements in
+     *             this SignalStrength report or if the report contains no valid SignalStrength
+     *             information. Instead callers should use
+     *             {@link android.telephony.SignalStrength#getCellSignalStrengths
+     *             getCellSignalStrengths()} to determine which types of information are contained
+     *             in the SignalStrength report.
      */
+    @Deprecated
     public boolean isGsm() {
-        return this.mIsGsm;
+        return !(getPrimary() instanceof CellSignalStrengthCdma);
     }
 
     /**
-     * @return true if it uses only RSRP for the number of LTE signal bar, otherwise false.
+     * @return get TD-SCDMA dBm
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthTdscdma#getDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthTdscdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
-    public boolean useOnlyRsrpForLteLevel() {
-        return this.mUseOnlyRsrpForLteLevel;
-    }
-
-    /**
-     * @return get TD_SCDMA dbm
-     *
-     * @hide
-     */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getTdScdmaDbm() {
-        return this.mTdScdmaRscp;
+        return mTdscdma.getRscp();
     }
 
     /**
@@ -871,53 +755,109 @@ public class SignalStrength implements Parcelable {
      * INT_MAX: 0x7FFFFFFF denotes invalid value
      * Reference: 3GPP TS 25.123, section 9.1.1.1
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthTdscdma#getLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthTdscdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getTdScdmaLevel() {
-        final int tdScdmaDbm = getTdScdmaDbm();
-        int level;
-
-        if ((tdScdmaDbm > -25) || (tdScdmaDbm == SignalStrength.INVALID))
-                level = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-        else if (tdScdmaDbm >= -49) level = SIGNAL_STRENGTH_GREAT;
-        else if (tdScdmaDbm >= -73) level = SIGNAL_STRENGTH_GOOD;
-        else if (tdScdmaDbm >= -97) level = SIGNAL_STRENGTH_MODERATE;
-        else if (tdScdmaDbm >= -110) level = SIGNAL_STRENGTH_POOR;
-        else level = SIGNAL_STRENGTH_NONE_OR_UNKNOWN;
-
-        if (DBG) log("getTdScdmaLevel = " + level);
-        return level;
+        return mTdscdma.getLevel();
      }
 
     /**
      * Get the TD-SCDMA signal level as an asu value.
      *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthTdscdma#getAsuLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthTdscdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public int getTdScdmaAsuLevel() {
-        final int tdScdmaDbm = getTdScdmaDbm();
-        int tdScdmaAsuLevel;
-
-        if (tdScdmaDbm == INVALID) tdScdmaAsuLevel = 255;
-        else tdScdmaAsuLevel = tdScdmaDbm + 120;
-        if (DBG) log("TD-SCDMA Asu level: " + tdScdmaAsuLevel);
-        return tdScdmaAsuLevel;
+        return mTdscdma.getAsuLevel();
     }
 
-   /**
+    /**
+     * Gets WCDMA RSCP as a dBm value between -120 and -24, as defined in TS 27.007 8.69.
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthWcdma#getRscp}.
+     *
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    public int getWcdmaRscp() {
+        return mWcdma.getRscp();
+    }
+
+    /**
+     * Get the WCDMA signal level as an ASU value between 0-96, 255 is unknown
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthWcdma#getAsuLevel}.
+     *
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    public int getWcdmaAsuLevel() {
+        /*
+         * 3GPP 27.007 (Ver 10.3.0) Sec 8.69
+         * 0      -120 dBm or less
+         * 1      -119 dBm
+         * 2...95 -118... -25 dBm
+         * 96     -24 dBm or greater
+         * 255    not known or not detectable
+         */
+        return mWcdma.getAsuLevel();
+    }
+
+    /**
+     * Gets WCDMA signal strength as a dBm value between -120 and -24, as defined in TS 27.007 8.69.
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthWcdma#getDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    public int getWcdmaDbm() {
+        return mWcdma.getDbm();
+    }
+
+    /**
+     * Get WCDMA as level 0..4
+     *
+     * @deprecated this information should be retrieved from
+     *             {@link CellSignalStrengthWcdma#getDbm}.
+     *
+     * @see android.telephony#CellSignalStrengthWcdma
+     * @see android.telephony.SignalStrength#getCellSignalStrengths()
+     * @hide
+     */
+    @Deprecated
+    public int getWcdmaLevel() {
+        return mWcdma.getLevel();
+    }
+
+    /**
      * @return hash code
      */
     @Override
     public int hashCode() {
-        int primeNum = 31;
-        return ((mGsmSignalStrength * primeNum)
-                + (mGsmBitErrorRate * primeNum)
-                + (mCdmaDbm * primeNum) + (mCdmaEcio * primeNum)
-                + (mEvdoDbm * primeNum) + (mEvdoEcio * primeNum) + (mEvdoSnr * primeNum)
-                + (mLteSignalStrength * primeNum) + (mLteRsrp * primeNum)
-                + (mLteRsrq * primeNum) + (mLteRssnr * primeNum) + (mLteCqi * primeNum)
-                + (mLteRsrpBoost * primeNum) + (mTdScdmaRscp * primeNum) + (mIsGsm ? 1 : 0)
-                + (mUseOnlyRsrpForLteLevel ? 1 : 0) + (Arrays.hashCode(mLteRsrpThresholds)));
+        return Objects.hash(mCdma, mGsm, mWcdma, mTdscdma, mLte, mNr);
     }
 
     /**
@@ -925,35 +865,16 @@ public class SignalStrength implements Parcelable {
      */
     @Override
     public boolean equals (Object o) {
-        SignalStrength s;
+        if (!(o instanceof SignalStrength)) return false;
 
-        try {
-            s = (SignalStrength) o;
-        } catch (ClassCastException ex) {
-            return false;
-        }
+        SignalStrength s = (SignalStrength) o;
 
-        if (o == null) {
-            return false;
-        }
-
-        return (mGsmSignalStrength == s.mGsmSignalStrength
-                && mGsmBitErrorRate == s.mGsmBitErrorRate
-                && mCdmaDbm == s.mCdmaDbm
-                && mCdmaEcio == s.mCdmaEcio
-                && mEvdoDbm == s.mEvdoDbm
-                && mEvdoEcio == s.mEvdoEcio
-                && mEvdoSnr == s.mEvdoSnr
-                && mLteSignalStrength == s.mLteSignalStrength
-                && mLteRsrp == s.mLteRsrp
-                && mLteRsrq == s.mLteRsrq
-                && mLteRssnr == s.mLteRssnr
-                && mLteCqi == s.mLteCqi
-                && mLteRsrpBoost == s.mLteRsrpBoost
-                && mTdScdmaRscp == s.mTdScdmaRscp
-                && mIsGsm == s.mIsGsm
-                && mUseOnlyRsrpForLteLevel == s.mUseOnlyRsrpForLteLevel
-                && Arrays.equals(mLteRsrpThresholds, s.mLteRsrpThresholds));
+        return mCdma.equals(s.mCdma)
+            && mGsm.equals(s.mGsm)
+            && mWcdma.equals(s.mWcdma)
+            && mTdscdma.equals(s.mTdscdma)
+            && mLte.equals(s.mLte)
+            && mNr.equals(s.mNr);
     }
 
     /**
@@ -961,130 +882,69 @@ public class SignalStrength implements Parcelable {
      */
     @Override
     public String toString() {
-        return ("SignalStrength:"
-                + " " + mGsmSignalStrength
-                + " " + mGsmBitErrorRate
-                + " " + mCdmaDbm
-                + " " + mCdmaEcio
-                + " " + mEvdoDbm
-                + " " + mEvdoEcio
-                + " " + mEvdoSnr
-                + " " + mLteSignalStrength
-                + " " + mLteRsrp
-                + " " + mLteRsrq
-                + " " + mLteRssnr
-                + " " + mLteCqi
-                + " " + mLteRsrpBoost
-                + " " + mTdScdmaRscp
-                + " " + (mIsGsm ? "gsm|lte" : "cdma")
-                + " " + (mUseOnlyRsrpForLteLevel ? "use_only_rsrp_for_lte_level" :
-                         "use_rsrp_and_rssnr_for_lte_level")
-                + " " + (Arrays.toString(mLteRsrpThresholds)));
-    }
-
-    /** Returns the signal strength related to GSM. */
-    private int getGsmRelatedSignalStrength() {
-        int level = getLteLevel();
-        if (level == SIGNAL_STRENGTH_NONE_OR_UNKNOWN) {
-            level = getTdScdmaLevel();
-            if (level == SIGNAL_STRENGTH_NONE_OR_UNKNOWN) {
-                level = getGsmLevel();
-            }
-        }
-        return level;
-    }
-
-    /** Returns the signal strength related to CDMA. */
-    private int getCdmaRelatedSignalStrength() {
-        int level;
-        int cdmaLevel = getCdmaLevel();
-        int evdoLevel = getEvdoLevel();
-        if (evdoLevel == SIGNAL_STRENGTH_NONE_OR_UNKNOWN) {
-            /* We don't know evdo, use cdma */
-            level = cdmaLevel;
-        } else if (cdmaLevel == SIGNAL_STRENGTH_NONE_OR_UNKNOWN) {
-            /* We don't know cdma, use evdo */
-            level = evdoLevel;
-        } else {
-            /* We know both, use the lowest level */
-            level = cdmaLevel < evdoLevel ? cdmaLevel : evdoLevel;
-        }
-        return level;
+        return new StringBuilder().append("SignalStrength:{")
+            .append("mCdma=").append(mCdma)
+            .append(",mGsm=").append(mGsm)
+            .append(",mWcdma=").append(mWcdma)
+            .append(",mTdscdma=").append(mTdscdma)
+            .append(",mLte=").append(mLte)
+            .append(",mNr=").append(mNr)
+            .append(",primary=").append(getPrimary().getClass().getSimpleName())
+            .append("}")
+            .toString();
     }
 
     /**
      * Set SignalStrength based on intent notifier map
      *
      * @param m intent notifier map
+     *
+     * @deprecated this method relies on non-stable implementation details, and full access to
+     *             internal storage is available via {@link getCellSignalStrengths()}.
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     private void setFromNotifierBundle(Bundle m) {
-        mGsmSignalStrength = m.getInt("GsmSignalStrength");
-        mGsmBitErrorRate = m.getInt("GsmBitErrorRate");
-        mCdmaDbm = m.getInt("CdmaDbm");
-        mCdmaEcio = m.getInt("CdmaEcio");
-        mEvdoDbm = m.getInt("EvdoDbm");
-        mEvdoEcio = m.getInt("EvdoEcio");
-        mEvdoSnr = m.getInt("EvdoSnr");
-        mLteSignalStrength = m.getInt("LteSignalStrength");
-        mLteRsrp = m.getInt("LteRsrp");
-        mLteRsrq = m.getInt("LteRsrq");
-        mLteRssnr = m.getInt("LteRssnr");
-        mLteCqi = m.getInt("LteCqi");
-        mLteRsrpBoost = m.getInt("LteRsrpBoost");
-        mTdScdmaRscp = m.getInt("TdScdma");
-        mIsGsm = m.getBoolean("IsGsm");
-        mUseOnlyRsrpForLteLevel = m.getBoolean("UseOnlyRsrpForLteLevel");
-        ArrayList<Integer> lteRsrpThresholds = m.getIntegerArrayList("lteRsrpThresholds");
-        for (int i = 0; i < lteRsrpThresholds.size(); i++) {
-            mLteRsrpThresholds[i] = lteRsrpThresholds.get(i);
-        }
+        mCdma = m.getParcelable("Cdma");
+        mGsm = m.getParcelable("Gsm");
+        mWcdma = m.getParcelable("Wcdma");
+        mTdscdma = m.getParcelable("Tdscdma");
+        mLte = m.getParcelable("Lte");
+        mNr = m.getParcelable("Nr");
     }
 
     /**
      * Set intent notifier Bundle based on SignalStrength
      *
      * @param m intent notifier Bundle
+     *
+     * @deprecated this method relies on non-stable implementation details, and full access to
+     *             internal storage is available via {@link getCellSignalStrengths()}.
      * @hide
      */
+    @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P)
     public void fillInNotifierBundle(Bundle m) {
-        m.putInt("GsmSignalStrength", mGsmSignalStrength);
-        m.putInt("GsmBitErrorRate", mGsmBitErrorRate);
-        m.putInt("CdmaDbm", mCdmaDbm);
-        m.putInt("CdmaEcio", mCdmaEcio);
-        m.putInt("EvdoDbm", mEvdoDbm);
-        m.putInt("EvdoEcio", mEvdoEcio);
-        m.putInt("EvdoSnr", mEvdoSnr);
-        m.putInt("LteSignalStrength", mLteSignalStrength);
-        m.putInt("LteRsrp", mLteRsrp);
-        m.putInt("LteRsrq", mLteRsrq);
-        m.putInt("LteRssnr", mLteRssnr);
-        m.putInt("LteCqi", mLteCqi);
-        m.putInt("LteRsrpBoost", mLteRsrpBoost);
-        m.putInt("TdScdma", mTdScdmaRscp);
-        m.putBoolean("IsGsm", mIsGsm);
-        m.putBoolean("UseOnlyRsrpForLteLevel", mUseOnlyRsrpForLteLevel);
-        ArrayList<Integer> lteRsrpThresholds = new ArrayList<Integer>();
-        for (int value : mLteRsrpThresholds) {
-            lteRsrpThresholds.add(value);
-        }
-        m.putIntegerArrayList("lteRsrpThresholds", lteRsrpThresholds);
+        m.putParcelable("Cdma", mCdma);
+        m.putParcelable("Gsm", mGsm);
+        m.putParcelable("Wcdma", mWcdma);
+        m.putParcelable("Tdscdma", mTdscdma);
+        m.putParcelable("Lte", mLte);
+        m.putParcelable("Nr", mNr);
     }
 
     /**
-     * Gets the default threshold array for determining the display level of LTE signal bar.
-     *
-     * @return int array for determining the display level.
-     */
-    private int[] getDefaultLteRsrpThresholds() {
-        return CarrierConfigManager.getDefaultConfig().getIntArray(
-                CarrierConfigManager.KEY_LTE_RSRP_THRESHOLDS_INT_ARRAY);
-    }
-
-    /**
-     * log
+     * log warning
      */
     private static void log(String s) {
         Rlog.w(LOG_TAG, s);
+    }
+
+    /**
+     * log error
+     */
+    private static void loge(String s) {
+        Rlog.e(LOG_TAG, s);
     }
 }

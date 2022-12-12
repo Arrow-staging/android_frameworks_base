@@ -1,7 +1,4 @@
 set noparent
+file:platform/packages/modules/Connectivity:master:/OWNERS_core_networking
 
-ek@google.com
-jchalard@google.com
 jsharkey@android.com
-lorenzo@google.com
-satk@google.com

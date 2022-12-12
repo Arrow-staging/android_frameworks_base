@@ -14,7 +14,7 @@
      limitations under the License.
 -->
 
-<com.android.systemui.statusbar.policy.KeyButtonView
+<com.android.systemui.navigationbar.buttons.KeyButtonView
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:systemui="http://schemas.android.com/apk/res-auto"
     android:id="@+id/back"
@@ -22,10 +22,8 @@
     android:layout_height="match_parent"
     android:layout_weight="0"
     systemui:keyCode="4"
-    android:scaleType="fitCenter"
+    android:scaleType="center"
     android:contentDescription="@string/accessibility_back"
-    android:paddingTop="@dimen/home_padding"
-    android:paddingBottom="@dimen/home_padding"
     android:paddingStart="@dimen/navigation_key_padding"
     android:paddingEnd="@dimen/navigation_key_padding"
     />

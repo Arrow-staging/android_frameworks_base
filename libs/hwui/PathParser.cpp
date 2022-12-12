@@ -16,8 +16,6 @@
 
 #include "PathParser.h"
 
-#include "jni.h"
-
 #include <errno.h>
 #include <stdlib.h>
 #include <utils/Log.h>
@@ -156,10 +154,62 @@ static void getFloats(std::vector<float>* outPoints, PathParser::ParseResult* re
     return;
 }
 
-bool PathParser::isVerbValid(char verb) {
-    verb = tolower(verb);
-    return verb == 'a' || verb == 'c' || verb == 'h' || verb == 'l' || verb == 'm' || verb == 'q' ||
-           verb == 's' || verb == 't' || verb == 'v' || verb == 'z';
+void PathParser::validateVerbAndPoints(char verb, size_t points, PathParser::ParseResult* result) {
+    size_t numberOfPointsExpected = -1;
+    switch (verb) {
+        case 'z':
+        case 'Z':
+            numberOfPointsExpected = 0;
+            break;
+        case 'm':
+        case 'l':
+        case 't':
+        case 'M':
+        case 'L':
+        case 'T':
+            numberOfPointsExpected = 2;
+            break;
+        case 'h':
+        case 'v':
+        case 'H':
+        case 'V':
+            numberOfPointsExpected = 1;
+            break;
+        case 'c':
+        case 'C':
+            numberOfPointsExpected = 6;
+            break;
+        case 's':
+        case 'q':
+        case 'S':
+        case 'Q':
+            numberOfPointsExpected = 4;
+            break;
+        case 'a':
+        case 'A':
+            numberOfPointsExpected = 7;
+            break;
+        default:
+            result->failureOccurred = true;
+            result->failureMessage += verb;
+            result->failureMessage += " is not a valid verb. ";
+            return;
+    }
+    if (numberOfPointsExpected == 0 && points == 0) {
+        return;
+    }
+    if (numberOfPointsExpected > 0 && points % numberOfPointsExpected == 0) {
+        return;
+    }
+
+    result->failureOccurred = true;
+    result->failureMessage += verb;
+    result->failureMessage += " needs to be followed by ";
+    if (numberOfPointsExpected > 0) {
+        result->failureMessage += "a multiple of ";
+    }
+    result->failureMessage += std::to_string(numberOfPointsExpected) + " floats. However, " +
+                              std::to_string(points) + " float(s) are found. ";
 }
 
 void PathParser::getPathDataFromAsciiString(PathData* data, ParseResult* result,
@@ -186,13 +236,11 @@ void PathParser::getPathDataFromAsciiString(PathData* data, ParseResult* result,
         end = nextStart(pathStr, strLen, end);
         std::vector<float> points;
         getFloats(&points, result, pathStr, start, end);
-        if (!isVerbValid(pathStr[start])) {
-            result->failureOccurred = true;
-            result->failureMessage = "Invalid pathData. Failure occurred at position " +
-                                     std::to_string(start) + " of path: " + pathStr;
-        }
-        // If either verb or points is not valid, return immediately.
+        validateVerbAndPoints(pathStr[start], points.size(), result);
         if (result->failureOccurred) {
+            // If either verb or points is not valid, return immediately.
+            result->failureMessage += "Failure occurred at position " + std::to_string(start) +
+                                      " of path: " + pathStr;
             return;
         }
         data->verbs.push_back(pathStr[start]);
@@ -203,10 +251,11 @@ void PathParser::getPathDataFromAsciiString(PathData* data, ParseResult* result,
     }
 
     if ((end - start) == 1 && start < strLen) {
-        if (!isVerbValid(pathStr[start])) {
-            result->failureOccurred = true;
-            result->failureMessage = "Invalid pathData. Failure occurred at position " +
-                                     std::to_string(start) + " of path: " + pathStr;
+        validateVerbAndPoints(pathStr[start], 0, result);
+        if (result->failureOccurred) {
+            // If either verb or points is not valid, return immediately.
+            result->failureMessage += "Failure occurred at position " + std::to_string(start) +
+                                      " of path: " + pathStr;
             return;
         }
         data->verbs.push_back(pathStr[start]);
@@ -253,5 +302,5 @@ void PathParser::parseAsciiStringForSkPath(SkPath* skPath, ParseResult* result, 
     return;
 }
 
-};  // namespace uirenderer
-};  // namespace android
+}  // namespace uirenderer
+}  // namespace android

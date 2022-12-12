@@ -18,15 +18,18 @@ package android.print;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresFeature;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.app.Activity;
 import android.app.Application.ActivityLifecycleCallbacks;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.IntentSender;
 import android.content.IntentSender.SendIntentException;
+import android.content.pm.PackageManager;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.CancellationSignal;
@@ -104,6 +107,7 @@ import java.util.Map;
  * @see PrintJobInfo
  */
 @SystemService(Context.PRINT_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_PRINTING)
 public final class PrintManager {
 
     private static final String LOG_TAG = "PrintManager";
@@ -308,6 +312,7 @@ public final class PrintManager {
      * @param listener The listener to add.
      * @hide
      */
+    @UnsupportedAppUsage
     public void addPrintJobStateChangeListener(PrintJobStateChangeListener listener) {
         if (mService == null) {
             Log.w(LOG_TAG, "Feature android.software.print not available");
@@ -776,6 +781,25 @@ public final class PrintManager {
             mService.setPrintServiceEnabled(service, isEnabled, mUserId);
         } catch (RemoteException re) {
             Log.e(LOG_TAG, "Error enabling or disabling " + service, re);
+        }
+    }
+
+    /**
+     * Checks whether a given print service is enabled. The provided service must share UID
+     * with the calling package, otherwise a {@link SecurityException} is thrown.
+     *
+     * @return true if the given print service is enabled
+     */
+    public boolean isPrintServiceEnabled(@NonNull ComponentName service) {
+        if (mService == null) {
+            Log.w(LOG_TAG, "Feature android.software.print not available");
+            return false;
+        }
+        try {
+            return mService.isPrintServiceEnabled(service, mUserId);
+        } catch (RemoteException re) {
+            Log.e(LOG_TAG, "Error sampling enabled/disabled " + service, re);
+            return false;
         }
     }
 

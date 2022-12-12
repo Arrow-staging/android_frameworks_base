@@ -13,15 +13,36 @@
  */
 package com.android.server;
 
-import android.content.Context;
-import android.support.test.InstrumentationRegistry;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
+
+import android.content.pm.PackageManagerInternal;
+import android.net.Uri;
+import android.os.Build;
 import android.testing.TestableContext;
 
+import androidx.test.InstrumentationRegistry;
+
+import com.android.server.uri.UriGrantsManagerInternal;
+
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
-
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.MockitoAnnotations;
 
 public class UiServiceTestCase {
+    @Mock protected PackageManagerInternal mPmi;
+    @Mock protected UriGrantsManagerInternal mUgmInternal;
+
+    protected static final String PKG_N_MR1 = "com.example.n_mr1";
+    protected static final String PKG_O = "com.example.o";
+    protected static final String PKG_P = "com.example.p";
+    protected static final String PKG_R = "com.example.r";
+
     @Rule
     public final TestableContext mContext =
             new TestableContext(InstrumentationRegistry.getContext(), null);
@@ -31,8 +52,39 @@ public class UiServiceTestCase {
     }
 
     @Before
-    public void setup() {
+    public final void setup() {
+        MockitoAnnotations.initMocks(this);
+
         // Share classloader to allow package access.
         System.setProperty("dexmaker.share_classloader", "true");
+
+        // Assume some default packages
+        LocalServices.removeServiceForTest(PackageManagerInternal.class);
+        LocalServices.addService(PackageManagerInternal.class, mPmi);
+        when(mPmi.getPackageTargetSdkVersion(anyString()))
+                .thenAnswer((iom) -> {
+                    switch ((String) iom.getArgument(0)) {
+                        case PKG_N_MR1:
+                            return Build.VERSION_CODES.N_MR1;
+                        case PKG_O:
+                            return Build.VERSION_CODES.O;
+                        case PKG_P:
+                            return Build.VERSION_CODES.P;
+                        case PKG_R:
+                            return Build.VERSION_CODES.R;
+                        default:
+                            return Build.VERSION_CODES.CUR_DEVELOPMENT;
+                    }
+                });
+
+        LocalServices.removeServiceForTest(UriGrantsManagerInternal.class);
+        LocalServices.addService(UriGrantsManagerInternal.class, mUgmInternal);
+        when(mUgmInternal.checkGrantUriPermission(
+                anyInt(), anyString(), any(Uri.class), anyInt(), anyInt())).thenReturn(-1);
+    }
+
+    @After
+    public final void cleanUpMockito() {
+        Mockito.framework().clearInlineMocks();
     }
 }

@@ -18,7 +18,7 @@ syntax = "proto2";
 
 import "frameworks/base/core/proto/android/server/windowmanagerservice.proto";
 
-package com.android.server.wm.proto;
+package com.android.server.wm;
 
 option java_multiple_files = true;
 
@@ -48,5 +48,5 @@ message WindowManagerTraceProto {
     /* where the trace originated */
     optional string where = 2;
 
-    optional WindowManagerServiceProto window_manager_service = 3;
+    optional WindowManagerServiceDumpProto window_manager_service = 3;
 }

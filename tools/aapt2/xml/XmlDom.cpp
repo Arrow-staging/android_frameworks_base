@@ -26,6 +26,7 @@
 #include "android-base/logging.h"
 
 #include "ResourceUtils.h"
+#include "trace/TraceBuffer.h"
 #include "XmlPullParser.h"
 #include "util/Util.h"
 
@@ -244,14 +245,19 @@ static void CopyAttributes(Element* el, android::ResXMLParser* parser, StringPoo
       str16 = parser->getAttributeStringValue(i, &len);
       if (str16) {
         attr.value = util::Utf16ToUtf8(StringPiece16(str16, len));
-      } else {
-        android::Res_value res_value;
-        if (parser->getAttributeValue(i, &res_value) > 0) {
+      }
+
+      android::Res_value res_value;
+      if (parser->getAttributeValue(i, &res_value) > 0) {
+        // Only compile the value if it is not a string, or it is a string that differs from
+        // the raw attribute value.
+        int32_t raw_value_idx = parser->getAttributeValueStringID(i);
+        if (res_value.dataType != android::Res_value::TYPE_STRING || raw_value_idx < 0 ||
+            static_cast<uint32_t>(raw_value_idx) != res_value.data) {
           attr.compiled_value = ResourceUtils::ParseBinaryResValue(
               ResourceType::kAnim, {}, parser->getStrings(), res_value, out_pool);
         }
       }
-
 
       el->attributes.push_back(std::move(attr));
     }
@@ -259,12 +265,13 @@ static void CopyAttributes(Element* el, android::ResXMLParser* parser, StringPoo
 }
 
 std::unique_ptr<XmlResource> Inflate(const void* data, size_t len, std::string* out_error) {
+  TRACE_CALL();
   // We import the android namespace because on Windows NO_ERROR is a macro, not
   // an enum, which causes errors when qualifying it with android::
   using namespace android;
 
-  StringPool string_pool;
-  std::unique_ptr<Element> root;
+  std::unique_ptr<XmlResource> xml_resource = util::make_unique<XmlResource>();
+
   std::stack<Element*> node_stack;
   std::unique_ptr<Element> pending_element;
 
@@ -298,6 +305,8 @@ std::unique_ptr<XmlResource> Inflate(const void* data, size_t len, std::string* 
         if (pending_element == nullptr) {
           pending_element = util::make_unique<Element>();
         }
+        // pending_element is not nullptr
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         pending_element->namespace_decls.push_back(std::move(decl));
         break;
       }
@@ -323,12 +332,12 @@ std::unique_ptr<XmlResource> Inflate(const void* data, size_t len, std::string* 
         }
 
         Element* this_el = el.get();
-        CopyAttributes(el.get(), &tree, &string_pool);
+        CopyAttributes(el.get(), &tree, &xml_resource->string_pool);
 
         if (!node_stack.empty()) {
           node_stack.top()->AppendChild(std::move(el));
         } else {
-          root = std::move(el);
+          xml_resource->root = std::move(el);
         }
         node_stack.push(this_el);
         break;
@@ -360,11 +369,12 @@ std::unique_ptr<XmlResource> Inflate(const void* data, size_t len, std::string* 
         break;
     }
   }
-  return util::make_unique<XmlResource>(ResourceFile{}, std::move(string_pool), std::move(root));
+  return xml_resource;
 }
 
 std::unique_ptr<XmlResource> XmlResource::Clone() const {
   std::unique_ptr<XmlResource> cloned = util::make_unique<XmlResource>(file);
+  CloningValueTransformer cloner(&cloned->string_pool);
   if (root != nullptr) {
     cloned->root = root->CloneElement([&](const xml::Element& src, xml::Element* dst) {
       dst->attributes.reserve(src.attributes.size());
@@ -375,7 +385,7 @@ std::unique_ptr<XmlResource> XmlResource::Clone() const {
         cloned_attr.value = attr.value;
         cloned_attr.compiled_attribute = attr.compiled_attribute;
         if (attr.compiled_value != nullptr) {
-          cloned_attr.compiled_value.reset(attr.compiled_value->Clone(&cloned->string_pool));
+          cloned_attr.compiled_value = attr.compiled_value->Transform(cloner);
         }
         dst->attributes.push_back(std::move(cloned_attr));
       }
@@ -416,6 +426,15 @@ const Attribute* Element::FindAttribute(const StringPiece& ns, const StringPiece
     }
   }
   return nullptr;
+}
+
+void Element::RemoveAttribute(const StringPiece& ns, const StringPiece& name) {
+  auto new_attr_end = std::remove_if(attributes.begin(), attributes.end(),
+    [&](const Attribute& attr) -> bool {
+      return ns == attr.namespace_uri && name == attr.name;
+    });
+
+  attributes.erase(new_attr_end, attributes.end());
 }
 
 Attribute* Element::FindOrCreateAttribute(const StringPiece& ns, const StringPiece& name) {
@@ -526,7 +545,7 @@ void Text::Accept(ConstVisitor* visitor) const {
 void PackageAwareVisitor::BeforeVisitElement(Element* el) {
   std::vector<PackageDecl> decls;
   for (const NamespaceDecl& decl : el->namespace_decls) {
-    if (Maybe<ExtractedPackage> maybe_package = ExtractPackageFromNamespace(decl.uri)) {
+    if (std::optional<ExtractedPackage> maybe_package = ExtractPackageFromNamespace(decl.uri)) {
       decls.push_back(PackageDecl{decl.prefix, std::move(maybe_package.value())});
     }
   }
@@ -537,7 +556,8 @@ void PackageAwareVisitor::AfterVisitElement(Element* el) {
   package_decls_.pop_back();
 }
 
-Maybe<ExtractedPackage> PackageAwareVisitor::TransformPackageAlias(const StringPiece& alias) const {
+std::optional<ExtractedPackage> PackageAwareVisitor::TransformPackageAlias(
+    const StringPiece& alias) const {
   if (alias.empty()) {
     return ExtractedPackage{{}, false /*private*/};
   }

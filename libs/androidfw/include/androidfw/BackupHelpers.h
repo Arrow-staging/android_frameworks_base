@@ -67,7 +67,7 @@ struct FileRec {
 class BackupDataWriter
 {
 public:
-    BackupDataWriter(int fd);
+    explicit BackupDataWriter(int fd);
     // does not close fd
     ~BackupDataWriter();
 
@@ -104,7 +104,7 @@ private:
 class BackupDataReader
 {
 public:
-    BackupDataReader(int fd);
+    explicit BackupDataReader(int fd);
     // does not close fd
     ~BackupDataReader();
 
@@ -137,7 +137,7 @@ int back_up_files(int oldSnapshotFD, BackupDataWriter* dataStream, int newSnapsh
         char const* const* files, char const* const *keys, int fileCount);
 
 int write_tarfile(const String8& packageName, const String8& domain,
-        const String8& rootPath, const String8& filePath, off_t* outSize,
+        const String8& rootPath, const String8& filePath, off64_t* outSize,
         BackupDataWriter* outputStream);
 
 class RestoreHelperBase

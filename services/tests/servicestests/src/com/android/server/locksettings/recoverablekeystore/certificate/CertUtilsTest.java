@@ -18,28 +18,30 @@ package com.android.server.locksettings.recoverablekeystore.certificate;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-
 import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.expectThrows;
 
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.w3c.dom.Element;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.io.InputStream;
 import java.security.KeyPairGenerator;
 import java.security.PublicKey;
 import java.security.cert.CertPath;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.w3c.dom.Element;
 
 @SmallTest
 @RunWith(AndroidJUnit4.class)
@@ -314,6 +316,42 @@ public final class CertUtilsTest {
                                 CertUtils.buildPkixParams(
                                         TestData.DATE_ALL_CERTS_VALID, rootCert, intermediateCerts,
                                         leafCert)));
+    }
+
+    @Test
+    public void validateCertPath_succeeds() throws Exception {
+        X509Certificate rootCert = TestData.ROOT_CA_TRUSTED;
+        List<X509Certificate> intermediateCerts =
+                Arrays.asList(TestData.INTERMEDIATE_CA_1, TestData.INTERMEDIATE_CA_2);
+        X509Certificate leafCert = TestData.LEAF_CERT_2;
+        CertPath certPath =
+                CertUtils.buildCertPath(
+                        CertUtils.buildPkixParams(
+                                TestData.DATE_ALL_CERTS_VALID, rootCert, intermediateCerts,
+                                leafCert));
+        CertUtils.validateCertPath(
+                TestData.DATE_ALL_CERTS_VALID, TestData.ROOT_CA_TRUSTED, certPath);
+    }
+
+    @Test
+    public void validateCertPath_throwsIfEmptyCertPath() throws Exception {
+        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
+        CertPath emptyCertPath = certFactory.generateCertPath(new ArrayList<X509Certificate>());
+        CertValidationException expected =
+                expectThrows(
+                        CertValidationException.class,
+                        () -> CertUtils.validateCertPath(TestData.DATE_ALL_CERTS_VALID,
+                                TestData.ROOT_CA_TRUSTED, emptyCertPath));
+        assertThat(expected.getMessage()).contains("empty");
+    }
+
+    @Test
+    public void validateCertPath_throwsIfNotValidated() throws Exception {
+        assertThrows(
+                CertValidationException.class,
+                () -> CertUtils.validateCertPath(TestData.DATE_ALL_CERTS_VALID,
+                        TestData.ROOT_CA_DIFFERENT_COMMON_NAME,
+                        com.android.server.locksettings.recoverablekeystore.TestData.CERT_PATH_1));
     }
 
     @Test

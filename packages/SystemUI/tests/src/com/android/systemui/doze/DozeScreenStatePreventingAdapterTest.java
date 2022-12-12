@@ -22,8 +22,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import android.support.test.filters.SmallTest;
 import android.view.Display;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.systemui.SysuiTestCase;
 import com.android.systemui.statusbar.phone.DozeParameters;
@@ -74,9 +75,9 @@ public class DozeScreenStatePreventingAdapterTest extends SysuiTestCase {
     }
 
     @Test
-    public void forwards_requestWakeUp() throws Exception {
-        mWrapper.requestWakeUp();
-        verify(mInner).requestWakeUp();
+    public void forwards_requestWakeUp() {
+        mWrapper.requestWakeUp(DozeLog.REASON_SENSOR_PICKUP);
+        verify(mInner).requestWakeUp(DozeLog.REASON_SENSOR_PICKUP);
     }
 
     @Test

@@ -14,39 +14,26 @@
 
 package com.android.systemui.tuner;
 
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.KEY;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.KEY_CODE_END;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.KEY_CODE_START;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.KEY_IMAGE_DELIM;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.MENU_IME;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.NAVSPACE;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.NAV_BAR_LEFT;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.NAV_BAR_RIGHT;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.NAV_BAR_VIEWS;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.extractButton;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.extractImage;
-import static com.android.systemui.statusbar.phone.NavigationBarInflaterView.extractKeycode;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.KEY;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.KEY_CODE_END;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.KEY_CODE_START;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.KEY_IMAGE_DELIM;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.MENU_IME_ROTATE;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.NAVSPACE;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.NAV_BAR_LEFT;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.NAV_BAR_RIGHT;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.NAV_BAR_VIEWS;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.extractButton;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.extractImage;
+import static com.android.systemui.navigationbar.NavigationBarInflaterView.extractKeycode;
 
 import android.annotation.Nullable;
 import android.app.AlertDialog;
-import android.content.DialogInterface;
-import android.content.DialogInterface.OnClickListener;
-import android.content.res.Resources;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Paint.FontMetricsInt;
-import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.Handler;
-import android.support.v14.preference.PreferenceFragment;
-import android.support.v7.preference.DropDownPreference;
-import android.support.v7.preference.ListPreference;
-import android.support.v7.preference.Preference;
-import android.support.v7.preference.Preference.OnPreferenceChangeListener;
-import android.support.v7.preference.Preference.OnPreferenceClickListener;
-import android.support.v7.preference.PreferenceCategory;
 import android.text.SpannableStringBuilder;
 import android.text.style.ImageSpan;
 import android.util.Log;
@@ -54,13 +41,17 @@ import android.util.TypedValue;
 import android.view.KeyEvent;
 import android.widget.EditText;
 
+import androidx.preference.ListPreference;
+import androidx.preference.Preference;
+import androidx.preference.Preference.OnPreferenceChangeListener;
+
 import com.android.systemui.Dependency;
 import com.android.systemui.R;
-import com.android.systemui.statusbar.phone.NavigationBarInflaterView;
 import com.android.systemui.tuner.TunerService.Tunable;
 
 import java.util.ArrayList;
 
+@Deprecated
 public class NavBarTuner extends TunerPreferenceFragment {
 
     private static final String LAYOUT = "layout";
@@ -100,7 +91,7 @@ public class NavBarTuner extends TunerPreferenceFragment {
         addPreferencesFromResource(R.xml.nav_bar_tuner);
         bindLayout((ListPreference) findPreference(LAYOUT));
         bindButton(NAV_BAR_LEFT, NAVSPACE, LEFT);
-        bindButton(NAV_BAR_RIGHT, MENU_IME, RIGHT);
+        bindButton(NAV_BAR_RIGHT, MENU_IME_ROTATE, RIGHT);
     }
 
     @Override

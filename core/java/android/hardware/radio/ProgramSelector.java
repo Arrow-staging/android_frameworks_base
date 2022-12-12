@@ -411,7 +411,8 @@ public final class ProgramSelector implements Parcelable {
     /**
      * Checks, if a given AM/FM frequency is roughly valid and in correct unit.
      *
-     * It does not check the range precisely. In particular, it may be way off for certain regions.
+     * It does not check the range precisely: it may provide false positives, but not false
+     * negatives. In particular, it may be way off for certain regions.
      * The main purpose is to avoid passing inproper units, ie. MHz instead of kHz.
      *
      * @param isAm true, if AM, false if FM.
@@ -420,7 +421,7 @@ public final class ProgramSelector implements Parcelable {
      */
     private static boolean isValidAmFmFrequency(boolean isAm, int frequencyKhz) {
         if (isAm) {
-            return frequencyKhz > 150 && frequencyKhz < 30000;
+            return frequencyKhz > 150 && frequencyKhz <= 30000;
         } else {
             return frequencyKhz > 60000 && frequencyKhz < 110000;
         }
@@ -441,6 +442,15 @@ public final class ProgramSelector implements Parcelable {
      */
     public static @NonNull ProgramSelector createAmFmSelector(
             @RadioManager.Band int band, int frequencyKhz, int subChannel) {
+        if (band == RadioManager.BAND_INVALID) {
+            // 50MHz is a rough boundary between AM (<30MHz) and FM (>60MHz).
+            if (frequencyKhz < 50000) {
+                band = (subChannel <= 0) ? RadioManager.BAND_AM : RadioManager.BAND_AM_HD;
+            } else {
+                band = (subChannel <= 0) ? RadioManager.BAND_FM : RadioManager.BAND_FM_HD;
+            }
+        }
+
         boolean isAm = (band == RadioManager.BAND_AM || band == RadioManager.BAND_AM_HD);
         boolean isDigital = (band == RadioManager.BAND_AM_HD || band == RadioManager.BAND_FM_HD);
         if (!isAm && !isDigital && band != RadioManager.BAND_FM) {
@@ -453,7 +463,8 @@ public final class ProgramSelector implements Parcelable {
             throw new IllegalArgumentException("Subchannels are not supported for non-HD radio");
         }
         if (!isValidAmFmFrequency(isAm, frequencyKhz)) {
-            throw new IllegalArgumentException("Provided value is not a valid AM/FM frequency");
+            throw new IllegalArgumentException("Provided value is not a valid AM/FM frequency: "
+                    + frequencyKhz);
         }
 
         // We can't use AM_HD or FM_HD, because we don't know HD station ID.
@@ -474,6 +485,7 @@ public final class ProgramSelector implements Parcelable {
         return new ProgramSelector(programType, primary, secondary, null);
     }
 
+    @NonNull
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder("ProgramSelector(type=").append(mProgramType)
@@ -487,16 +499,17 @@ public final class ProgramSelector implements Parcelable {
     @Override
     public int hashCode() {
         // secondaryIds and vendorIds are ignored for equality/hashing
-        return Objects.hash(mProgramType, mPrimaryId);
+        return mPrimaryId.hashCode();
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
         if (this == obj) return true;
         if (!(obj instanceof ProgramSelector)) return false;
         ProgramSelector other = (ProgramSelector) obj;
         // secondaryIds and vendorIds are ignored for equality/hashing
-        return other.getProgramType() == mProgramType && mPrimaryId.equals(other.getPrimaryId());
+        // programType can be inferred from primaryId, thus not checked
+        return mPrimaryId.equals(other.getPrimaryId());
     }
 
     private ProgramSelector(Parcel in) {
@@ -522,7 +535,7 @@ public final class ProgramSelector implements Parcelable {
         return 0;
     }
 
-    public static final Parcelable.Creator<ProgramSelector> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<ProgramSelector> CREATOR =
             new Parcelable.Creator<ProgramSelector>() {
         public ProgramSelector createFromParcel(Parcel in) {
             return new ProgramSelector(in);
@@ -569,6 +582,19 @@ public final class ProgramSelector implements Parcelable {
         }
 
         /**
+         * Returns whether this Identifier's type is considered a category when filtering
+         * ProgramLists for category entries.
+         *
+         * @see {@link ProgramList.Filter#areCategoriesIncluded()}
+         * @return False if this identifier's type is not tuneable (e.g. DAB ensemble or
+         *         vendor-specified type). True otherwise.
+         */
+        public boolean isCategoryType() {
+            return (mType >= IDENTIFIER_TYPE_VENDOR_START && mType <= IDENTIFIER_TYPE_VENDOR_END)
+                    || mType == IDENTIFIER_TYPE_DAB_ENSEMBLE;
+        }
+
+        /**
          * Value of an identifier.
          *
          * Its meaning depends on identifier type, ie. for IDENTIFIER_TYPE_AMFM_FREQUENCY type,
@@ -586,6 +612,7 @@ public final class ProgramSelector implements Parcelable {
             return mValue;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "Identifier(" + mType + ", " + mValue + ")";
@@ -597,7 +624,7 @@ public final class ProgramSelector implements Parcelable {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj) return true;
             if (!(obj instanceof Identifier)) return false;
             Identifier other = (Identifier) obj;
@@ -620,7 +647,7 @@ public final class ProgramSelector implements Parcelable {
             return 0;
         }
 
-        public static final Parcelable.Creator<Identifier> CREATOR =
+        public static final @android.annotation.NonNull Parcelable.Creator<Identifier> CREATOR =
                 new Parcelable.Creator<Identifier>() {
             public Identifier createFromParcel(Parcel in) {
                 return new Identifier(in);

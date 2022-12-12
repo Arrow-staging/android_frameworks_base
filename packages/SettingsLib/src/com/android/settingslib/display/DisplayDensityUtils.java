@@ -16,11 +16,8 @@
 
 package com.android.settingslib.display;
 
-import com.android.settingslib.R;
-
 import android.content.Context;
 import android.content.res.Resources;
-import android.hardware.display.DisplayManager;
 import android.os.AsyncTask;
 import android.os.RemoteException;
 import android.os.UserHandle;
@@ -28,8 +25,11 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.MathUtils;
 import android.view.Display;
+import android.view.DisplayInfo;
 import android.view.IWindowManager;
 import android.view.WindowManagerGlobal;
+
+import com.android.settingslib.R;
 
 import java.util.Arrays;
 
@@ -38,15 +38,6 @@ import java.util.Arrays;
  */
 public class DisplayDensityUtils {
     private static final String LOG_TAG = "DisplayDensityUtils";
-
-    /** Minimum increment between density scales. */
-    private static final float MIN_SCALE_INTERVAL = 0.09f;
-
-    /** Minimum density scale. This is available on all devices. */
-    private static final float MIN_SCALE = 0.85f;
-
-    /** Maximum density scale. The actual scale used depends on the device. */
-    private static final float MAX_SCALE = 1.50f;
 
     /** Summary used for "default" scale. */
     public static final int SUMMARY_DEFAULT = R.string.screen_zoom_summary_default;
@@ -97,20 +88,25 @@ public class DisplayDensityUtils {
         }
 
         final Resources res = context.getResources();
-        final DisplayMetrics metrics = new DisplayMetrics();
-        context.getDisplay().getRealMetrics(metrics);
+        DisplayInfo info = new DisplayInfo();
+        context.getDisplayNoVerify().getDisplayInfo(info);
 
-        final int currentDensity = metrics.densityDpi;
+        final int currentDensity = info.logicalDensityDpi;
         int currentDensityIndex = -1;
 
         // Compute number of "larger" and "smaller" scales for this display.
-        final int minDimensionPx = Math.min(metrics.widthPixels, metrics.heightPixels);
+        final int minDimensionPx = Math.min(info.logicalWidth, info.logicalHeight);
         final int maxDensity = DisplayMetrics.DENSITY_MEDIUM * minDimensionPx / MIN_DIMENSION_DP;
-        final float maxScale = Math.min(MAX_SCALE, maxDensity / (float) defaultDensity);
-        final float minScale = MIN_SCALE;
-        final int numLarger = (int) MathUtils.constrain((maxScale - 1) / MIN_SCALE_INTERVAL,
+        final float maxScaleDimen = context.getResources().getFraction(
+                R.fraction.display_density_max_scale, 1, 1);
+        final float maxScale = Math.min(maxScaleDimen, maxDensity / (float) defaultDensity);
+        final float minScale = context.getResources().getFraction(
+                R.fraction.display_density_min_scale, 1, 1);
+        final float minScaleInterval = context.getResources().getFraction(
+                R.fraction.display_density_min_scale_interval, 1, 1);
+        final int numLarger = (int) MathUtils.constrain((maxScale - 1) / minScaleInterval,
                 0, SUMMARIES_LARGER.length);
-        final int numSmaller = (int) MathUtils.constrain((1 - minScale) / MIN_SCALE_INTERVAL,
+        final int numSmaller = (int) MathUtils.constrain((1 - minScale) / minScaleInterval,
                 0, SUMMARIES_SMALLER.length);
 
         String[] entries = new String[1 + numSmaller + numLarger];

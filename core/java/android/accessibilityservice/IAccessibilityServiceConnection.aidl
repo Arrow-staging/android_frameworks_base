@@ -17,14 +17,19 @@
 package android.accessibilityservice;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.accessibilityservice.MagnificationConfig;
 import android.content.pm.ParceledListSlice;
+import android.graphics.Bitmap;
 import android.graphics.Region;
 import android.os.Bundle;
+import android.os.RemoteCallback;
 import android.view.MagnificationSpec;
 import android.view.MotionEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.accessibility.IAccessibilityInteractionConnectionCallback;
 import android.view.accessibility.AccessibilityWindowInfo;
+import java.util.List;
 
 /**
  * Interface given to an AccessibilitySerivce to talk to the AccessibilityManagerService.
@@ -34,6 +39,8 @@ import android.view.accessibility.AccessibilityWindowInfo;
 interface IAccessibilityServiceConnection {
 
     void setServiceInfo(in AccessibilityServiceInfo info);
+
+    void setAttributionTag(in String attributionTag);
 
     String[] findAccessibilityNodeInfoByAccessibilityId(int accessibilityWindowId,
         long accessibilityNodeId, int interactionId,
@@ -60,38 +67,83 @@ interface IAccessibilityServiceConnection {
 
     AccessibilityWindowInfo getWindow(int windowId);
 
-    List<AccessibilityWindowInfo> getWindows();
+    AccessibilityWindowInfo.WindowListSparseArray getWindows();
 
     AccessibilityServiceInfo getServiceInfo();
 
     boolean performGlobalAction(int action);
+    List<AccessibilityNodeInfo.AccessibilityAction> getSystemActions();
 
     void disableSelf();
 
     oneway void setOnKeyEventResult(boolean handled, int sequence);
 
-    float getMagnificationScale();
+    MagnificationConfig getMagnificationConfig(int displayId);
 
-    float getMagnificationCenterX();
+    float getMagnificationScale(int displayId);
 
-    float getMagnificationCenterY();
+    float getMagnificationCenterX(int displayId);
 
-    Region getMagnificationRegion();
+    float getMagnificationCenterY(int displayId);
 
-    boolean resetMagnification(boolean animate);
+    Region getMagnificationRegion(int displayId);
 
-    boolean setMagnificationScaleAndCenter(float scale, float centerX, float centerY,
-        boolean animate);
+    Region getCurrentMagnificationRegion(int displayId);
 
-    void setMagnificationCallbackEnabled(boolean enabled);
+    boolean resetMagnification(int displayId, boolean animate);
+
+    boolean resetCurrentMagnification(int displayId, boolean animate);
+
+    boolean setMagnificationConfig(int displayId, in MagnificationConfig config, boolean animate);
+
+    void setMagnificationCallbackEnabled(int displayId, boolean enabled);
 
     boolean setSoftKeyboardShowMode(int showMode);
 
+    int getSoftKeyboardShowMode();
+
     void setSoftKeyboardCallbackEnabled(boolean enabled);
+
+    boolean switchToInputMethod(String imeId);
+
+    int setInputMethodEnabled(String imeId, boolean enabled);
 
     boolean isAccessibilityButtonAvailable();
 
     void sendGesture(int sequence, in ParceledListSlice gestureSteps);
 
+    void dispatchGesture(int sequence, in ParceledListSlice gestureSteps, int displayId);
+
     boolean isFingerprintGestureDetectionAvailable();
+
+    IBinder getOverlayWindowToken(int displayid);
+
+    int getWindowIdForLeashToken(IBinder token);
+
+    void takeScreenshot(int displayId, in RemoteCallback callback);
+
+    void setGestureDetectionPassthroughRegion(int displayId, in Region region);
+
+    void setTouchExplorationPassthroughRegion(int displayId, in Region region);
+
+    void setFocusAppearance(int strokeWidth, int color);
+
+    void setCacheEnabled(boolean enabled);
+
+    oneway void logTrace(long timestamp, String where, long loggingTypes, String callingParams,
+        int processId, long threadId, int callingUid, in Bundle serializedCallingStackInBundle);
+
+    void setServiceDetectsGesturesEnabled(int displayId, boolean mode);
+
+    void requestTouchExploration(int displayId);
+
+    void requestDragging(int displayId, int pointerId);
+
+    void requestDelegating(int displayId);
+
+    void onDoubleTap(int displayId);
+
+    void onDoubleTapAndHold(int displayId);
+
+    void setAnimationScale(float scale);
 }

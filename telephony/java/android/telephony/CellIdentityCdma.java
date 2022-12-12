@@ -16,8 +16,12 @@
 
 package android.telephony;
 
+import static android.text.TextUtils.formatSimple;
+
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.os.Parcel;
-import android.text.TextUtils;
+import android.telephony.cdma.CdmaCellLocation;
 
 import java.util.Objects;
 
@@ -28,12 +32,25 @@ public final class CellIdentityCdma extends CellIdentity {
     private static final String TAG = CellIdentityCdma.class.getSimpleName();
     private static final boolean DBG = false;
 
+    private static final int NETWORK_ID_MAX = 65535;
+    private static final int SYSTEM_ID_MAX = 32767;
+    private static final int BASESTATION_ID_MAX = 65535;
+
+    private static final int LONGITUDE_MIN = -2592000;
+    private static final int LONGITUDE_MAX = 2592000;
+
+    private static final int LATITUDE_MIN = -1296000;
+    private static final int LATITUDE_MAX = 1296000;
+
     // Network Id 0..65535
     private final int mNetworkId;
+
     // CDMA System Id 0..32767
     private final int mSystemId;
+
     // Base Station Id 0..65535
     private final int mBasestationId;
+
     /**
      * Longitude is a decimal number as specified in 3GPP2 C.S0005-A v6.0.
      * It is represented in units of 0.25 seconds and ranges from -2592000
@@ -41,6 +58,7 @@ public final class CellIdentityCdma extends CellIdentity {
      * to +180 degrees).
      */
     private final int mLongitude;
+
     /**
      * Latitude is a decimal number as specified in 3GPP2 C.S0005-A v6.0.
      * It is represented in units of 0.25 seconds and ranges from -1296000
@@ -48,39 +66,18 @@ public final class CellIdentityCdma extends CellIdentity {
      * to +90 degrees).
      */
     private final int mLatitude;
-    // long alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaLong;
-    // short alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaShort;
 
     /**
      * @hide
      */
     public CellIdentityCdma() {
-        super(TAG, TYPE_CDMA, null, null);
-        mNetworkId = Integer.MAX_VALUE;
-        mSystemId = Integer.MAX_VALUE;
-        mBasestationId = Integer.MAX_VALUE;
-        mLongitude = Integer.MAX_VALUE;
-        mLatitude = Integer.MAX_VALUE;
-        mAlphaLong = null;
-        mAlphaShort = null;
-    }
-
-    /**
-     * public constructor
-     * @param nid Network Id 0..65535
-     * @param sid CDMA System Id 0..32767
-     * @param bid Base Station Id 0..65535
-     * @param lon Longitude is a decimal number ranges from -2592000
-     *        to 2592000
-     * @param lat Latitude is a decimal number ranges from -1296000
-     *        to 1296000
-     *
-     * @hide
-     */
-    public CellIdentityCdma(int nid, int sid, int bid, int lon, int lat) {
-        this(nid, sid, bid, lon, lat, null, null);
+        super(TAG, CellInfo.TYPE_CDMA, null, null, null, null);
+        mNetworkId = CellInfo.UNAVAILABLE;
+        mSystemId = CellInfo.UNAVAILABLE;
+        mBasestationId = CellInfo.UNAVAILABLE;
+        mLongitude = CellInfo.UNAVAILABLE;
+        mLatitude = CellInfo.UNAVAILABLE;
+        mGlobalCellId = null;
     }
 
     /**
@@ -97,43 +94,82 @@ public final class CellIdentityCdma extends CellIdentity {
      *
      * @hide
      */
-    public CellIdentityCdma(int nid, int sid, int bid, int lon, int lat, String alphal,
-                             String alphas) {
-        super(TAG, TYPE_CDMA, null, null);
-        mNetworkId = nid;
-        mSystemId = sid;
-        mBasestationId = bid;
-        mLongitude = lon;
-        mLatitude = lat;
-        mAlphaLong = alphal;
-        mAlphaShort = alphas;
+    public CellIdentityCdma(int nid, int sid, int bid, int lon, int lat,
+            @Nullable String alphal, @Nullable String alphas) {
+        super(TAG, CellInfo.TYPE_CDMA, null, null, alphal, alphas);
+        mNetworkId = inRangeOrUnavailable(nid, 0, NETWORK_ID_MAX);
+        mSystemId = inRangeOrUnavailable(sid, 0, SYSTEM_ID_MAX);
+        mBasestationId = inRangeOrUnavailable(bid, 0, BASESTATION_ID_MAX);
+        lat = inRangeOrUnavailable(lat, LATITUDE_MIN, LATITUDE_MAX);
+        lon = inRangeOrUnavailable(lon, LONGITUDE_MIN, LONGITUDE_MAX);
+
+        if (!isNullIsland(lat, lon)) {
+            mLongitude = lon;
+            mLatitude = lat;
+        } else {
+            mLongitude = mLatitude = CellInfo.UNAVAILABLE;
+        }
+        updateGlobalCellId();
     }
 
-    private CellIdentityCdma(CellIdentityCdma cid) {
+    private CellIdentityCdma(@NonNull CellIdentityCdma cid) {
         this(cid.mNetworkId, cid.mSystemId, cid.mBasestationId, cid.mLongitude, cid.mLatitude,
                 cid.mAlphaLong, cid.mAlphaShort);
     }
 
-    CellIdentityCdma copy() {
+    @NonNull CellIdentityCdma copy() {
         return new CellIdentityCdma(this);
     }
 
+    /** @hide */
+    @Override
+    public @NonNull CellIdentityCdma sanitizeLocationInfo() {
+        return new CellIdentityCdma(CellInfo.UNAVAILABLE, CellInfo.UNAVAILABLE,
+                CellInfo.UNAVAILABLE, CellInfo.UNAVAILABLE, CellInfo.UNAVAILABLE,
+                mAlphaLong, mAlphaShort);
+    }
+
+    /** @hide */
+    @Override
+    protected void updateGlobalCellId() {
+        mGlobalCellId = null;
+        if (mNetworkId == CellInfo.UNAVAILABLE || mSystemId == CellInfo.UNAVAILABLE
+                || mBasestationId == CellInfo.UNAVAILABLE) return;
+
+        mGlobalCellId = formatSimple("%04x%04x%04x", mSystemId, mNetworkId,  mBasestationId);
+    }
+
     /**
-     * @return Network Id 0..65535, Integer.MAX_VALUE if unknown
+     * Take the latitude and longitude in 1/4 seconds and see if
+     * the reported location is on Null Island.
+     *
+     * @return whether the reported Lat/Long are for Null Island
+     *
+     * @hide
+     */
+    private boolean isNullIsland(int lat, int lon) {
+        return Math.abs(lat) <= 1 && Math.abs(lon) <= 1;
+    }
+
+    /**
+     * @return Network Id 0..65535, {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE}
+     *         if unavailable.
      */
     public int getNetworkId() {
         return mNetworkId;
     }
 
     /**
-     * @return System Id 0..32767, Integer.MAX_VALUE if unknown
+     * @return System Id 0..32767, {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE}
+     *         if unavailable.
      */
     public int getSystemId() {
         return mSystemId;
     }
 
     /**
-     * @return Base Station Id 0..65535, Integer.MAX_VALUE if unknown
+     * @return Base Station Id 0..65535, {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE}
+     *         if unavailable.
      */
     public int getBasestationId() {
         return mBasestationId;
@@ -144,7 +180,7 @@ public final class CellIdentityCdma extends CellIdentity {
      * specified in 3GPP2 C.S0005-A v6.0. It is represented in units
      * of 0.25 seconds and ranges from -2592000 to 2592000, both
      * values inclusive (corresponding to a range of -180
-     * to +180 degrees). Integer.MAX_VALUE if unknown.
+     * to +180 degrees). {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE} if unavailable.
      */
     public int getLongitude() {
         return mLongitude;
@@ -155,32 +191,29 @@ public final class CellIdentityCdma extends CellIdentity {
      * specified in 3GPP2 C.S0005-A v6.0. It is represented in units
      * of 0.25 seconds and ranges from -1296000 to 1296000, both
      * values inclusive (corresponding to a range of -90
-     * to +90 degrees). Integer.MAX_VALUE if unknown.
+     * to +90 degrees). {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE} if unavailable.
      */
     public int getLatitude() {
         return mLatitude;
     }
 
-    /**
-     * @return The long alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string). May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaLong() {
-        return mAlphaLong;
-    }
-
-    /**
-     * @return The short alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string).  May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaShort() {
-        return mAlphaShort;
-    }
-
     @Override
     public int hashCode() {
         return Objects.hash(mNetworkId, mSystemId, mBasestationId, mLatitude, mLongitude,
-                mAlphaLong, mAlphaShort);
+                super.hashCode());
+    }
+
+    /** @hide */
+    @NonNull
+    @Override
+    public CdmaCellLocation asCellLocation() {
+        CdmaCellLocation cl = new CdmaCellLocation();
+        int bsid = mBasestationId != CellInfo.UNAVAILABLE ? mBasestationId : -1;
+        int sid = mSystemId != CellInfo.UNAVAILABLE ? mSystemId : -1;
+        int nid = mNetworkId != CellInfo.UNAVAILABLE ? mNetworkId : -1;
+        // lat and long already use CellInfo.UNAVAILABLE for invalid/unknown
+        cl.setCellLocationData(bsid, mLatitude, mLongitude, sid, nid);
+        return cl;
     }
 
     @Override
@@ -200,8 +233,7 @@ public final class CellIdentityCdma extends CellIdentity {
                 && mBasestationId == o.mBasestationId
                 && mLatitude == o.mLatitude
                 && mLongitude == o.mLongitude
-                && TextUtils.equals(mAlphaLong, o.mAlphaLong)
-                && TextUtils.equals(mAlphaShort, o.mAlphaShort);
+                && super.equals(other);
     }
 
     @Override
@@ -221,33 +253,30 @@ public final class CellIdentityCdma extends CellIdentity {
     @Override
     public void writeToParcel(Parcel dest, int flags) {
         if (DBG) log("writeToParcel(Parcel, int): " + toString());
-        super.writeToParcel(dest, TYPE_CDMA);
+        super.writeToParcel(dest, CellInfo.TYPE_CDMA);
         dest.writeInt(mNetworkId);
         dest.writeInt(mSystemId);
         dest.writeInt(mBasestationId);
         dest.writeInt(mLongitude);
         dest.writeInt(mLatitude);
-        dest.writeString(mAlphaLong);
-        dest.writeString(mAlphaShort);
     }
 
     /** Construct from Parcel, type has already been processed */
     private CellIdentityCdma(Parcel in) {
-        super(TAG, TYPE_CDMA, in);
+        super(TAG, CellInfo.TYPE_CDMA, in);
         mNetworkId = in.readInt();
         mSystemId = in.readInt();
         mBasestationId = in.readInt();
         mLongitude = in.readInt();
         mLatitude = in.readInt();
-        mAlphaLong = in.readString();
-        mAlphaShort = in.readString();
 
+        updateGlobalCellId();
         if (DBG) log(toString());
     }
 
     /** Implement the Parcelable interface */
     @SuppressWarnings("hiding")
-    public static final Creator<CellIdentityCdma> CREATOR =
+    public static final @android.annotation.NonNull Creator<CellIdentityCdma> CREATOR =
             new Creator<CellIdentityCdma>() {
         @Override
         public CellIdentityCdma createFromParcel(Parcel in) {

@@ -20,9 +20,12 @@ import android.accessibilityservice.IAccessibilityServiceClient;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.view.InputEvent;
+import android.view.SurfaceControl;
 import android.view.WindowContentFrameStats;
 import android.view.WindowAnimationFrameStats;
 import android.os.ParcelFileDescriptor;
+
+import java.util.List;
 
 /**
  * This interface contains privileged operations a shell program can perform
@@ -36,9 +39,11 @@ import android.os.ParcelFileDescriptor;
 interface IUiAutomationConnection {
     void connect(IAccessibilityServiceClient client, int flags);
     void disconnect();
-    boolean injectInputEvent(in InputEvent event, boolean sync);
+    boolean injectInputEvent(in InputEvent event, boolean sync, boolean waitForAnimations);
+    void syncInputTransactions(boolean waitForAnimations);
     boolean setRotation(int rotation);
-    Bitmap takeScreenshot(in Rect crop, int rotation);
+    Bitmap takeScreenshot(in Rect crop);
+    Bitmap takeSurfaceControlScreenshot(in SurfaceControl surfaceControl);
     boolean clearWindowContentFrameStats(int windowId);
     WindowContentFrameStats getWindowContentFrameStats(int windowId);
     void clearWindowAnimationFrameStats();
@@ -47,7 +52,11 @@ interface IUiAutomationConnection {
             in ParcelFileDescriptor source);
     void grantRuntimePermission(String packageName, String permission, int userId);
     void revokeRuntimePermission(String packageName, String permission, int userId);
-
+    void adoptShellPermissionIdentity(int uid, in String[] permissions);
+    void dropShellPermissionIdentity();
     // Called from the system process.
     oneway void shutdown();
+    void executeShellCommandWithStderr(String command, in ParcelFileDescriptor sink,
+                in ParcelFileDescriptor source, in ParcelFileDescriptor stderrSink);
+    List<String> getAdoptedShellPermissions();
 }

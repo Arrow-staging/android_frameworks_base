@@ -21,8 +21,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
-import com.android.internal.hardware.AmbientDisplayConfiguration;
+import android.hardware.display.AmbientDisplayConfiguration;
+
 import com.android.systemui.statusbar.phone.DozeParameters;
+import com.android.systemui.util.sensors.FakeSensorManager;
 
 import org.mockito.Answers;
 import org.mockito.MockSettings;
@@ -35,7 +37,12 @@ public class DozeConfigurationUtil {
         when(params.getPulseOnSigMotion()).thenReturn(false);
         when(params.getPickupVibrationThreshold()).thenReturn(0);
         when(params.getProxCheckBeforePulse()).thenReturn(true);
-        when(params.getPickupSubtypePerformsProxCheck(anyInt())).thenReturn(true);
+        when(params.doubleTapReportsTouchCoordinates()).thenReturn(false);
+        when(params.getDisplayNeedsBlanking()).thenReturn(false);
+        when(params.getSelectivelyRegisterSensorsUsingProx()).thenReturn(false);
+        when(params.singleTapUsesProx(anyInt())).thenReturn(true);
+        when(params.longPressUsesProx()).thenReturn(true);
+        when(params.getQuickPickupAodDuration()).thenReturn(500);
 
         doneHolder[0] = true;
         return params;
@@ -45,12 +52,28 @@ public class DozeConfigurationUtil {
         boolean[] doneHolder = new boolean[1];
         AmbientDisplayConfiguration config = mock(AmbientDisplayConfiguration.class,
                 noDefaultAnswer(doneHolder));
-        when(config.pulseOnDoubleTapEnabled(anyInt())).thenReturn(false);
-        when(config.pulseOnPickupEnabled(anyInt())).thenReturn(false);
+        when(config.doubleTapGestureEnabled(anyInt())).thenReturn(false);
+        when(config.pickupGestureEnabled(anyInt())).thenReturn(false);
         when(config.pulseOnNotificationEnabled(anyInt())).thenReturn(true);
+        when(config.alwaysOnEnabled(anyInt())).thenReturn(false);
+        when(config.dozeSuppressed(anyInt())).thenReturn(false);
+        when(config.enabled(anyInt())).thenReturn(true);
+        when(config.getWakeLockScreenDebounce()).thenReturn(0L);
 
         when(config.doubleTapSensorType()).thenReturn(null);
-        when(config.pulseOnPickupAvailable()).thenReturn(false);
+        when(config.longPressSensorType()).thenReturn(null);
+        when(config.udfpsLongPressSensorType()).thenReturn(null);
+        when(config.quickPickupSensorType()).thenReturn(null);
+
+        when(config.tapGestureEnabled(anyInt())).thenReturn(true);
+        when(config.tapSensorAvailable()).thenReturn(true);
+        when(config.tapSensorTypeMapping()).thenReturn(
+                new String[]{FakeSensorManager.TAP_SENSOR_TYPE});
+
+        when(config.dozePickupSensorAvailable()).thenReturn(false);
+        when(config.wakeScreenGestureAvailable()).thenReturn(false);
+        when(config.quickPickupSensorEnabled(anyInt())).thenReturn(false);
+        when(config.screenOffUdfpsEnabled(anyInt())).thenReturn(false);
 
         doneHolder[0] = true;
         return config;

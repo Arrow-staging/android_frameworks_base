@@ -17,6 +17,15 @@
 // ==========================================================
 // Build the host executable: incident-section-gen
 // ==========================================================
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
 cc_binary_host {
     name: "incident-section-gen",
     cflags: [
@@ -24,6 +33,8 @@ cc_binary_host {
         "-O0",
         "-Wall",
         "-Werror",
+        // Allow implicit fallthroughs in main.cpp until they are fixed.
+        "-Wno-error=implicit-fallthrough",
     ],
     srcs: ["main.cpp"],
     shared_libs: [

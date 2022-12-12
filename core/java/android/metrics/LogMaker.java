@@ -37,7 +37,7 @@ public class LogMaker {
     /**
      * Min required eventlog line length.
      * See: android/util/cts/EventLogTest.java
-     * Size checks enforced here are intended only as sanity checks;
+     * Size limits enforced here are intended only as a precaution;
      * your logs may be truncated earlier. Please log responsibly.
      *
      * @hide
@@ -103,7 +103,7 @@ public class LogMaker {
      * @hide // TODO Expose in the future?  Too late for O.
      */
     public LogMaker setLatency(long milliseconds) {
-        entries.put(MetricsEvent.NOTIFICATION_SINCE_CREATE_MILLIS, milliseconds);
+        entries.put(MetricsEvent.RESERVED_FOR_LOGBUILDER_LATENCY_MILLIS, milliseconds);
         return this;
     }
 
@@ -435,5 +435,13 @@ public class LogMaker {
                 return false;
         }
         return true;
+    }
+
+    /**
+     * @return entries containing key value pairs.
+     * @hide
+     */
+    public SparseArray<Object> getEntries() {
+        return entries;
     }
 }

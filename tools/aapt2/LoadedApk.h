@@ -57,15 +57,21 @@ class LoadedApk {
       const Source& source, std::unique_ptr<io::IFileCollection> collection, IDiagnostics* diag);
 
   LoadedApk(const Source& source, std::unique_ptr<io::IFileCollection> apk,
-            std::unique_ptr<ResourceTable> table, std::unique_ptr<xml::XmlResource> manifest)
+            std::unique_ptr<ResourceTable> table, std::unique_ptr<xml::XmlResource> manifest,
+            const ApkFormat& format)
       : source_(source),
         apk_(std::move(apk)),
         table_(std::move(table)),
-        manifest_(std::move(manifest)) {
+        manifest_(std::move(manifest)),
+        format_(format) {
   }
 
   io::IFileCollection* GetFileCollection() {
     return apk_.get();
+  }
+
+  ApkFormat GetApkFormat() {
+    return format_;
   }
 
   const ResourceTable* GetResourceTable() const {
@@ -104,6 +110,8 @@ class LoadedApk {
                               const TableFlattenerOptions& options, FilterChain* filters,
                               IArchiveWriter* writer, xml::XmlResource* manifest = nullptr);
 
+  /** Loads the file as an xml document. */
+  std::unique_ptr<xml::XmlResource> LoadXml(const std::string& file_path, IDiagnostics* diag) const;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LoadedApk);
@@ -112,8 +120,7 @@ class LoadedApk {
   std::unique_ptr<io::IFileCollection> apk_;
   std::unique_ptr<ResourceTable> table_;
   std::unique_ptr<xml::XmlResource> manifest_;
-
-  static ApkFormat DetermineApkFormat(io::IFileCollection* apk);
+  ApkFormat format_;
 };
 
 }  // namespace aapt

@@ -16,43 +16,48 @@
 
 package com.android.internal.app;
 
+import static junit.framework.Assert.assertEquals;
+
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.ArgumentMatchers.intThat;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.anyLong;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.Mock;
-import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
-import org.mockito.stubbing.Answer;
 
 import android.app.usage.IUsageStatsManager;
 import android.app.usage.UsageStats;
 import android.app.usage.UsageStatsManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.content.res.Resources;
-import android.content.Intent;
 import android.os.RemoteException;
 import android.os.UserHandle;
-import android.support.test.runner.AndroidJUnit4;
 import android.util.ArrayMap;
 
-import java.io.File;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.android.internal.app.ResolverActivity.ResolvedComponentInfo;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentMatcher;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
+
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -77,6 +82,8 @@ public class ResolverListControllerTest {
         Configuration config = new Configuration();
         config.locale = Locale.getDefault();
         List<ResolveInfo> services = new ArrayList<>();
+        mUsm = new UsageStatsManager(mMockContext, mMockService);
+        when(mMockContext.getSystemService(Context.USAGE_STATS_SERVICE)).thenReturn(mUsm);
         when(mMockPackageManager.queryIntentServices(any(), anyInt())).thenReturn(services);
         when(mMockResources.getConfiguration()).thenReturn(config);
         when(mMockContext.getResources()).thenReturn(mMockResources);
@@ -99,7 +106,7 @@ public class ResolverListControllerTest {
         final List<UsageStats> slices = new ArrayList<>();
         slices.add(packageStats);
         ParceledListSlice<UsageStats> stats = new ParceledListSlice<>(slices);
-        when(mMockService.queryUsageStats(anyInt(), anyLong(), anyLong(), anyString()))
+        when(mMockService.queryUsageStats(anyInt(), anyLong(), anyLong(), anyString(), anyInt()))
                 .thenReturn(stats);
         Answer<Void> answer = new Answer<Void>() {
             @Override
@@ -111,15 +118,135 @@ public class ResolverListControllerTest {
         doAnswer(answer).when(mMockService).reportChooserSelection(
                 anyString(), anyInt(), anyString(), any(), anyString());
         when(mMockContext.getOpPackageName()).thenReturn(refererPackage);
-        mUsm = new UsageStatsManager(mMockContext, mMockService);
-        when(mMockContext.getSystemService(Context.USAGE_STATS_SERVICE)).thenReturn(mUsm);
         mController = new ResolverListController(mMockContext, mMockPackageManager, sendIntent,
-                refererPackage, UserHandle.USER_CURRENT);
-        mController.sort(new ArrayList<ResolverActivity.ResolvedComponentInfo>());
+                refererPackage, UserHandle.USER_CURRENT, /* userHandle */ UserHandle.SYSTEM);
+        mController.sort(new ArrayList<ResolvedComponentInfo>());
         long beforeReport = getCount(mUsm, packageName, action, annotation);
         mController.updateChooserCounts(packageName, UserHandle.USER_CURRENT, action);
         long afterReport = getCount(mUsm, packageName, action, annotation);
         assertThat(afterReport, is(beforeReport + 1l));
+    }
+
+    @Test
+    public void topKEqualsToSort() {
+        String annotation = "test_annotation";
+        Intent sendIntent = createSendImageIntent(annotation);
+        String refererPackage = "test_referer_package";
+        List<ResolvedComponentInfo> resolvedComponents = createResolvedComponentsForTest(10);
+        mController = new ResolverListController(mMockContext, mMockPackageManager, sendIntent,
+                refererPackage, UserHandle.USER_CURRENT, /* userHandle */ UserHandle.SYSTEM);
+        List<ResolvedComponentInfo> topKList = new ArrayList<>(resolvedComponents);
+        mController.topK(topKList, 5);
+        List<ResolvedComponentInfo> sortList = new ArrayList<>(topKList);
+        mController.sort(sortList);
+        assertEquals("Top k elements should be sorted when input size greater than k.",
+                sortList.subList(0, 5), topKList.subList(0, 5));
+        mController.topK(topKList, 10);
+        sortList = new ArrayList<>(topKList);
+        mController.sort(sortList);
+        assertEquals("All elements should be sorted when input size equals k.",
+                sortList, topKList);
+        mController.topK(topKList, 15);
+        sortList = new ArrayList<>(topKList);
+        mController.sort(sortList);
+        assertEquals("All elements should be sorted when input size less than k.",
+                sortList, topKList);
+    }
+
+    @Test
+    public void getResolversForIntent_usesResultsFromPackageManager() {
+        mockStats();
+        List<ResolveInfo> infos = new ArrayList<>();
+        infos.add(ResolverDataProvider.createResolveInfo(0, UserHandle.USER_CURRENT));
+        when(mMockPackageManager.queryIntentActivitiesAsUser(any(), anyInt(),
+                any(UserHandle.class))).thenReturn(infos);
+        mController = new ResolverListController(mMockContext, mMockPackageManager,
+                createSendImageIntent("test"), null, UserHandle.USER_CURRENT,
+                /* userHandle= */ UserHandle.SYSTEM);
+        List<Intent> intents = new ArrayList<>();
+        intents.add(createActionMainIntent());
+
+        List<ResolvedComponentInfo> resolvers = mController
+                .getResolversForIntent(
+                        /* shouldGetResolvedFilter= */ true,
+                        /* shouldGetActivityMetadata= */ true,
+                        /* shouldGetOnlyDefaultActivities= */ true,
+                        intents);
+
+        assertThat(resolvers, hasSize(1));
+        assertThat(resolvers.get(0).getResolveInfoAt(0), is(infos.get(0)));
+    }
+
+    @Test
+    public void getResolversForIntent_shouldGetOnlyDefaultActivitiesTrue_addsFlag() {
+        mockStats();
+        List<ResolveInfo> infos = new ArrayList<>();
+        infos.add(ResolverDataProvider.createResolveInfo(0, UserHandle.USER_CURRENT));
+        when(mMockPackageManager.queryIntentActivitiesAsUser(any(), anyInt(),
+                any(UserHandle.class))).thenReturn(infos);
+        mController = new ResolverListController(mMockContext, mMockPackageManager,
+                createSendImageIntent("test"), null, UserHandle.USER_CURRENT,
+                /* userHandle= */ UserHandle.SYSTEM);
+        List<Intent> intents = new ArrayList<>();
+        intents.add(createActionMainIntent());
+
+        mController
+                .getResolversForIntent(
+                        /* shouldGetResolvedFilter= */ true,
+                        /* shouldGetActivityMetadata= */ true,
+                        /* shouldGetOnlyDefaultActivities= */ true,
+                        intents);
+
+        verify(mMockPackageManager).queryIntentActivitiesAsUser(any(),
+                containsFlag(PackageManager.MATCH_DEFAULT_ONLY), any());
+    }
+
+    @Test
+    public void getResolversForIntent_shouldGetOnlyDefaultActivitiesFalse_doesNotAddFlag() {
+        mockStats();
+        List<ResolveInfo> infos = new ArrayList<>();
+        infos.add(ResolverDataProvider.createResolveInfo(0, UserHandle.USER_CURRENT));
+        when(mMockPackageManager.queryIntentActivitiesAsUser(any(), anyInt(),
+                any(UserHandle.class))).thenReturn(infos);
+        mController = new ResolverListController(mMockContext, mMockPackageManager,
+                createSendImageIntent("test"), null, UserHandle.USER_CURRENT,
+                /* userHandle= */ UserHandle.SYSTEM);
+        List<Intent> intents = new ArrayList<>();
+        intents.add(createActionMainIntent());
+
+        mController
+                .getResolversForIntent(
+                        /* shouldGetResolvedFilter= */ true,
+                        /* shouldGetActivityMetadata= */ true,
+                        /* shouldGetOnlyDefaultActivities= */ false,
+                        intents);
+
+        verify(mMockPackageManager).queryIntentActivitiesAsUser(any(),
+                doesNotContainFlag(PackageManager.MATCH_DEFAULT_ONLY), any());
+    }
+
+    private int containsFlag(int flag) {
+        return intThat(new FlagMatcher(flag, /* contains= */ true));
+    }
+
+    private int doesNotContainFlag(int flag) {
+        return intThat(new FlagMatcher(flag, /* contains= */ false));
+    }
+
+    public static class FlagMatcher implements ArgumentMatcher<Integer> {
+
+        private final int mFlag;
+        private final boolean mContains;
+
+        public FlagMatcher(int flag, boolean contains) {
+            mFlag = flag;
+            mContains = contains;
+        }
+
+        @Override
+        public boolean matches(Integer integer) {
+            return ((integer & mFlag) != 0) == mContains;
+        }
     }
 
     private UsageStats initStats(String packageName, String action,
@@ -145,6 +272,24 @@ public class ResolverListControllerTest {
         return sendIntent;
     }
 
+    private Intent createActionMainIntent() {
+        Intent sendIntent = new Intent();
+        sendIntent.setAction(Intent.ACTION_MAIN);
+        sendIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+        return sendIntent;
+    }
+
+    private void mockStats() {
+        final List<UsageStats> slices = new ArrayList<>();
+        ParceledListSlice<UsageStats> stats = new ParceledListSlice<>(slices);
+        try {
+            when(mMockService.queryUsageStats(anyInt(), anyLong(), anyLong(), anyString(),
+                    anyInt())).thenReturn(stats);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
     private Integer getCount(
             UsageStatsManager usm, String packageName, String action, String annotation) {
         if (usm == null) {
@@ -158,5 +303,13 @@ public class ResolverListControllerTest {
             return 0;
         }
         return packageStats.mChooserCounts.get(action).getOrDefault(annotation, 0);
+    }
+
+    private List<ResolvedComponentInfo> createResolvedComponentsForTest(int numberOfResults) {
+        List<ResolvedComponentInfo> infoList = new ArrayList<>(numberOfResults);
+        for (int i = 0; i < numberOfResults; i++) {
+            infoList.add(ResolverDataProvider.createResolvedComponentInfo(i));
+        }
+        return infoList;
     }
 }

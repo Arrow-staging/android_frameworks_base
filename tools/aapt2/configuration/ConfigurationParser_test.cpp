@@ -26,14 +26,11 @@
 #include "test/Test.h"
 #include "xml/XmlDom.h"
 
+using ::android::ConfigDescription;
+
 namespace aapt {
 
 namespace configuration {
-void PrintTo(const AndroidSdk& sdk, std::ostream* os) {
-  *os << "SDK: min=" << sdk.min_sdk_version
-      << ", target=" << sdk.target_sdk_version.value_or_default(-1)
-      << ", max=" << sdk.max_sdk_version.value_or_default(-1);
-}
 
 bool operator==(const ConfiguredArtifact& lhs, const ConfiguredArtifact& rhs) {
   return lhs.name == rhs.name && lhs.abi_group == rhs.abi_group &&
@@ -41,20 +38,6 @@ bool operator==(const ConfiguredArtifact& lhs, const ConfiguredArtifact& rhs) {
          lhs.locale_group == rhs.locale_group && lhs.android_sdk == rhs.android_sdk &&
          lhs.device_feature_group == rhs.device_feature_group &&
          lhs.gl_texture_group == rhs.gl_texture_group;
-}
-
-std::ostream& operator<<(std::ostream& out, const Maybe<std::string>& value) {
-  PrintTo(value, &out);
-  return out;
-}
-
-void PrintTo(const ConfiguredArtifact& artifact, std::ostream* os) {
-  *os << "\n{"
-      << "\n  name: " << artifact.name << "\n  sdk: " << artifact.android_sdk
-      << "\n  abi: " << artifact.abi_group << "\n  density: " << artifact.screen_density_group
-      << "\n  locale: " << artifact.locale_group
-      << "\n  features: " << artifact.device_feature_group
-      << "\n  textures: " << artifact.gl_texture_group << "\n}\n";
 }
 
 namespace handler {
@@ -82,22 +65,22 @@ using ::testing::StrEq;
 constexpr const char* kValidConfig = R"(<?xml version="1.0" encoding="utf-8" ?>
 <post-process xmlns="http://schemas.android.com/tools/aapt">
   <abi-groups>
-    <abi-group label="arm">
-      <abi>armeabi-v7a</abi>
-      <abi>arm64-v8a</abi>
-    </abi-group>
-    <abi-group label="other">
+    <abi-group label="other" version-code-order="2">
       <abi>x86</abi>
       <abi>mips</abi>
     </abi-group>
+    <abi-group label="arm" version-code-order="1">
+      <abi>armeabi-v7a</abi>
+      <abi>arm64-v8a</abi>
+    </abi-group>
   </abi-groups>
   <screen-density-groups>
-    <screen-density-group label="large">
+    <screen-density-group label="large" version-code-order="2">
       <screen-density>xhdpi</screen-density>
       <screen-density>xxhdpi</screen-density>
       <screen-density>xxxhdpi</screen-density>
     </screen-density-group>
-    <screen-density-group label="alldpi">
+    <screen-density-group label="alldpi" version-code-order="1">
       <screen-density>ldpi</screen-density>
       <screen-density>mdpi</screen-density>
       <screen-density>hdpi</screen-density>
@@ -107,16 +90,19 @@ constexpr const char* kValidConfig = R"(<?xml version="1.0" encoding="utf-8" ?>
     </screen-density-group>
   </screen-density-groups>
   <locale-groups>
-    <locale-group label="europe">
+    <locale-group label="europe" version-code-order="1">
       <locale>en</locale>
       <locale>es</locale>
       <locale>fr</locale>
       <locale>de</locale>
     </locale-group>
-    <locale-group label="north-america">
+    <locale-group label="north-america" version-code-order="2">
       <locale>en</locale>
       <locale>es-rMX</locale>
       <locale>fr-rCA</locale>
+    </locale-group>
+    <locale-group label="all" version-code-order="-1">
+      <locale />
     </locale-group>
   </locale-groups>
   <android-sdks>
@@ -131,14 +117,14 @@ constexpr const char* kValidConfig = R"(<?xml version="1.0" encoding="utf-8" ?>
     </android-sdk>
   </android-sdks>
   <gl-texture-groups>
-    <gl-texture-group label="dxt1">
+    <gl-texture-group label="dxt1" version-code-order="2">
       <gl-texture name="GL_EXT_texture_compression_dxt1">
         <texture-path>assets/dxt1/*</texture-path>
       </gl-texture>
     </gl-texture-group>
   </gl-texture-groups>
   <device-feature-groups>
-    <device-feature-group label="low-latency">
+    <device-feature-group label="low-latency" version-code-order="2">
       <supports-feature>android.hardware.audio.low_latency</supports-feature>
     </device-feature-group>
   </device-feature-groups>
@@ -181,26 +167,29 @@ TEST_F(ConfigurationParserTest, ForPath_NoFile) {
 }
 
 TEST_F(ConfigurationParserTest, ExtractConfiguration) {
-  Maybe<PostProcessingConfiguration> maybe_config =
-      ExtractConfiguration(kValidConfig, "dummy.xml", &diag_);
+  std::optional<PostProcessingConfiguration> maybe_config =
+      ExtractConfiguration(kValidConfig, "fake.xml", &diag_);
 
   PostProcessingConfiguration config = maybe_config.value();
 
   auto& arm = config.abi_groups["arm"];
   auto& other = config.abi_groups["other"];
-  EXPECT_EQ(arm.order, 1ul);
-  EXPECT_EQ(other.order, 2ul);
+  EXPECT_EQ(arm.order, 1);
+  EXPECT_EQ(other.order, 2);
 
   auto& large = config.screen_density_groups["large"];
   auto& alldpi = config.screen_density_groups["alldpi"];
-  EXPECT_EQ(large.order, 1ul);
-  EXPECT_EQ(alldpi.order, 2ul);
+  EXPECT_EQ(large.order, 2);
+  EXPECT_EQ(alldpi.order, 1);
 
   auto& north_america = config.locale_groups["north-america"];
   auto& europe = config.locale_groups["europe"];
+  auto& all = config.locale_groups["all"];
   // Checked in reverse to make sure access order does not matter.
-  EXPECT_EQ(north_america.order, 2ul);
-  EXPECT_EQ(europe.order, 1ul);
+  EXPECT_EQ(north_america.order, 2);
+  EXPECT_EQ(europe.order, 1);
+  EXPECT_EQ(all.order, -1);
+  EXPECT_EQ(3ul, config.locale_groups.size());
 }
 
 TEST_F(ConfigurationParserTest, ValidateFile) {
@@ -222,7 +211,7 @@ TEST_F(ConfigurationParserTest, ValidateFile) {
                                       test::ParseConfigOrDie("fr"), test::ParseConfigOrDie("de")));
   ASSERT_TRUE(a1.android_sdk);
   ASSERT_TRUE(a1.android_sdk.value().min_sdk_version);
-  EXPECT_EQ(a1.android_sdk.value().min_sdk_version, 19l);
+  EXPECT_EQ(a1.android_sdk.value().min_sdk_version, 19L);
   EXPECT_THAT(a1.textures, SizeIs(1ul));
   EXPECT_THAT(a1.features, SizeIs(1ul));
 
@@ -242,7 +231,7 @@ TEST_F(ConfigurationParserTest, ValidateFile) {
                           test::ParseConfigOrDie("fr-rCA")));
   ASSERT_TRUE(a2.android_sdk);
   ASSERT_TRUE(a2.android_sdk.value().min_sdk_version);
-  EXPECT_EQ(a2.android_sdk.value().min_sdk_version, 19l);
+  EXPECT_EQ(a2.android_sdk.value().min_sdk_version, 19L);
   EXPECT_THAT(a2.textures, SizeIs(1ul));
   EXPECT_THAT(a2.features, SizeIs(1ul));
 }
@@ -392,7 +381,7 @@ TEST_F(ConfigurationParserTest, ArtifactFormatAction) {
 
 TEST_F(ConfigurationParserTest, AbiGroupAction) {
   static constexpr const char* xml = R"xml(
-    <abi-group label="arm">
+    <abi-group label="arm"  version-code-order="2">
       <!-- First comment. -->
       <abi>
         armeabi-v7a
@@ -415,7 +404,8 @@ TEST_F(ConfigurationParserTest, AbiGroupAction) {
 }
 
 TEST_F(ConfigurationParserTest, AbiGroupAction_EmptyGroup) {
-  static constexpr const char* xml = R"xml(<abi-group label="arm64-v8a"/>)xml";
+  static constexpr const char* xml =
+      R"xml(<abi-group label="arm64-v8a" version-code-order="3"/>)xml";
 
   auto doc = test::BuildXmlDom(xml);
 
@@ -426,12 +416,23 @@ TEST_F(ConfigurationParserTest, AbiGroupAction_EmptyGroup) {
   EXPECT_THAT(config.abi_groups, SizeIs(1ul));
   ASSERT_EQ(1u, config.abi_groups.count("arm64-v8a"));
 
-  auto& out = config.abi_groups["arm64-v8a"].entry;
-  ASSERT_THAT(out, ElementsAre(Abi::kArm64V8a));
+  auto& out = config.abi_groups["arm64-v8a"];
+  ASSERT_THAT(out.entry, ElementsAre(Abi::kArm64V8a));
+  EXPECT_EQ(3, out.order);
+}
+
+TEST_F(ConfigurationParserTest, AbiGroupAction_EmptyGroup_NoOrder) {
+  static constexpr const char* xml = R"xml(<abi-group label="arm64-v8a"/>)xml";
+
+  auto doc = test::BuildXmlDom(xml);
+
+  PostProcessingConfiguration config;
+  bool ok = AbiGroupTagHandler(&config, NodeCast<Element>(doc.get()->root.get()), &diag_);
+  ASSERT_FALSE(ok);
 }
 
 TEST_F(ConfigurationParserTest, AbiGroupAction_InvalidEmptyGroup) {
-  static constexpr const char* xml = R"xml(<abi-group label="arm"/>)xml";
+  static constexpr const char* xml = R"xml(<abi-group label="arm" order="2"/>)xml";
 
   auto doc = test::BuildXmlDom(xml);
 
@@ -442,7 +443,7 @@ TEST_F(ConfigurationParserTest, AbiGroupAction_InvalidEmptyGroup) {
 
 TEST_F(ConfigurationParserTest, ScreenDensityGroupAction) {
   static constexpr const char* xml = R"xml(
-    <screen-density-group label="large">
+    <screen-density-group label="large" version-code-order="2">
       <screen-density>xhdpi</screen-density>
       <screen-density>
         xxhdpi
@@ -471,7 +472,8 @@ TEST_F(ConfigurationParserTest, ScreenDensityGroupAction) {
 }
 
 TEST_F(ConfigurationParserTest, ScreenDensityGroupAction_EmtpyGroup) {
-  static constexpr const char* xml = R"xml(<screen-density-group label="xhdpi"/>)xml";
+  static constexpr const char* xml =
+      R"xml(<screen-density-group label="xhdpi" version-code-order="4"/>)xml";
 
   auto doc = test::BuildXmlDom(xml);
 
@@ -485,8 +487,19 @@ TEST_F(ConfigurationParserTest, ScreenDensityGroupAction_EmtpyGroup) {
   ConfigDescription xhdpi;
   xhdpi.density = ResTable_config::DENSITY_XHIGH;
 
-  auto& out = config.screen_density_groups["xhdpi"].entry;
-  ASSERT_THAT(out, ElementsAre(xhdpi));
+  auto& out = config.screen_density_groups["xhdpi"];
+  EXPECT_THAT(out.entry, ElementsAre(xhdpi));
+  EXPECT_EQ(4, out.order);
+}
+
+TEST_F(ConfigurationParserTest, ScreenDensityGroupAction_EmtpyGroup_NoVersion) {
+  static constexpr const char* xml = R"xml(<screen-density-group label="xhdpi"/>)xml";
+
+  auto doc = test::BuildXmlDom(xml);
+
+  PostProcessingConfiguration config;
+  bool ok = ScreenDensityGroupTagHandler(&config, NodeCast<Element>(doc.get()->root.get()), &diag_);
+  ASSERT_FALSE(ok);
 }
 
 TEST_F(ConfigurationParserTest, ScreenDensityGroupAction_InvalidEmtpyGroup) {
@@ -501,7 +514,7 @@ TEST_F(ConfigurationParserTest, ScreenDensityGroupAction_InvalidEmtpyGroup) {
 
 TEST_F(ConfigurationParserTest, LocaleGroupAction) {
   static constexpr const char* xml = R"xml(
-    <locale-group label="europe">
+    <locale-group label="europe" version-code-order="2">
       <locale>en</locale>
       <locale>es</locale>
       <locale>fr</locale>
@@ -528,7 +541,7 @@ TEST_F(ConfigurationParserTest, LocaleGroupAction) {
 }
 
 TEST_F(ConfigurationParserTest, LocaleGroupAction_EmtpyGroup) {
-  static constexpr const char* xml = R"xml(<locale-group label="en"/>)xml";
+  static constexpr const char* xml = R"xml(<locale-group label="en" version-code-order="6"/>)xml";
 
   auto doc = test::BuildXmlDom(xml);
 
@@ -539,11 +552,22 @@ TEST_F(ConfigurationParserTest, LocaleGroupAction_EmtpyGroup) {
   ASSERT_EQ(1ul, config.locale_groups.size());
   ASSERT_EQ(1u, config.locale_groups.count("en"));
 
-  const auto& out = config.locale_groups["en"].entry;
+  const auto& out = config.locale_groups["en"];
 
   ConfigDescription en = test::ParseConfigOrDie("en");
 
-  ASSERT_THAT(out, ElementsAre(en));
+  EXPECT_THAT(out.entry, ElementsAre(en));
+  EXPECT_EQ(6, out.order);
+}
+
+TEST_F(ConfigurationParserTest, LocaleGroupAction_EmtpyGroup_NoOrder) {
+  static constexpr const char* xml = R"xml(<locale-group label="en"/>)xml";
+
+  auto doc = test::BuildXmlDom(xml);
+
+  PostProcessingConfiguration config;
+  bool ok = LocaleGroupTagHandler(&config, NodeCast<Element>(doc.get()->root.get()), &diag_);
+  ASSERT_FALSE(ok);
 }
 
 TEST_F(ConfigurationParserTest, LocaleGroupAction_InvalidEmtpyGroup) {
@@ -662,40 +686,29 @@ TEST_F(ConfigurationParserTest, AndroidSdkGroupAction_InvalidVersion) {
 }
 
 TEST_F(ConfigurationParserTest, AndroidSdkGroupAction_NonNumeric) {
-  static constexpr const char* xml = R"xml(
+  auto doc = test::BuildXmlDom(R"xml(
       <android-sdk
-          label="P"
+          label="Q"
           minSdkVersion="25"
-          targetSdkVersion="%s"
-          maxSdkVersion="%s">
-      </android-sdk>)xml";
-
-  const auto& dev_sdk = GetDevelopmentSdkCodeNameAndVersion();
-  const char* codename = dev_sdk.first.data();
-  const ApiVersion& version = dev_sdk.second;
-
-  auto doc = test::BuildXmlDom(StringPrintf(xml, codename, codename));
+          targetSdkVersion="Q"
+          maxSdkVersion="Q">
+      </android-sdk>)xml");
 
   PostProcessingConfiguration config;
-  bool ok = AndroidSdkTagHandler(&config, NodeCast<Element>(doc.get()->root.get()), &diag_);
-  ASSERT_TRUE(ok);
-
+  ASSERT_TRUE(AndroidSdkTagHandler(&config, NodeCast<Element>(doc.get()->root.get()), &diag_));
   ASSERT_EQ(1ul, config.android_sdks.size());
-  ASSERT_EQ(1u, config.android_sdks.count("P"));
-
-  auto& out = config.android_sdks["P"];
+  ASSERT_EQ(1u, config.android_sdks.count("Q"));
 
   AndroidSdk sdk;
   sdk.min_sdk_version = 25;
-  sdk.target_sdk_version = version;
-  sdk.max_sdk_version = version;
-
-  ASSERT_EQ(sdk, out);
+  sdk.target_sdk_version = 10000;
+  sdk.max_sdk_version = 10000;
+  ASSERT_EQ(sdk, config.android_sdks["Q"]);
 }
 
 TEST_F(ConfigurationParserTest, GlTextureGroupAction) {
   static constexpr const char* xml = R"xml(
-    <gl-texture-group label="dxt1">
+    <gl-texture-group label="dxt1" version-code-order="2">
       <gl-texture name="GL_EXT_texture_compression_dxt1">
         <texture-path>assets/dxt1/main/*</texture-path>
         <texture-path>
@@ -726,7 +739,7 @@ TEST_F(ConfigurationParserTest, GlTextureGroupAction) {
 
 TEST_F(ConfigurationParserTest, DeviceFeatureGroupAction) {
   static constexpr const char* xml = R"xml(
-    <device-feature-group label="low-latency">
+    <device-feature-group label="low-latency" version-code-order="2">
       <supports-feature>android.hardware.audio.low_latency</supports-feature>
       <supports-feature>
         android.hardware.audio.pro
@@ -747,6 +760,30 @@ TEST_F(ConfigurationParserTest, DeviceFeatureGroupAction) {
   DeviceFeature low_latency = "android.hardware.audio.low_latency";
   DeviceFeature pro = "android.hardware.audio.pro";
   ASSERT_THAT(out, ElementsAre(low_latency, pro));
+}
+
+TEST_F(ConfigurationParserTest, Group_Valid) {
+  Group<int32_t> group;
+  group["item1"].order = 1;
+  group["item2"].order = 2;
+  group["item3"].order = 3;
+  group["item4"].order = 4;
+  group["item5"].order = 5;
+  group["item6"].order = 6;
+
+  EXPECT_TRUE(IsGroupValid(group, "test", &diag_));
+}
+
+TEST_F(ConfigurationParserTest, Group_OverlappingOrder) {
+  Group<int32_t> group;
+  group["item1"].order = 1;
+  group["item2"].order = 2;
+  group["item3"].order = 3;
+  group["item4"].order = 2;
+  group["item5"].order = 5;
+  group["item6"].order = 1;
+
+  EXPECT_FALSE(IsGroupValid(group, "test", &diag_));
 }
 
 // Artifact name parser test cases.
@@ -872,7 +909,8 @@ TEST(ArtifactTest, Nesting) {
 
   EXPECT_FALSE(x86.ToArtifactName("something.${abi${density}}.apk", "", &diag));
 
-  const Maybe<std::string>& name = x86.ToArtifactName("something.${abi${abi}}.apk", "", &diag);
+  const std::optional<std::string>& name =
+      x86.ToArtifactName("something.${abi${abi}}.apk", "", &diag);
   ASSERT_TRUE(name);
   EXPECT_EQ(name.value(), "something.${abix86}.apk");
 }

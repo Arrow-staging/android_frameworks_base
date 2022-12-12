@@ -16,6 +16,7 @@
 
 package android.view.accessibility;
 
+import android.app.RemoteAction;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.IAccessibilityServiceConnection;
 import android.accessibilityservice.IAccessibilityServiceClient;
@@ -24,6 +25,7 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.IAccessibilityInteractionConnection;
 import android.view.accessibility.IAccessibilityManagerClient;
+import android.view.accessibility.IWindowMagnificationConnection;
 import android.view.IWindow;
 
 /**
@@ -40,11 +42,14 @@ interface IAccessibilityManager {
 
     long addClient(IAccessibilityManagerClient client, int userId);
 
+    boolean removeClient(IAccessibilityManagerClient client, int userId);
+
     List<AccessibilityServiceInfo> getInstalledAccessibilityServiceList(int userId);
 
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     List<AccessibilityServiceInfo> getEnabledAccessibilityServiceList(int feedbackType, int userId);
 
-    int addAccessibilityInteractionConnection(IWindow windowToken,
+    int addAccessibilityInteractionConnection(IWindow windowToken, IBinder leashToken,
             in IAccessibilityInteractionConnection connection,
             String packageName, int userId);
 
@@ -61,15 +66,46 @@ interface IAccessibilityManager {
     void temporaryEnableAccessibilityStateUntilKeyguardRemoved(in ComponentName service,
             boolean touchExplorationEnabled);
 
+    // Used by UiAutomation
     IBinder getWindowToken(int windowId, int userId);
 
-    void notifyAccessibilityButtonClicked();
+    void notifyAccessibilityButtonClicked(int displayId, String targetName);
 
     void notifyAccessibilityButtonVisibilityChanged(boolean available);
 
-    // Requires WRITE_SECURE_SETTINGS
-    void performAccessibilityShortcut();
+    // Requires Manifest.permission.MANAGE_ACCESSIBILITY
+    void performAccessibilityShortcut(String targetName);
+
+    // Requires Manifest.permission.MANAGE_ACCESSIBILITY
+    List<String> getAccessibilityShortcutTargets(int shortcutType);
 
     // System process only
     boolean sendFingerprintGesture(int gestureKeyCode);
+
+    // System process only
+    int getAccessibilityWindowId(IBinder windowToken);
+
+    long getRecommendedTimeoutMillis();
+
+    oneway void registerSystemAction(in RemoteAction action, int actionId);
+    oneway void unregisterSystemAction(int actionId);
+    oneway void setWindowMagnificationConnection(in IWindowMagnificationConnection connection);
+
+    void associateEmbeddedHierarchy(IBinder host, IBinder embedded);
+
+    void disassociateEmbeddedHierarchy(IBinder token);
+
+    int getFocusStrokeWidth();
+
+    int getFocusColor();
+
+    boolean isAudioDescriptionByDefaultEnabled();
+
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.SET_SYSTEM_AUDIO_CAPTION)")
+    void setSystemAudioCaptioningEnabled(boolean isEnabled, int userId);
+
+    boolean isSystemAudioCaptioningUiEnabled(int userId);
+
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.SET_SYSTEM_AUDIO_CAPTION)")
+    void setSystemAudioCaptioningUiEnabled(boolean isEnabled, int userId);
 }

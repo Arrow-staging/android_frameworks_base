@@ -14,28 +14,31 @@
 
 package com.android;
 
-import static org.junit.Assert.assertFalse;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.is;
+import static org.junit.Assert.assertThat;
 
-import android.support.test.filters.LargeTest;
-import android.support.test.filters.MediumTest;
-import android.support.test.filters.SmallTest;
-import android.support.test.internal.runner.ClassPathScanner;
-import android.support.test.internal.runner.ClassPathScanner.ChainedClassNameFilter;
-import android.support.test.internal.runner.ClassPathScanner.ExternalClassNameFilter;
 import android.testing.AndroidTestingRunner;
 import android.text.TextUtils;
 import android.util.Log;
+
+import androidx.test.filters.LargeTest;
+import androidx.test.filters.MediumTest;
+import androidx.test.filters.SmallTest;
+import androidx.test.internal.runner.ClassPathScanner;
+import androidx.test.internal.runner.ClassPathScanner.ChainedClassNameFilter;
+import androidx.test.internal.runner.ClassPathScanner.ExternalClassNameFilter;
 
 import com.android.systemui.SysuiBaseFragmentTest;
 import com.android.systemui.SysuiTestCase;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.internal.builders.AllDefaultPossibilitiesBuilder;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -72,9 +75,9 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
 
     @Test
     public void testAllClassInheritance() throws Throwable {
-        boolean anyClassWrong = false;
+        ArrayList<String> fails = new ArrayList<>();
         for (String className : getClassNamesFromClassPath()) {
-            Class<?> cls = Class.forName(className, false, this.getClass().getClassLoader());		
+            Class<?> cls = Class.forName(className, false, this.getClass().getClassLoader());
             if (!isTestClass(cls)) continue;
 
             boolean hasParent = false;
@@ -86,17 +89,15 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
             }
             boolean hasSize = hasSize(cls);
             if (!hasSize) {
-                anyClassWrong = true;
-                Log.e(TAG, cls.getName() + " does not have size annotation, such as @SmallTest");
+                fails.add(cls.getName() + " does not have size annotation, such as @SmallTest");
             }
             if (!hasParent) {
-                anyClassWrong = true;
-                Log.e(TAG, cls.getName() + " does not extend any of " + getClsStr());
+                fails.add(cls.getName() + " does not extend any of " + getClsStr());
             }
         }
 
-        assertFalse("All sysui test classes must have size and extend one of " + getClsStr(),
-                anyClassWrong);
+        assertThat("All sysui test classes must have size and extend one of " + getClsStr(),
+                fails, is(empty()));
     }
 
     private boolean hasSize(Class<?> cls) {
@@ -109,17 +110,30 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
     private Collection<String> getClassNamesFromClassPath() {
         ClassPathScanner scanner = new ClassPathScanner(mContext.getPackageCodePath());
 
+        ChainedClassNameFilter filter = makeClassNameFilter();
+
+        try {
+            return scanner.getClassPathEntries(filter);
+        } catch (IOException e) {
+            Log.e(getTag(), "Failed to scan classes", e);
+        }
+        return Collections.emptyList();
+    }
+
+    protected ChainedClassNameFilter makeClassNameFilter() {
         ChainedClassNameFilter filter = new ChainedClassNameFilter();
 
         filter.add(new ExternalClassNameFilter());
         filter.add(s -> s.startsWith("com.android.systemui")
                 || s.startsWith("com.android.keyguard"));
-        try {
-            return scanner.getClassPathEntries(filter);
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to scan classes", e);
-        }
-        return Collections.emptyList();
+
+        // Screenshots run in an isolated process and should not be run
+        // with the main process dependency graph because it will not exist
+        // at runtime and could lead to incorrect tests which assume
+        // the main SystemUI process. Therefore, exclude this package
+        // from the base class whitelist.
+        filter.add(s -> !s.startsWith("com.android.systemui.screenshot"));
+        return filter;
     }
 
     private String getClsStr() {
@@ -203,8 +217,12 @@ public class AAAPlusPlusVerifySysuiRequiredTestPropertiesTest extends SysuiTestC
      * as loggable to limit log spam during normal use.
      */
     private void logDebug(String msg) {
-        if (Log.isLoggable(TAG, Log.DEBUG)) {
-            Log.d(TAG, msg);
+        if (Log.isLoggable(getTag(), Log.DEBUG)) {
+            Log.d(getTag(), msg);
         }
+    }
+
+    protected String getTag() {
+        return TAG;
     }
 }

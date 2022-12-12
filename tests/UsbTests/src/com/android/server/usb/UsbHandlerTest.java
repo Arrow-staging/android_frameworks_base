@@ -22,6 +22,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import android.app.ActivityManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -29,11 +30,12 @@ import android.content.SharedPreferences;
 import android.hardware.usb.UsbManager;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.UserHandle;
+import android.os.Message;
 import android.provider.Settings;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.server.FgThread;
 
@@ -57,11 +59,11 @@ public class UsbHandlerTest {
     @Mock
     private UsbDeviceManager mUsbDeviceManager;
     @Mock
-    private UsbDebuggingManager mUsbDebuggingManager;
-    @Mock
     private UsbAlsaManager mUsbAlsaManager;
     @Mock
     private UsbSettingsManager mUsbSettingsManager;
+    @Mock
+    private UsbPermissionManager mUsbPermissionManager;
     @Mock
     private SharedPreferences mSharedPreferences;
     @Mock
@@ -87,9 +89,9 @@ public class UsbHandlerTest {
         Intent mBroadcastedIntent;
 
         MockUsbHandler(Looper looper, Context context, UsbDeviceManager deviceManager,
-                UsbDebuggingManager debuggingManager, UsbAlsaManager alsaManager,
-                UsbSettingsManager settingsManager) {
-            super(looper, context, deviceManager, debuggingManager, alsaManager, settingsManager);
+                UsbAlsaManager alsaManager, UsbSettingsManager settingsManager,
+                UsbPermissionManager permissionManager) {
+            super(looper, context, deviceManager, alsaManager, permissionManager);
             mUseUsbNotification = false;
             mIsUsbTransferAllowed = true;
             mCurrentUsbFunctionsReceived = true;
@@ -142,11 +144,12 @@ public class UsbHandlerTest {
         when(mSharedPreferences.edit()).thenReturn(mEditor);
 
         mUsbHandler = new MockUsbHandler(FgThread.get().getLooper(),
-                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbDebuggingManager,
-                mUsbAlsaManager, mUsbSettingsManager);
+                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbAlsaManager,
+                mUsbSettingsManager, mUsbPermissionManager);
     }
 
     @SmallTest
+    @Test
     public void setFunctionsMtp() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_MTP));
@@ -154,6 +157,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void setFunctionsPtp() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_PTP));
@@ -161,6 +165,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void setFunctionsMidi() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_MIDI));
@@ -168,6 +173,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void setFunctionsRndis() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_RNDIS));
@@ -175,14 +181,34 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
+    public void setFunctionsNcmAndRndis() {
+        final long rndisPlusNcm = UsbManager.FUNCTION_RNDIS | UsbManager.FUNCTION_NCM;
+
+        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
+                UsbManager.FUNCTION_NCM));
+        assertEquals(UsbManager.FUNCTION_NCM, mUsbHandler.getEnabledFunctions() & rndisPlusNcm);
+
+        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
+                rndisPlusNcm));
+        assertEquals(rndisPlusNcm, mUsbHandler.getEnabledFunctions() & rndisPlusNcm);
+
+        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
+                UsbManager.FUNCTION_NCM));
+        assertEquals(UsbManager.FUNCTION_NCM, mUsbHandler.getEnabledFunctions() & rndisPlusNcm);
+    }
+
+    @SmallTest
+    @Test
     public void enableAdb() {
         sendBootCompleteMessages(mUsbHandler);
-        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_ENABLE_ADB, 1));
+        Message msg = mUsbHandler.obtainMessage(MSG_ENABLE_ADB);
+        msg.arg1 = 1;
+        mUsbHandler.handleMessage(msg);
         assertEquals(mUsbHandler.getEnabledFunctions(), UsbManager.FUNCTION_NONE);
-        assertTrue(mUsbHandler.mAdbEnabled);
         assertEquals(mMockProperties.get(UsbDeviceManager.UsbHandler
                 .USB_PERSISTENT_CONFIG_PROPERTY), UsbManager.USB_FUNCTION_ADB);
-        verify(mUsbDebuggingManager).setAdbEnabled(true);
+        assertTrue(mUsbHandler.isAdbEnabled());
 
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_UPDATE_STATE, 1, 1));
 
@@ -194,55 +220,58 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void disableAdb() {
         mMockProperties.put(UsbDeviceManager.UsbHandler.USB_PERSISTENT_CONFIG_PROPERTY,
                 UsbManager.USB_FUNCTION_ADB);
         mUsbHandler = new MockUsbHandler(FgThread.get().getLooper(),
-                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbDebuggingManager,
-                mUsbAlsaManager, mUsbSettingsManager);
+                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbAlsaManager,
+                mUsbSettingsManager, mUsbPermissionManager);
 
         sendBootCompleteMessages(mUsbHandler);
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_ENABLE_ADB, 0));
         assertEquals(mUsbHandler.getEnabledFunctions(), UsbManager.FUNCTION_NONE);
-        assertFalse(mUsbHandler.mAdbEnabled);
+        assertFalse(mUsbHandler.isAdbEnabled());
         assertEquals(mMockProperties.get(UsbDeviceManager.UsbHandler
                 .USB_PERSISTENT_CONFIG_PROPERTY), "");
-        verify(mUsbDebuggingManager).setAdbEnabled(false);
     }
 
     @SmallTest
+    @Test
     public void bootCompletedCharging() {
         sendBootCompleteMessages(mUsbHandler);
         assertEquals(mUsbHandler.getEnabledFunctions(), UsbManager.FUNCTION_NONE);
     }
 
-    @Test
     @SmallTest
+    @Test
     public void bootCompletedAdbEnabled() {
         mMockProperties.put(UsbDeviceManager.UsbHandler.USB_PERSISTENT_CONFIG_PROPERTY, "adb");
         mUsbHandler = new MockUsbHandler(FgThread.get().getLooper(),
-                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbDebuggingManager,
-                mUsbAlsaManager, mUsbSettingsManager);
+                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbAlsaManager,
+                mUsbSettingsManager, mUsbPermissionManager);
 
         sendBootCompleteMessages(mUsbHandler);
         assertEquals(mUsbHandler.getEnabledFunctions(), UsbManager.FUNCTION_NONE);
         assertEquals(mMockGlobalSettings.get(Settings.Global.ADB_ENABLED).intValue(), 1);
-        assertTrue(mUsbHandler.mAdbEnabled);
-        verify(mUsbDebuggingManager).setAdbEnabled(true);
+        assertTrue(mUsbHandler.isAdbEnabled());
     }
 
     @SmallTest
+    @Test
     public void userSwitchedDisablesMtp() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_MTP));
         assertNotEquals(mUsbHandler.getEnabledFunctions() & UsbManager.FUNCTION_MTP, 0);
 
-        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_USER_SWITCHED,
-                UserHandle.getCallingUserId() + 1));
+        Message msg = mUsbHandler.obtainMessage(MSG_USER_SWITCHED);
+        msg.arg1 = ActivityManager.getCurrentUser() + 1;
+        mUsbHandler.handleMessage(msg);
         assertEquals(mUsbHandler.getEnabledFunctions(), UsbManager.FUNCTION_NONE);
     }
 
     @SmallTest
+    @Test
     public void changedRestrictionsDisablesMtp() {
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
                 UsbManager.FUNCTION_MTP));
@@ -254,6 +283,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void disconnectResetsCharging() {
         sendBootCompleteMessages(mUsbHandler);
 
@@ -267,6 +297,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void configuredSendsBroadcast() {
         sendBootCompleteMessages(mUsbHandler);
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_SET_CURRENT_FUNCTIONS,
@@ -284,6 +315,7 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void setScreenUnlockedFunctions() {
         sendBootCompleteMessages(mUsbHandler);
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_UPDATE_SCREEN_LOCK, 0));
@@ -298,11 +330,16 @@ public class UsbHandlerTest {
     }
 
     @SmallTest
+    @Test
     public void unlockScreen() {
         when(mSharedPreferences.getString(String.format(Locale.ENGLISH,
                 UsbDeviceManager.UNLOCKED_CONFIG_PREF, mUsbHandler.mCurrentUser), ""))
                 .thenReturn(UsbManager.USB_FUNCTION_MTP);
+        mUsbHandler = new MockUsbHandler(FgThread.get().getLooper(),
+                InstrumentationRegistry.getContext(), mUsbDeviceManager, mUsbAlsaManager,
+                mUsbSettingsManager, mUsbPermissionManager);
         sendBootCompleteMessages(mUsbHandler);
+        mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_UPDATE_SCREEN_LOCK, 1));
         mUsbHandler.handleMessage(mUsbHandler.obtainMessage(MSG_UPDATE_SCREEN_LOCK, 0));
 
         assertNotEquals(mUsbHandler.getScreenUnlockedFunctions() & UsbManager.FUNCTION_MTP, 0);

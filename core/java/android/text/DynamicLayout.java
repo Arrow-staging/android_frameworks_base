@@ -20,8 +20,10 @@ import android.annotation.FloatRange;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.os.Build;
 import android.text.style.ReplacementSpan;
 import android.text.style.UpdateLayout;
 import android.text.style.WrapTogetherSpan;
@@ -353,6 +355,7 @@ public class DynamicLayout extends Layout {
      * @deprecated Use {@link Builder} instead.
      */
     @Deprecated
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     public DynamicLayout(@NonNull CharSequence base, @NonNull CharSequence display,
                          @NonNull TextPaint paint,
                          @IntRange(from = 0) int width,
@@ -363,7 +366,7 @@ public class DynamicLayout extends Layout {
                          @JustificationMode int justificationMode,
                          @Nullable TextUtils.TruncateAt ellipsize,
                          @IntRange(from = 0) int ellipsizedWidth) {
-        super(createEllipsizer(ellipsize, display), null /* precomputed */,
+        super(createEllipsizer(ellipsize, display),
               paint, width, align, textDir, spacingmult, spacingadd);
 
         final Builder b = Builder.obtain(base, paint, width)
@@ -472,9 +475,8 @@ public class DynamicLayout extends Layout {
 
         mObjects.insertAt(0, dirs);
 
-        final int baseLength = mBase.length();
-        // Update from 0 characters to whatever the real text is
-        reflow(mBase, 0, 0, baseLength);
+        // Update from 0 characters to whatever the displayed text is
+        reflow(mBase, 0, 0, mDisplay.length());
 
         if (mBase instanceof Spannable) {
             if (mWatcher == null)
@@ -482,6 +484,7 @@ public class DynamicLayout extends Layout {
 
             // Strip out any watchers for other DynamicLayouts.
             final Spannable sp = (Spannable) mBase;
+            final int baseLength = mBase.length();
             final ChangeWatcher[] spans = sp.getSpans(0, baseLength, ChangeWatcher.class);
             for (int i = 0; i < spans.length; i++) {
                 sp.removeSpan(spans[i]);
@@ -671,7 +674,8 @@ public class DynamicLayout extends Layout {
             objects[0] = reflowed.getLineDirections(i);
 
             final int end = (i == n - 1) ? where + after : reflowed.getLineStart(i + 1);
-            ints[HYPHEN] = reflowed.getHyphen(i) & HYPHEN_MASK;
+            ints[HYPHEN] = StaticLayout.packHyphenEdit(
+                    reflowed.getStartHyphenEdit(i), reflowed.getEndHyphenEdit(i));
             ints[MAY_PROTRUDE_FROM_TOP_OR_BOTTOM] |=
                     contentMayProtrudeFromLineTopOrBottom(text, start, end) ?
                             MAY_PROTRUDE_FROM_TOP_OR_BOTTOM_MASK : 0;
@@ -704,7 +708,12 @@ public class DynamicLayout extends Layout {
         // Spans other than ReplacementSpan can be ignored because line top and bottom are
         // disjunction of all tops and bottoms, although it's not optimal.
         final Paint paint = getPaint();
-        paint.getTextBounds(text, start, end, mTempRect);
+        if (text instanceof PrecomputedText) {
+            PrecomputedText precomputed = (PrecomputedText) text;
+            precomputed.getBounds(start, end, mTempRect);
+        } else {
+            paint.getTextBounds(text, start, end, mTempRect);
+        }
         final Paint.FontMetricsInt fm = paint.getFontMetricsInt();
         return mTempRect.top < fm.top || mTempRect.bottom > fm.bottom;
     }
@@ -939,6 +948,7 @@ public class DynamicLayout extends Layout {
     /**
      * @hide
      */
+    @UnsupportedAppUsage
     public int[] getBlockEndLines() {
         return mBlockEndLines;
     }
@@ -946,6 +956,7 @@ public class DynamicLayout extends Layout {
     /**
      * @hide
      */
+    @UnsupportedAppUsage
     public int[] getBlockIndices() {
         return mBlockIndices;
     }
@@ -968,6 +979,7 @@ public class DynamicLayout extends Layout {
     /**
      * @hide
      */
+    @UnsupportedAppUsage
     public int getNumberOfBlocks() {
         return mNumberOfBlocks;
     }
@@ -975,6 +987,7 @@ public class DynamicLayout extends Layout {
     /**
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int getIndexFirstChangedBlock() {
         return mIndexFirstChangedBlock;
     }
@@ -982,6 +995,7 @@ public class DynamicLayout extends Layout {
     /**
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void setIndexFirstChangedBlock(int i) {
         mIndexFirstChangedBlock = i;
     }
@@ -1043,8 +1057,16 @@ public class DynamicLayout extends Layout {
      * @hide
      */
     @Override
-    public int getHyphen(int line) {
-        return mInts.getValue(line, HYPHEN) & HYPHEN_MASK;
+    public @Paint.StartHyphenEdit int getStartHyphenEdit(int line) {
+        return StaticLayout.unpackStartHyphenEdit(mInts.getValue(line, HYPHEN) & HYPHEN_MASK);
+    }
+
+    /**
+     * @hide
+     */
+    @Override
+    public @Paint.EndHyphenEdit int getEndHyphenEdit(int line) {
+        return StaticLayout.unpackEndHyphenEdit(mInts.getValue(line, HYPHEN) & HYPHEN_MASK);
     }
 
     private boolean getContentMayProtrudeFromTopOrBottom(int line) {
@@ -1164,6 +1186,7 @@ public class DynamicLayout extends Layout {
 
     private Rect mTempRect = new Rect();
 
+    @UnsupportedAppUsage
     private static StaticLayout sStaticLayout = null;
     private static StaticLayout.Builder sBuilder = null;
 

@@ -11,41 +11,34 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License
+ * limitations under the License.
  */
 
 package com.android.server.am;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 
 import android.app.ActivityManagerInternal;
 import android.os.SystemClock;
-import android.support.test.filters.MediumTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.MediumTest;
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 /**
  * Test class for {@link ActivityManagerInternal}.
  *
- * To run the tests, use
- *
- * runtest -c com.android.server.am.ActivityManagerInternalTest frameworks-services
- *
- * or the following steps:
- *
- * Build: m FrameworksServicesTests
- * Install: adb install -r \
- *     ${ANDROID_PRODUCT_OUT}/data/app/FrameworksServicesTests/FrameworksServicesTests.apk
- * Run: adb shell am instrument -e class com.android.server.am.ActivityManagerInternalTest -w \
- *     com.android.frameworks.servicestests/android.support.test.runner.AndroidJUnitRunner
+ * Build/Install/Run:
+ *  atest FrameworksServicesTests:ActivityManagerInternalTest
  */
-@RunWith(AndroidJUnit4.class)
 public class ActivityManagerInternalTest {
     private static final int TEST_UID1 = 111;
     private static final int TEST_UID2 = 112;
@@ -54,15 +47,24 @@ public class ActivityManagerInternalTest {
     private static final long TEST_PROC_STATE_SEQ2 = 1112;
     private static final long TEST_PROC_STATE_SEQ3 = 1113;
 
+    @Rule public ServiceThreadRule mServiceThreadRule = new ServiceThreadRule();
+
     @Mock private ActivityManagerService.Injector mMockInjector;
 
     private ActivityManagerService mAms;
     private ActivityManagerInternal mAmi;
+
     @Before
     public void setUp() {
         MockitoAnnotations.initMocks(this);
 
-        mAms = new ActivityManagerService(mMockInjector);
+        doReturn(InstrumentationRegistry.getInstrumentation().getContext()).when(mMockInjector)
+                .getContext();
+        doReturn(mServiceThreadRule.getThread().getThreadHandler()).when(mMockInjector)
+                .getUiHandler(any());
+        final ProcessList dummyList = new ProcessList();
+        doReturn(dummyList).when(mMockInjector).getProcessList(any());
+        mAms = new ActivityManagerService(mMockInjector, mServiceThreadRule.getThread());
         mAmi = mAms.new LocalService();
     }
 
@@ -127,17 +129,27 @@ public class ActivityManagerInternalTest {
         thread2.assertWaiting("Unexpected state for " + record2);
         thread2.interrupt();
 
-        mAms.mActiveUids.clear();
+        clearActiveUids();
     }
 
     private UidRecord addActiveUidRecord(int uid, long curProcStateSeq,
             long lastNetworkUpdatedProcStateSeq) {
-        final UidRecord record = new UidRecord(uid);
+        final UidRecord record = new UidRecord(uid, mAms);
         record.lastNetworkUpdatedProcStateSeq = lastNetworkUpdatedProcStateSeq;
         record.curProcStateSeq = curProcStateSeq;
-        record.waitingForNetwork = true;
-        mAms.mActiveUids.put(uid, record);
+        record.procStateSeqWaitingForNetwork = 1;
+        addActiveUidRecord(uid, record);
         return record;
+    }
+
+    @SuppressWarnings("GuardedBy")
+    private void addActiveUidRecord(int uid, UidRecord record) {
+        mAms.mProcessList.mActiveUids.put(uid, record);
+    }
+
+    @SuppressWarnings("GuardedBy")
+    private void clearActiveUids() {
+        mAms.mProcessList.mActiveUids.clear();
     }
 
     static class CustomThread extends Thread {
@@ -146,18 +158,19 @@ public class ActivityManagerInternalTest {
 
         private final Object mLock;
         private Runnable mRunnable;
-        boolean mNotified;
+        public boolean mNotified;
 
-        public CustomThread(Object lock) {
+        CustomThread(Object lock) {
             mLock = lock;
         }
 
-        public CustomThread(Object lock, Runnable runnable) {
+        CustomThread(Object lock, Runnable runnable) {
             super(runnable);
             mLock = lock;
             mRunnable = runnable;
         }
 
+        @SuppressWarnings("WaitNotInLoop")
         @Override
         public void run() {
             if (mRunnable != null) {
@@ -167,7 +180,7 @@ public class ActivityManagerInternalTest {
                     try {
                         mLock.wait();
                     } catch (InterruptedException e) {
-                        Thread.currentThread().interrupted();
+                        Thread.interrupted();
                     }
                 }
             }

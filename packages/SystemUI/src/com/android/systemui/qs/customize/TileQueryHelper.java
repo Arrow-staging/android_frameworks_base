@@ -17,102 +17,202 @@
 package com.android.systemui.qs.customize;
 
 import android.Manifest.permission;
-import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.drawable.Drawable;
-import android.os.Handler;
-import android.os.Looper;
+import android.os.Build;
+import android.provider.Settings;
+import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
+import android.text.TextUtils;
+import android.util.ArraySet;
 import android.widget.Button;
 
-import com.android.systemui.Dependency;
+import androidx.annotation.Nullable;
+
 import com.android.systemui.R;
+import com.android.systemui.dagger.qualifiers.Background;
+import com.android.systemui.dagger.qualifiers.Main;
 import com.android.systemui.plugins.qs.QSTile;
 import com.android.systemui.plugins.qs.QSTile.State;
-import com.android.systemui.qs.tileimpl.QSTileImpl.DrawableIcon;
-import com.android.systemui.qs.external.CustomTile;
 import com.android.systemui.qs.QSTileHost;
+import com.android.systemui.qs.dagger.QSScope;
+import com.android.systemui.qs.external.CustomTile;
+import com.android.systemui.qs.tileimpl.QSTileImpl.DrawableIcon;
+import com.android.systemui.settings.UserTracker;
+import com.android.systemui.util.leak.GarbageMonitor;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.Executor;
 
+import javax.inject.Inject;
+
+/** */
+@QSScope
 public class TileQueryHelper {
-
     private static final String TAG = "TileQueryHelper";
 
     private final ArrayList<TileInfo> mTiles = new ArrayList<>();
-    private final ArrayList<String> mSpecs = new ArrayList<>();
+    private final ArraySet<String> mSpecs = new ArraySet<>();
+    private final Executor mMainExecutor;
+    private final Executor mBgExecutor;
     private final Context mContext;
-    private final TileStateListener mListener;
-    private final QSTileHost mHost;
-    private final Runnable mCompletion;
+    private final UserTracker mUserTracker;
+    private TileStateListener mListener;
 
-    public TileQueryHelper(Context context, QSTileHost host,
-            TileStateListener listener, Runnable completion) {
+    private boolean mFinished;
+
+    @Inject
+    public TileQueryHelper(
+            Context context,
+            UserTracker userTracker,
+            @Main Executor mainExecutor,
+            @Background Executor bgExecutor
+    ) {
         mContext = context;
+        mMainExecutor = mainExecutor;
+        mBgExecutor = bgExecutor;
+        mUserTracker = userTracker;
+    }
+
+    public void setListener(@Nullable TileStateListener listener) {
         mListener = listener;
-        mHost = host;
-        mCompletion = completion;
-        addSystemTiles();
-        // TODO: Live?
     }
 
-    private void addSystemTiles() {
+    public void queryTiles(QSTileHost host) {
+        mTiles.clear();
+        mSpecs.clear();
+        mFinished = false;
         // Enqueue jobs to fetch every system tile and then ever package tile.
-        final Handler qsHandler = new Handler((Looper) Dependency.get(Dependency.BG_LOOPER));
-        final Handler mainHandler = new Handler(Looper.getMainLooper());
-        addStockTiles(mainHandler, qsHandler);
-        addPackageTiles(mainHandler, qsHandler);
-        // Then enqueue the completion. It should always be last
-        qsHandler.post(mCompletion);
+        addCurrentAndStockTiles(host);
     }
 
-    private void addStockTiles(Handler mainHandler, Handler bgHandler) {
-        String possible = mContext.getString(R.string.quick_settings_tiles_stock);
-        String[] possibleTiles = possible.split(",");
-        for (int i = 0; i < possibleTiles.length; i++) {
-            final String spec = possibleTiles[i];
-            final QSTile tile = mHost.createTile(spec);
+    public boolean isFinished() {
+        return mFinished;
+    }
+
+    private void addCurrentAndStockTiles(QSTileHost host) {
+        String stock = mContext.getString(R.string.quick_settings_tiles_stock);
+        String current = Settings.Secure.getString(mContext.getContentResolver(),
+                Settings.Secure.QS_TILES);
+        final ArrayList<String> possibleTiles = new ArrayList<>();
+        if (current != null) {
+            // The setting QS_TILES is not populated immediately upon Factory Reset
+            possibleTiles.addAll(Arrays.asList(current.split(",")));
+        } else {
+            current = "";
+        }
+        String[] stockSplit =  stock.split(",");
+        for (String spec : stockSplit) {
+            if (!current.contains(spec)) {
+                possibleTiles.add(spec);
+            }
+        }
+        if (Build.IS_DEBUGGABLE && !current.contains(GarbageMonitor.MemoryTile.TILE_SPEC)) {
+            possibleTiles.add(GarbageMonitor.MemoryTile.TILE_SPEC);
+        }
+
+        final ArrayList<QSTile> tilesToAdd = new ArrayList<>();
+        possibleTiles.remove("cell");
+        possibleTiles.remove("wifi");
+
+        for (String spec : possibleTiles) {
+            // Only add current and stock tiles that can be created from QSFactoryImpl.
+            // Do not include CustomTile. Those will be created by `addPackageTiles`.
+            if (spec.startsWith(CustomTile.PREFIX)) continue;
+            final QSTile tile = host.createTile(spec);
             if (tile == null) {
                 continue;
             } else if (!tile.isAvailable()) {
+                tile.setTileSpec(spec);
                 tile.destroy();
                 continue;
             }
-            tile.setListening(this, true);
-            tile.clearState();
-            tile.refreshState();
-            tile.setListening(this, false);
-            bgHandler.post(new Runnable() {
-                @Override
-                public void run() {
+            tile.setTileSpec(spec);
+            tilesToAdd.add(tile);
+        }
+
+        new TileCollector(tilesToAdd, host).startListening();
+    }
+
+    private static class TilePair {
+        private TilePair(QSTile tile) {
+            mTile = tile;
+        }
+
+        QSTile mTile;
+        boolean mReady = false;
+    }
+
+    private class TileCollector implements QSTile.Callback {
+
+        private final List<TilePair> mQSTileList = new ArrayList<>();
+        private final QSTileHost mQSTileHost;
+
+        TileCollector(List<QSTile> tilesToAdd, QSTileHost host) {
+            for (QSTile tile: tilesToAdd) {
+                TilePair pair = new TilePair(tile);
+                mQSTileList.add(pair);
+            }
+            mQSTileHost = host;
+            if (tilesToAdd.isEmpty()) {
+                mBgExecutor.execute(this::finished);
+            }
+        }
+
+        private void finished() {
+            notifyTilesChanged(false);
+            addPackageTiles(mQSTileHost);
+        }
+
+        private void startListening() {
+            for (TilePair pair: mQSTileList) {
+                pair.mTile.addCallback(this);
+                pair.mTile.setListening(this, true);
+                // Make sure that at least one refresh state happens
+                pair.mTile.refreshState();
+            }
+        }
+
+        // This is called in the Bg thread
+        @Override
+        public void onStateChanged(State s) {
+            boolean allReady = true;
+            for (TilePair pair: mQSTileList) {
+                if (!pair.mReady && pair.mTile.isTileReady()) {
+                    pair.mTile.removeCallback(this);
+                    pair.mTile.setListening(this, false);
+                    pair.mReady = true;
+                } else if (!pair.mReady) {
+                    allReady = false;
+                }
+            }
+            if (allReady) {
+                for (TilePair pair : mQSTileList) {
+                    QSTile tile = pair.mTile;
                     final QSTile.State state = tile.getState().copy();
                     // Ignore the current state and get the generic label instead.
                     state.label = tile.getTileLabel();
                     tile.destroy();
-                    mainHandler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            addTile(spec, null, state, true);
-                            mListener.onTilesChanged(mTiles);
-                        }
-                    });
+                    addTile(tile.getTileSpec(), null, state, true);
                 }
-            });
+                finished();
+            }
         }
     }
 
-    private void addPackageTiles(Handler mainHandler, Handler bgHandler) {
-        bgHandler.post(() -> {
-            Collection<QSTile> params = mHost.getTiles();
+    private void addPackageTiles(final QSTileHost host) {
+        mBgExecutor.execute(() -> {
+            Collection<QSTile> params = host.getTiles();
             PackageManager pm = mContext.getPackageManager();
             List<ResolveInfo> services = pm.queryIntentServicesAsUser(
-                    new Intent(TileService.ACTION_QS_TILE), 0, ActivityManager.getCurrentUser());
+                    new Intent(TileService.ACTION_QS_TILE), 0, mUserTracker.getUserId());
             String stockTiles = mContext.getString(R.string.quick_settings_tiles_stock);
 
             for (ResolveInfo info : services) {
@@ -144,12 +244,25 @@ public class TileQueryHelper {
                 icon.mutate();
                 icon.setTint(mContext.getColor(android.R.color.white));
                 CharSequence label = info.serviceInfo.loadLabel(pm);
-                addTile(spec, icon, label != null ? label.toString() : "null", appLabel, mContext);
+                createStateAndAddTile(spec, icon, label != null ? label.toString() : "null",
+                        appLabel);
             }
-            mainHandler.post(() -> mListener.onTilesChanged(mTiles));
+
+            notifyTilesChanged(true);
         });
     }
 
+    private void notifyTilesChanged(final boolean finished) {
+        final ArrayList<TileInfo> tilesToReturn = new ArrayList<>(mTiles);
+        mMainExecutor.execute(() -> {
+            if (mListener != null) {
+                mListener.onTilesChanged(tilesToReturn);
+            }
+            mFinished = finished;
+        });
+    }
+
+    @Nullable
     private State getState(Collection<QSTile> tiles, String spec) {
         for (QSTile tile : tiles) {
             if (spec.equals(tile.getTileSpec())) {
@@ -159,25 +272,24 @@ public class TileQueryHelper {
         return null;
     }
 
-    private void addTile(String spec, CharSequence appLabel, State state, boolean isSystem) {
+    private void addTile(
+            String spec, @Nullable CharSequence appLabel, State state, boolean isSystem) {
         if (mSpecs.contains(spec)) {
             return;
         }
-        TileInfo info = new TileInfo();
-        info.state = state;
-        info.state.dualTarget = false; // No dual targets in edit.
-        info.state.expandedAccessibilityClassName =
-                Button.class.getName();
-        info.spec = spec;
-        info.appLabel = appLabel;
-        info.isSystem = isSystem;
+        state.dualTarget = false; // No dual targets in edit.
+        state.expandedAccessibilityClassName = Button.class.getName();
+        state.secondaryLabel = (isSystem || TextUtils.equals(state.label, appLabel))
+                ? null : appLabel;
+        TileInfo info = new TileInfo(spec, state, isSystem);
         mTiles.add(info);
         mSpecs.add(spec);
     }
 
-    private void addTile(String spec, Drawable drawable, CharSequence label, CharSequence appLabel,
-            Context context) {
+    private void createStateAndAddTile(
+            String spec, Drawable drawable, CharSequence label, CharSequence appLabel) {
         QSTile.State state = new QSTile.State();
+        state.state = Tile.STATE_INACTIVE;
         state.label = label;
         state.contentDescription = label;
         state.icon = new DrawableIcon(drawable);
@@ -185,8 +297,13 @@ public class TileQueryHelper {
     }
 
     public static class TileInfo {
+        public TileInfo(String spec, QSTile.State state, boolean isSystem) {
+            this.spec = spec;
+            this.state = state;
+            this.isSystem = isSystem;
+        }
+
         public String spec;
-        public CharSequence appLabel;
         public QSTile.State state;
         public boolean isSystem;
     }

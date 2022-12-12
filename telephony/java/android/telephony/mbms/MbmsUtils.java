@@ -23,6 +23,7 @@ import android.content.ServiceConnection;
 import android.content.pm.*;
 import android.content.pm.ServiceInfo;
 import android.telephony.MbmsDownloadSession;
+import android.telephony.MbmsGroupCallSession;
 import android.telephony.MbmsStreamingSession;
 import android.util.Log;
 
@@ -50,7 +51,7 @@ public class MbmsUtils {
         return new ComponentName(ci.packageName, ci.name);
     }
 
-    private static ComponentName getOverrideServiceName(Context context, String serviceAction) {
+    public static ComponentName getOverrideServiceName(Context context, String serviceAction) {
         String metaDataKey = null;
         switch (serviceAction) {
             case MbmsDownloadSession.MBMS_DOWNLOAD_SERVICE_ACTION:
@@ -58,6 +59,9 @@ public class MbmsUtils {
                 break;
             case MbmsStreamingSession.MBMS_STREAMING_SERVICE_ACTION:
                 metaDataKey = MbmsStreamingSession.MBMS_STREAMING_SERVICE_OVERRIDE_METADATA;
+                break;
+            case MbmsGroupCallSession.MBMS_GROUP_CALL_SERVICE_ACTION:
+                metaDataKey = MbmsGroupCallSession.MBMS_GROUP_CALL_SERVICE_OVERRIDE_METADATA;
                 break;
         }
         if (metaDataKey == null) {
@@ -130,8 +134,12 @@ public class MbmsUtils {
      * Returns a File linked to the directory used to store temp files for this file service
      */
     public static File getEmbmsTempFileDirForService(Context context, String serviceId) {
+        // Replace all non-alphanumerics/underscores with an underscore. Some filesystems don't
+        // like special characters.
+        String sanitizedServiceId = serviceId.replaceAll("[^a-zA-Z0-9_]", "_");
+
         File embmsTempFileDir = MbmsTempFileProvider.getEmbmsTempFileDir(context);
 
-        return new File(embmsTempFileDir, serviceId);
+        return new File(embmsTempFileDir, sanitizedServiceId);
     }
 }

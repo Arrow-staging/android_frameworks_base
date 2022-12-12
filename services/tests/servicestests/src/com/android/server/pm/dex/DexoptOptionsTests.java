@@ -19,19 +19,22 @@ package com.android.server.pm.dex;
 
 import static com.android.server.pm.PackageManagerServiceCompilerMapping.getCompilerFilterForReason;
 
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import android.platform.test.annotations.Presubmit;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import com.android.server.pm.PackageManagerService;
 import com.android.server.pm.PackageManagerServiceCompilerMapping;
 
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+@Presubmit
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class DexoptOptionsTests {
@@ -54,6 +57,7 @@ public class DexoptOptionsTests {
         assertFalse(opt.isForce());
         assertFalse(opt.isDexoptIdleBackgroundJob());
         assertFalse(opt.isDexoptInstallWithDexMetadata());
+        assertFalse(opt.isDexoptInstallForRestore());
     }
 
     @Test
@@ -67,7 +71,8 @@ public class DexoptOptionsTests {
                 DexoptOptions.DEXOPT_DOWNGRADE  |
                 DexoptOptions.DEXOPT_AS_SHARED_LIBRARY |
                 DexoptOptions.DEXOPT_IDLE_BACKGROUND_JOB |
-                DexoptOptions.DEXOPT_INSTALL_WITH_DEX_METADATA_FILE;
+                DexoptOptions.DEXOPT_INSTALL_WITH_DEX_METADATA_FILE |
+                DexoptOptions.DEXOPT_FOR_RESTORE;
 
         DexoptOptions opt = new DexoptOptions(mPackageName, mCompilerFilter, flags);
         assertEquals(mPackageName, opt.getPackageName());
@@ -82,6 +87,7 @@ public class DexoptOptionsTests {
         assertTrue(opt.isDexoptAsSharedLibrary());
         assertTrue(opt.isDexoptIdleBackgroundJob());
         assertTrue(opt.isDexoptInstallWithDexMetadata());
+        assertTrue(opt.isDexoptInstallForRestore());
     }
 
     @Test
@@ -93,7 +99,7 @@ public class DexoptOptionsTests {
 
         int[] reasons = new int[] {
                 PackageManagerService.REASON_FIRST_BOOT,
-                PackageManagerService.REASON_BOOT,
+                PackageManagerService.REASON_POST_BOOT,
                 PackageManagerService.REASON_INSTALL,
                 PackageManagerService.REASON_BACKGROUND_DEXOPT,
                 PackageManagerService.REASON_AB_OTA,
@@ -118,7 +124,7 @@ public class DexoptOptionsTests {
     public void testCreateDexoptOptionsSplit() {
         int flags = DexoptOptions.DEXOPT_FORCE | DexoptOptions.DEXOPT_BOOT_COMPLETE;
 
-        DexoptOptions opt = new DexoptOptions(mPackageName, mCompilerFilter, mSplitName, flags);
+        DexoptOptions opt = new DexoptOptions(mPackageName, -1, mCompilerFilter, mSplitName, flags);
         assertEquals(mPackageName, opt.getPackageName());
         assertEquals(mCompilerFilter, opt.getCompilerFilter());
         assertEquals(mSplitName, opt.getSplitName());

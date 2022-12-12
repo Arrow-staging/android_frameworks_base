@@ -18,6 +18,8 @@ package android.security;
 import android.content.pm.StringParceledListSlice;
 import android.security.keymaster.KeymasterCertificateChain;
 import android.security.keystore.ParcelableKeyGenParameterSpec;
+import android.security.AppUriAuthenticationPolicy;
+import android.net.Uri;
 
 /**
  * Caller is required to ensure that {@link KeyStore#unlock
@@ -27,23 +29,25 @@ import android.security.keystore.ParcelableKeyGenParameterSpec;
  */
 interface IKeyChainService {
     // APIs used by KeyChain
+    @UnsupportedAppUsage
     String requestPrivateKey(String alias);
     byte[] getCertificate(String alias);
     byte[] getCaCertificates(String alias);
     boolean isUserSelectable(String alias);
     void setUserSelectable(String alias, boolean isUserSelectable);
 
-    boolean generateKeyPair(in String algorithm, in ParcelableKeyGenParameterSpec spec);
-    boolean attestKey(in String alias, in byte[] challenge, in int[] idAttestationFlags,
-            out KeymasterCertificateChain chain);
+    int generateKeyPair(in String algorithm, in ParcelableKeyGenParameterSpec spec);
     boolean setKeyPairCertificate(String alias, in byte[] userCert, in byte[] certChain);
 
     // APIs used by CertInstaller and DevicePolicyManager
     String installCaCertificate(in byte[] caCertificate);
 
     // APIs used by DevicePolicyManager
-    boolean installKeyPair(in byte[] privateKey, in byte[] userCert, in byte[] certChain, String alias);
+    boolean installKeyPair(
+        in byte[] privateKey, in byte[] userCert, in byte[] certChain, String alias, int uid);
     boolean removeKeyPair(String alias);
+    boolean containsKeyPair(String alias);
+    int[] getGrants(String alias);
 
     // APIs used by Settings
     boolean deleteCaCertificate(String alias);
@@ -53,8 +57,19 @@ interface IKeyChainService {
     boolean containsCaAlias(String alias);
     byte[] getEncodedCaCertificate(String alias, boolean includeDeletedSystem);
     List<String> getCaCertificateChainAliases(String rootAlias, boolean includeDeletedSystem);
+    void setCredentialManagementApp(String packageName, in AppUriAuthenticationPolicy policy);
+    boolean hasCredentialManagementApp();
+    String getCredentialManagementAppPackageName();
+    AppUriAuthenticationPolicy getCredentialManagementAppPolicy();
+    String getPredefinedAliasForPackageAndUri(String packageName, in Uri uri);
+    void removeCredentialManagementApp();
+    boolean isCredentialManagementApp(String packageName);
 
     // APIs used by KeyChainActivity
-    void setGrant(int uid, String alias, boolean value);
+    // setGrant may fail with value=false when ungrant operation fails in KeyStore.
+    boolean setGrant(int uid, String alias, boolean value);
     boolean hasGrant(int uid, String alias);
+
+    // API used by Wifi
+    String getWifiKeyGrantAsUser(String alias);
 }

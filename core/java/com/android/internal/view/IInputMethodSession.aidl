@@ -22,17 +22,18 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.inputmethod.CompletionInfo;
 import android.view.inputmethod.CursorAnchorInfo;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
+
+import com.android.internal.view.IInputContext;
 
 /**
  * Sub-interface of IInputMethod which is safe to give to client applications.
  * {@hide}
  */
 oneway interface IInputMethodSession {
-    void finishInput();
-
     void updateExtractedText(int token, in ExtractedText text);
-    
+
     void updateSelection(int oldSelStart, int oldSelEnd,
             int newSelStart, int newSelEnd,
             int candidatesStart, int candidatesEnd);
@@ -45,9 +46,13 @@ oneway interface IInputMethodSession {
 
     void appPrivateCommand(String action, in Bundle data);
 
-    void toggleSoftInput(int showFlags, int hideFlags);
-
     void finishSession();
 
     void updateCursorAnchorInfo(in CursorAnchorInfo cursorAnchorInfo);
+
+    void removeImeSurface();
+
+    void finishInput();
+
+    void invalidateInput(in EditorInfo editorInfo, in IInputContext inputContext, int sessionId);
 }

@@ -23,9 +23,12 @@ import static android.app.servertransaction.TestUtils.resultInfoList;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 
+import android.app.ActivityOptions;
+import android.app.servertransaction.TestUtils.LaunchActivityItemBuilder;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
@@ -33,14 +36,27 @@ import android.content.res.CompatibilityInfo;
 import android.content.res.Configuration;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.os.PersistableBundle;
 import android.platform.test.annotations.Presubmit;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.function.Supplier;
+
+/**
+ * Tests for {@link ObjectPool}.
+ *
+ * <p>Build/Install/Run:
+ *  atest FrameworksCoreTests:ObjectPoolTests
+ *
+ * <p>This test class is a part of Window Manager Service tests and specified in
+ * {@link com.android.server.wm.test.filters.FrameworksTestsFilter}.
+ */
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 @Presubmit
@@ -52,7 +68,8 @@ public class ObjectPoolTests {
 
     @Test
     public void testRecycleActivityConfigurationChangeItem() {
-        ActivityConfigurationChangeItem emptyItem = ActivityConfigurationChangeItem.obtain(null);
+        ActivityConfigurationChangeItem emptyItem =
+                ActivityConfigurationChangeItem.obtain(Configuration.EMPTY);
         ActivityConfigurationChangeItem item = ActivityConfigurationChangeItem.obtain(config());
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
@@ -116,7 +133,7 @@ public class ObjectPoolTests {
         int ident = 57;
         ActivityInfo activityInfo = new ActivityInfo();
         activityInfo.flags = 42;
-        activityInfo.maxAspectRatio = 2.4f;
+        activityInfo.setMaxAspectRatio(2.4f);
         activityInfo.launchToken = "token";
         activityInfo.applicationInfo = new ApplicationInfo();
         activityInfo.packageName = "packageName";
@@ -130,23 +147,27 @@ public class ObjectPoolTests {
         bundle.putString("key", "value");
         PersistableBundle persistableBundle = new PersistableBundle();
         persistableBundle.putInt("k", 4);
+        IBinder assistToken = new Binder();
+        IBinder shareableActivityToken = new Binder();
 
-        LaunchActivityItem emptyItem = LaunchActivityItem.obtain(null, 0, null, null, null, null,
-                null, null, 0, null, null, null, null, false, null);
-        LaunchActivityItem item = LaunchActivityItem.obtain(intent, ident, activityInfo,
-                config(), overrideConfig, compat, referrer, null /* voiceInteractor */,
-                procState, bundle, persistableBundle, resultInfoList(), referrerIntentList(),
-                true /* isForward */, null /* profilerInfo */);
+        Supplier<LaunchActivityItem> itemSupplier = () -> new LaunchActivityItemBuilder()
+                .setIntent(intent).setIdent(ident).setInfo(activityInfo).setCurConfig(config())
+                .setOverrideConfig(overrideConfig).setCompatInfo(compat).setReferrer(referrer)
+                .setProcState(procState).setState(bundle).setPersistentState(persistableBundle)
+                .setPendingResults(resultInfoList()).setPendingNewIntents(referrerIntentList())
+                .setIsForward(true).setAssistToken(assistToken)
+                .setShareableActivityToken(shareableActivityToken)
+                .setTaskFragmentToken(new Binder()).build();
+
+        LaunchActivityItem emptyItem = new LaunchActivityItemBuilder().build();
+        LaunchActivityItem item = itemSupplier.get();
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
 
         item.recycle();
         assertEquals(item, emptyItem);
 
-        LaunchActivityItem item2 = LaunchActivityItem.obtain(intent, ident, activityInfo,
-                config(), overrideConfig, compat, referrer, null /* voiceInteractor */,
-                procState, bundle, persistableBundle, resultInfoList(), referrerIntentList(),
-                true /* isForward */, null /* profilerInfo */);
+        LaunchActivityItem item2 = itemSupplier.get();
         assertSame(item, item2);
         assertFalse(item2.equals(emptyItem));
     }
@@ -172,7 +193,7 @@ public class ObjectPoolTests {
 
     @Test
     public void testRecycleMoveToDisplayItem() {
-        MoveToDisplayItem emptyItem = MoveToDisplayItem.obtain(0, null);
+        MoveToDisplayItem emptyItem = MoveToDisplayItem.obtain(0, Configuration.EMPTY);
         MoveToDisplayItem item = MoveToDisplayItem.obtain(4, config());
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
@@ -186,61 +207,31 @@ public class ObjectPoolTests {
     }
 
     @Test
-    public void testRecycleMultiWindowModeChangeItem() {
-        MultiWindowModeChangeItem emptyItem = MultiWindowModeChangeItem.obtain(false, null);
-        MultiWindowModeChangeItem item = MultiWindowModeChangeItem.obtain(true, config());
-        assertNotSame(item, emptyItem);
-        assertFalse(item.equals(emptyItem));
-
-        item.recycle();
-        assertEquals(item, emptyItem);
-
-        MultiWindowModeChangeItem item2 = MultiWindowModeChangeItem.obtain(true, config());
-        assertSame(item, item2);
-        assertFalse(item2.equals(emptyItem));
-    }
-
-    @Test
     public void testRecycleNewIntentItem() {
         NewIntentItem emptyItem = NewIntentItem.obtain(null, false);
-        NewIntentItem item = NewIntentItem.obtain(referrerIntentList(), true);
+        NewIntentItem item = NewIntentItem.obtain(referrerIntentList(), false);
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
 
         item.recycle();
         assertEquals(item, emptyItem);
 
-        NewIntentItem item2 = NewIntentItem.obtain(referrerIntentList(), true);
+        NewIntentItem item2 = NewIntentItem.obtain(referrerIntentList(), false);
         assertSame(item, item2);
         assertFalse(item2.equals(emptyItem));
     }
 
     @Test
     public void testRecyclePauseActivityItemItem() {
-        PauseActivityItem emptyItem = PauseActivityItem.obtain(false, false, 0, false);
-        PauseActivityItem item = PauseActivityItem.obtain(true, true, 5, true);
+        PauseActivityItem emptyItem = PauseActivityItem.obtain(false, false, 0, false, false);
+        PauseActivityItem item = PauseActivityItem.obtain(true, true, 5, true, true);
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
 
         item.recycle();
         assertEquals(item, emptyItem);
 
-        PauseActivityItem item2 = PauseActivityItem.obtain(true, false, 5, true);
-        assertSame(item, item2);
-        assertFalse(item2.equals(emptyItem));
-    }
-
-    @Test
-    public void testRecyclePipModeChangeItem() {
-        PipModeChangeItem emptyItem = PipModeChangeItem.obtain(false, null);
-        PipModeChangeItem item = PipModeChangeItem.obtain(true, config());
-        assertNotSame(item, emptyItem);
-        assertFalse(item.equals(emptyItem));
-
-        item.recycle();
-        assertEquals(item, emptyItem);
-
-        PipModeChangeItem item2 = PipModeChangeItem.obtain(true, config());
+        PauseActivityItem item2 = PauseActivityItem.obtain(true, false, 5, true, true);
         assertSame(item, item2);
         assertFalse(item2.equals(emptyItem));
     }
@@ -261,31 +252,32 @@ public class ObjectPoolTests {
     }
 
     @Test
-    public void testRecycleStopItem() {
-        StopActivityItem emptyItem = StopActivityItem.obtain(false, 0);
-        StopActivityItem item = StopActivityItem.obtain(true, 4);
+    public void testRecycleStartActivityItem() {
+        StartActivityItem emptyItem = StartActivityItem.obtain(null /* activityOptions */);
+        StartActivityItem item = StartActivityItem.obtain(ActivityOptions.makeBasic());
         assertNotSame(item, emptyItem);
-        assertFalse(item.equals(emptyItem));
+        assertNotEquals(item, emptyItem);
 
         item.recycle();
         assertEquals(item, emptyItem);
 
-        StopActivityItem item2 = StopActivityItem.obtain(true, 3);
+        StartActivityItem item2 = StartActivityItem.obtain(
+                ActivityOptions.makeBasic().setLaunchDisplayId(10));
         assertSame(item, item2);
-        assertFalse(item2.equals(emptyItem));
+        assertNotEquals(item2, emptyItem);
     }
 
     @Test
-    public void testRecycleWindowVisibleItem() {
-        WindowVisibilityItem emptyItem = WindowVisibilityItem.obtain(false);
-        WindowVisibilityItem item = WindowVisibilityItem.obtain(true);
+    public void testRecycleStopItem() {
+        StopActivityItem emptyItem = StopActivityItem.obtain(0);
+        StopActivityItem item = StopActivityItem.obtain(4);
         assertNotSame(item, emptyItem);
         assertFalse(item.equals(emptyItem));
 
         item.recycle();
         assertEquals(item, emptyItem);
 
-        WindowVisibilityItem item2 = WindowVisibilityItem.obtain(true);
+        StopActivityItem item2 = StopActivityItem.obtain(3);
         assertSame(item, item2);
         assertFalse(item2.equals(emptyItem));
     }

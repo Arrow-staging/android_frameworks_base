@@ -23,9 +23,10 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.os.Parcel;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.view.inputmethod.InputMethodSubtype.InputMethodSubtypeBuilder;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -124,7 +125,7 @@ public class InputMethodSubtypeTest {
         assertEquals("he", clonedSubtypeHe.getLocale());
     }
 
-    private static final InputMethodSubtype cloneViaParcel(final InputMethodSubtype original) {
+    private static InputMethodSubtype cloneViaParcel(final InputMethodSubtype original) {
         Parcel parcel = null;
         try {
             parcel = Parcel.obtain();

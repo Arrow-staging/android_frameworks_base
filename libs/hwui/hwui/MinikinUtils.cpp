@@ -21,6 +21,7 @@
 #include <log/log.h>
 
 #include <minikin/MeasuredText.h>
+#include <minikin/Measurement.h>
 #include "Paint.h"
 #include "SkPathMeasure.h"
 #include "Typeface.h"
@@ -30,16 +31,17 @@ namespace android {
 minikin::MinikinPaint MinikinUtils::prepareMinikinPaint(const Paint* paint,
                                                         const Typeface* typeface) {
     const Typeface* resolvedFace = Typeface::resolveDefault(typeface);
+    const SkFont& font = paint->getSkFont();
 
     minikin::MinikinPaint minikinPaint(resolvedFace->fFontCollection);
     /* Prepare minikin Paint */
     minikinPaint.size =
-            paint->isLinearText() ? paint->getTextSize() : static_cast<int>(paint->getTextSize());
-    minikinPaint.scaleX = paint->getTextScaleX();
-    minikinPaint.skewX = paint->getTextSkewX();
+            font.isLinearMetrics() ? font.getSize() : static_cast<int>(font.getSize());
+    minikinPaint.scaleX = font.getScaleX();
+    minikinPaint.skewX = font.getSkewX();
     minikinPaint.letterSpacing = paint->getLetterSpacing();
     minikinPaint.wordSpacing = paint->getWordSpacing();
-    minikinPaint.paintFlags = MinikinFontSkia::packPaintFlags(paint);
+    minikinPaint.fontFlags = MinikinFontSkia::packFontFlags(font);
     minikinPaint.localeListId = paint->getMinikinLocaleListId();
     minikinPaint.familyVariant = paint->getFamilyVariant();
     minikinPaint.fontStyle = resolvedFace->fStyle;
@@ -48,30 +50,36 @@ minikin::MinikinPaint MinikinUtils::prepareMinikinPaint(const Paint* paint,
 }
 
 minikin::Layout MinikinUtils::doLayout(const Paint* paint, minikin::Bidi bidiFlags,
-                                       const Typeface* typeface, const uint16_t* buf, size_t start,
-                                       size_t count, size_t bufSize, minikin::MeasuredText* mt,
-                                       int mtOffset) {
+                                       const Typeface* typeface, const uint16_t* buf,
+                                       size_t bufSize, size_t start, size_t count,
+                                       size_t contextStart, size_t contextCount,
+                                       minikin::MeasuredText* mt) {
     minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
-    minikin::Layout layout;
 
     const minikin::U16StringPiece textBuf(buf, bufSize);
     const minikin::Range range(start, start + count);
-    const minikin::HyphenEdit hyphenEdit = static_cast<minikin::HyphenEdit>(paint->getHyphenEdit());
-    const minikin::StartHyphenEdit startHyphen = minikin::startHyphenEdit(hyphenEdit);
-    const minikin::EndHyphenEdit endHyphen = minikin::endHyphenEdit(hyphenEdit);
+    const minikin::Range contextRange(contextStart, contextStart + contextCount);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
 
     if (mt == nullptr) {
-        layout.doLayout(textBuf,range, bidiFlags, minikinPaint, startHyphen, endHyphen);
-        return layout;
+        return minikin::Layout(textBuf.substr(contextRange), range - contextStart, bidiFlags,
+                               minikinPaint, startHyphen, endHyphen);
+    } else {
+        return mt->buildLayout(textBuf, range, contextRange, minikinPaint, startHyphen, endHyphen);
     }
+}
 
-    if (mt->buildLayout(textBuf, range, minikinPaint, bidiFlags, mtOffset, startHyphen, endHyphen,
-                        &layout)) {
-        return layout;
-    }
+void MinikinUtils::getBounds(const Paint* paint, minikin::Bidi bidiFlags, const Typeface* typeface,
+                             const uint16_t* buf, size_t bufSize, minikin::MinikinRect* out) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
 
-    layout.doLayout(textBuf, range, bidiFlags, minikinPaint, startHyphen, endHyphen);
-    return layout;
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
+
+    minikin::getBounds(textBuf, minikin::Range(0, textBuf.size()), bidiFlags, minikinPaint,
+        startHyphen, endHyphen, out);
 }
 
 float MinikinUtils::measureText(const Paint* paint, minikin::Bidi bidiFlags,
@@ -80,12 +88,21 @@ float MinikinUtils::measureText(const Paint* paint, minikin::Bidi bidiFlags,
     minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
     const minikin::U16StringPiece textBuf(buf, bufSize);
     const minikin::Range range(start, start + count);
-    const minikin::HyphenEdit hyphenEdit = static_cast<minikin::HyphenEdit>(paint->getHyphenEdit());
-    const minikin::StartHyphenEdit startHyphen = minikin::startHyphenEdit(hyphenEdit);
-    const minikin::EndHyphenEdit endHyphen = minikin::endHyphenEdit(hyphenEdit);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
 
     return minikin::Layout::measureText(textBuf, range, bidiFlags, minikinPaint, startHyphen,
-                                        endHyphen, advances, nullptr /* extent */);
+                                        endHyphen, advances);
+}
+
+minikin::MinikinExtent MinikinUtils::getFontExtent(const Paint* paint, minikin::Bidi bidiFlags,
+                                                   const Typeface* typeface, const uint16_t* buf,
+                                                   size_t start, size_t count, size_t bufSize) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::Range range(start, start + count);
+
+    return minikin::getFontExtent(textBuf, range, bidiFlags, minikinPaint);
 }
 
 bool MinikinUtils::hasVariationSelector(const Typeface* typeface, uint32_t codepoint, uint32_t vs) {

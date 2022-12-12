@@ -20,10 +20,12 @@ import android.annotation.AnyRes;
 import android.annotation.ColorInt;
 import android.annotation.Nullable;
 import android.annotation.StyleableRes;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ActivityInfo.Config;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.StrictMode;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
@@ -44,7 +46,7 @@ import java.util.Arrays;
  * The indices used to retrieve values from this structure correspond to
  * the positions of the attributes given to obtainStyledAttributes.
  */
-public class TypedArray {
+public class TypedArray implements AutoCloseable {
 
     static TypedArray obtain(Resources res, int len) {
         TypedArray attrs = res.mTypedArrayPool.acquire();
@@ -61,24 +63,81 @@ public class TypedArray {
         return attrs;
     }
 
+    // STYLE_ prefixed constants are offsets within the typed data array.
+    // Keep this in sync with libs/androidfw/include/androidfw/AttributeResolution.h
+    static final int STYLE_NUM_ENTRIES = 7;
+    static final int STYLE_TYPE = 0;
+    static final int STYLE_DATA = 1;
+    static final int STYLE_ASSET_COOKIE = 2;
+    static final int STYLE_RESOURCE_ID = 3;
+    static final int STYLE_CHANGING_CONFIGURATIONS = 4;
+    static final int STYLE_DENSITY = 5;
+    static final int STYLE_SOURCE_RESOURCE_ID = 6;
+
+    @UnsupportedAppUsage
     private final Resources mResources;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private DisplayMetrics mMetrics;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private AssetManager mAssets;
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private boolean mRecycled;
 
+    @UnsupportedAppUsage
     /*package*/ XmlBlock.Parser mXml;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     /*package*/ Resources.Theme mTheme;
+    /**
+     * mData is used to hold the value/id and other metadata about each attribute.
+     *
+     * [type, data, asset cookie, resource id, changing configuration, density]
+     *
+     * type - type of this attribute, see TypedValue#TYPE_*
+     *
+     * data - can be used in various ways:
+     *     a) actual value of the attribute if type is between #TYPE_FIRST_INT and #TYPE_LAST_INT
+     *        1) color represented by an integer (#TYPE_INT_COLOR_*)
+     *        2) boolean represented by an integer (#TYPE_INT_BOOLEAN)
+     *        3) integer number (#TYPE_TYPE_INT_DEC or #TYPE_INT_HEX)
+     *        4) float number where integer gets interpreted as float (#TYPE_FLOAT, #TYPE_FRACTION
+     *            and #TYPE_DIMENSION)
+     *     b) index into string block inside AssetManager (#TYPE_STRING)
+     *     c) attribute resource id in the current theme/style (#TYPE_ATTRIBUTE)
+     *
+     * asset cookie - used in two ways:
+     *     a) for strings, drawables, and fonts it specifies the set of apk assets to look at
+     *     (multi-apk case)
+     *     b) cookie + asset as a unique identifier for drawable caches
+     *
+     * resource id - id that was finally used to resolve this attribute
+     *
+     * changing configuration - a mask of the configuration parameters for which the values in this
+     * attribute may change
+     *
+     * density - density of drawable pointed to by this attribute
+     */
+    @UnsupportedAppUsage
     /*package*/ int[] mData;
+    /**
+     * Pointer to the start of the memory address of mData. It is passed via JNI and used to write
+     * to mData array directly from native code (AttributeResolution.cpp).
+     */
     /*package*/ long mDataAddress;
+    @UnsupportedAppUsage
     /*package*/ int[] mIndices;
+    /**
+     * Similar to mDataAddress, but instead it is a pointer to mIndices address.
+     */
     /*package*/ long mIndicesAddress;
+    @UnsupportedAppUsage
     /*package*/ int mLength;
+    @UnsupportedAppUsage
     /*package*/ TypedValue mValue = new TypedValue();
 
     private void resize(int len) {
         mLength = len;
-        final int dataLen = len * AssetManager.STYLE_NUM_ENTRIES;
+        final int dataLen = len * STYLE_NUM_ENTRIES;
         final int indicesLen = len + 1;
         final VMRuntime runtime = VMRuntime.getRuntime();
         if (mDataAddress == 0 || mData.length < dataLen) {
@@ -166,9 +225,9 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return null;
         } else if (type == TypedValue.TYPE_STRING) {
@@ -203,9 +262,9 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return null;
         } else if (type == TypedValue.TYPE_STRING) {
@@ -242,14 +301,13 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_STRING) {
-            final int cookie = data[index+AssetManager.STYLE_ASSET_COOKIE];
+            final int cookie = data[index + STYLE_ASSET_COOKIE];
             if (cookie < 0) {
-                return mXml.getPooledString(
-                    data[index+AssetManager.STYLE_DATA]).toString();
+                return mXml.getPooledString(data[index + STYLE_DATA]).toString();
             }
         }
         return null;
@@ -268,17 +326,18 @@ public class TypedArray {
      * @throws RuntimeException if the TypedArray has already been recycled.
      * @hide
      */
+    @UnsupportedAppUsage
     public String getNonConfigurationString(@StyleableRes int index,
             @Config int allowedChangingConfigs) {
         if (mRecycled) {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         final @Config int changingConfigs = ActivityInfo.activityInfoConfigNativeToJava(
-                data[index + AssetManager.STYLE_CHANGING_CONFIGURATIONS]);
+                data[index + STYLE_CHANGING_CONFIGURATIONS]);
         if ((changingConfigs & ~allowedChangingConfigs) != 0) {
             return null;
         }
@@ -302,8 +361,9 @@ public class TypedArray {
     /**
      * Retrieve the boolean value for the attribute at <var>index</var>.
      * <p>
-     * If the attribute is an integer value, this method will return whether
-     * it is equal to zero. If the attribute is not a boolean or integer value,
+     * If the attribute is an integer value, this method returns false if the
+     * attribute is equal to zero, and true otherwise.
+     * If the attribute is not a boolean or integer value,
      * this method will attempt to coerce it to an integer using
      * {@link Integer#decode(String)} and return whether it is equal to zero.
      *
@@ -320,14 +380,14 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA] != 0;
+            return data[index + STYLE_DATA] != 0;
         }
 
         final TypedValue v = mValue;
@@ -359,14 +419,14 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         }
 
         final TypedValue v = mValue;
@@ -396,16 +456,16 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type == TypedValue.TYPE_FLOAT) {
-            return Float.intBitsToFloat(data[index+AssetManager.STYLE_DATA]);
+            return Float.intBitsToFloat(data[index + STYLE_DATA]);
         } else if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         }
 
         final TypedValue v = mValue;
@@ -446,15 +506,15 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         } else if (type == TypedValue.TYPE_STRING) {
             final TypedValue value = mValue;
             if (getValueAt(index, value)) {
@@ -467,11 +527,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to color: type=0x" + Integer.toHexString(type));
+                + " to color: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -498,10 +559,11 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.loadComplexColor(value, value.resourceId, mTheme);
         }
@@ -533,10 +595,11 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.loadColorStateList(value, value.resourceId, mTheme);
         }
@@ -564,24 +627,25 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to integer: type=0x" + Integer.toHexString(type));
+                + " to integer: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -612,24 +676,24 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type == TypedValue.TYPE_DIMENSION) {
-            return TypedValue.complexToDimension(
-                    data[index + AssetManager.STYLE_DATA], mMetrics);
+            return TypedValue.complexToDimension(data[index + STYLE_DATA], mMetrics);
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -661,24 +725,24 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type == TypedValue.TYPE_DIMENSION) {
-            return TypedValue.complexToDimensionPixelOffset(
-                    data[index + AssetManager.STYLE_DATA], mMetrics);
+            return TypedValue.complexToDimensionPixelOffset(data[index + STYLE_DATA], mMetrics);
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -711,24 +775,24 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type == TypedValue.TYPE_DIMENSION) {
-            return TypedValue.complexToDimensionPixelSize(
-                data[index+AssetManager.STYLE_DATA], mMetrics);
+            return TypedValue.complexToDimensionPixelSize(data[index + STYLE_DATA], mMetrics);
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -755,25 +819,25 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         } else if (type == TypedValue.TYPE_DIMENSION) {
-            return TypedValue.complexToDimensionPixelSize(
-                data[index+AssetManager.STYLE_DATA], mMetrics);
+            return TypedValue.complexToDimensionPixelSize(data[index + STYLE_DATA], mMetrics);
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException(getPositionDescription()
-                + ": You must supply a " + name + " attribute.");
+                + ": You must supply a " + name + " attribute." + ", theme=" + mTheme);
     }
 
     /**
@@ -795,15 +859,14 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type >= TypedValue.TYPE_FIRST_INT
                 && type <= TypedValue.TYPE_LAST_INT) {
-            return data[index+AssetManager.STYLE_DATA];
+            return data[index + STYLE_DATA];
         } else if (type == TypedValue.TYPE_DIMENSION) {
-            return TypedValue.complexToDimensionPixelSize(
-                    data[index + AssetManager.STYLE_DATA], mMetrics);
+            return TypedValue.complexToDimensionPixelSize(data[index + STYLE_DATA], mMetrics);
         }
 
         return defValue;
@@ -833,24 +896,24 @@ public class TypedArray {
         }
 
         final int attrIndex = index;
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
 
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return defValue;
         } else if (type == TypedValue.TYPE_FRACTION) {
-            return TypedValue.complexToFraction(
-                data[index+AssetManager.STYLE_DATA], base, pbase);
+            return TypedValue.complexToFraction(data[index + STYLE_DATA], base, pbase);
         } else if (type == TypedValue.TYPE_ATTRIBUTE) {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to fraction: type=0x" + Integer.toHexString(type));
+                + " to fraction: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -874,10 +937,10 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        if (data[index+AssetManager.STYLE_TYPE] != TypedValue.TYPE_NULL) {
-            final int resid = data[index+AssetManager.STYLE_RESOURCE_ID];
+        if (data[index + STYLE_TYPE] != TypedValue.TYPE_NULL) {
+            final int resid = data[index + STYLE_RESOURCE_ID];
             if (resid != 0) {
                 return resid;
             }
@@ -902,10 +965,10 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        if (data[index + AssetManager.STYLE_TYPE] == TypedValue.TYPE_ATTRIBUTE) {
-            return data[index + AssetManager.STYLE_DATA];
+        if (data[index + STYLE_TYPE] == TypedValue.TYPE_ATTRIBUTE) {
+            return data[index + STYLE_DATA];
         }
         return defValue;
     }
@@ -939,10 +1002,11 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
 
             if (density > 0) {
@@ -975,10 +1039,11 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.getFont(value, value.resourceId);
         }
@@ -1006,7 +1071,7 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             return mResources.getTextArray(value.resourceId);
         }
         return null;
@@ -1027,7 +1092,7 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        return getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, outValue);
+        return getValueAt(index * STYLE_NUM_ENTRIES, outValue);
     }
 
     /**
@@ -1043,8 +1108,56 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
-        return mData[index + AssetManager.STYLE_TYPE];
+        index *= STYLE_NUM_ENTRIES;
+        return mData[index + STYLE_TYPE];
+    }
+
+    /**
+     * Returns the resource ID of the style or layout against which the specified attribute was
+     * resolved, otherwise returns defValue.
+     *
+     * For example, if you we resolving two attributes {@code android:attribute1} and
+     * {@code android:attribute2} and you were inflating a {@link android.view.View} from
+     * {@code layout/my_layout.xml}:
+     * <pre>
+     *     &lt;View
+     *         style="@style/viewStyle"
+     *         android:layout_width="wrap_content"
+     *         android:layout_height="wrap_content"
+     *         android:attribute1="foo"/&gt;
+     * </pre>
+     *
+     * and {@code @style/viewStyle} is:
+     * <pre>
+     *     &lt;style android:name="viewStyle"&gt;
+     *         &lt;item name="android:attribute2"&gt;bar&lt;item/&gt;
+     *     &lt;style/&gt;
+     * </pre>
+     *
+     * then resolved {@link TypedArray} will have values that return source resource ID of
+     * {@code R.layout.my_layout} for {@code android:attribute1} and {@code R.style.viewStyle} for
+     * {@code android:attribute2}.
+     *
+     * @param index Index of attribute whose source style to retrieve.
+     * @param defaultValue Value to return if the attribute is not defined or
+     *                     not a resource.
+     *
+     * @return Either a style resource ID, layout resource ID, or defaultValue if it was not
+     * resolved in a style or layout.
+     * @throws RuntimeException if the TypedArray has already been recycled.
+     */
+    @AnyRes
+    public int getSourceResourceId(@StyleableRes int index, @AnyRes int defaultValue) {
+        if (mRecycled) {
+            throw new RuntimeException("Cannot make calls to a recycled instance!");
+        }
+
+        index *= STYLE_NUM_ENTRIES;
+        final int resid = mData[index + STYLE_SOURCE_RESOURCE_ID];
+        if (resid != 0) {
+            return resid;
+        }
+        return defaultValue;
     }
 
     /**
@@ -1063,9 +1176,9 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         return type != TypedValue.TYPE_NULL;
     }
 
@@ -1084,11 +1197,11 @@ public class TypedArray {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
         }
 
-        index *= AssetManager.STYLE_NUM_ENTRIES;
+        index *= STYLE_NUM_ENTRIES;
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         return type != TypedValue.TYPE_NULL
-                || data[index+AssetManager.STYLE_DATA] == TypedValue.DATA_NULL_EMPTY;
+                || data[index + STYLE_DATA] == TypedValue.DATA_NULL_EMPTY;
     }
 
     /**
@@ -1109,7 +1222,7 @@ public class TypedArray {
         }
 
         final TypedValue value = mValue;
-        if (getValueAt(index*AssetManager.STYLE_NUM_ENTRIES, value)) {
+        if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             return value;
         }
         return null;
@@ -1151,6 +1264,17 @@ public class TypedArray {
     }
 
     /**
+     * Recycles the TypedArray, to be re-used by a later caller. After calling
+     * this function you must not ever touch the typed array again.
+     *
+     * @see #recycle()
+     * @throws RuntimeException if the TypedArray has already been recycled.
+     */
+    public void close() {
+        recycle();
+    }
+
+    /**
      * Extracts theme attributes from a typed array for later resolution using
      * {@link android.content.res.Resources.Theme#resolveAttributes(int[], int[])}.
      * Removes the entries from the typed array so that subsequent calls to typed
@@ -1163,6 +1287,7 @@ public class TypedArray {
      * @hide
      */
     @Nullable
+    @UnsupportedAppUsage
     public int[] extractThemeAttrs() {
         return extractThemeAttrs(null);
     }
@@ -1171,6 +1296,7 @@ public class TypedArray {
      * @hide
      */
     @Nullable
+    @UnsupportedAppUsage
     public int[] extractThemeAttrs(@Nullable int[] scrap) {
         if (mRecycled) {
             throw new RuntimeException("Cannot make calls to a recycled instance!");
@@ -1181,16 +1307,16 @@ public class TypedArray {
         final int[] data = mData;
         final int N = length();
         for (int i = 0; i < N; i++) {
-            final int index = i * AssetManager.STYLE_NUM_ENTRIES;
-            if (data[index + AssetManager.STYLE_TYPE] != TypedValue.TYPE_ATTRIBUTE) {
+            final int index = i * STYLE_NUM_ENTRIES;
+            if (data[index + STYLE_TYPE] != TypedValue.TYPE_ATTRIBUTE) {
                 // Not an attribute, ignore.
                 continue;
             }
 
             // Null the entry so that we can safely call getZzz().
-            data[index + AssetManager.STYLE_TYPE] = TypedValue.TYPE_NULL;
+            data[index + STYLE_TYPE] = TypedValue.TYPE_NULL;
 
-            final int attr = data[index + AssetManager.STYLE_DATA];
+            final int attr = data[index + STYLE_DATA];
             if (attr == 0) {
                 // Useless data, ignore.
                 continue;
@@ -1231,45 +1357,47 @@ public class TypedArray {
         final int[] data = mData;
         final int N = length();
         for (int i = 0; i < N; i++) {
-            final int index = i * AssetManager.STYLE_NUM_ENTRIES;
-            final int type = data[index + AssetManager.STYLE_TYPE];
+            final int index = i * STYLE_NUM_ENTRIES;
+            final int type = data[index + STYLE_TYPE];
             if (type == TypedValue.TYPE_NULL) {
                 continue;
             }
             changingConfig |= ActivityInfo.activityInfoConfigNativeToJava(
-                    data[index + AssetManager.STYLE_CHANGING_CONFIGURATIONS]);
+                    data[index + STYLE_CHANGING_CONFIGURATIONS]);
         }
         return changingConfig;
     }
 
+    @UnsupportedAppUsage
     private boolean getValueAt(int index, TypedValue outValue) {
         final int[] data = mData;
-        final int type = data[index+AssetManager.STYLE_TYPE];
+        final int type = data[index + STYLE_TYPE];
         if (type == TypedValue.TYPE_NULL) {
             return false;
         }
         outValue.type = type;
-        outValue.data = data[index+AssetManager.STYLE_DATA];
-        outValue.assetCookie = data[index+AssetManager.STYLE_ASSET_COOKIE];
-        outValue.resourceId = data[index+AssetManager.STYLE_RESOURCE_ID];
+        outValue.data = data[index + STYLE_DATA];
+        outValue.assetCookie = data[index + STYLE_ASSET_COOKIE];
+        outValue.resourceId = data[index + STYLE_RESOURCE_ID];
         outValue.changingConfigurations = ActivityInfo.activityInfoConfigNativeToJava(
-                data[index + AssetManager.STYLE_CHANGING_CONFIGURATIONS]);
-        outValue.density = data[index+AssetManager.STYLE_DENSITY];
+                data[index + STYLE_CHANGING_CONFIGURATIONS]);
+        outValue.density = data[index + STYLE_DENSITY];
         outValue.string = (type == TypedValue.TYPE_STRING) ? loadStringValueAt(index) : null;
+        outValue.sourceResourceId = data[index + STYLE_SOURCE_RESOURCE_ID];
         return true;
     }
 
+    @Nullable
     private CharSequence loadStringValueAt(int index) {
         final int[] data = mData;
-        final int cookie = data[index+AssetManager.STYLE_ASSET_COOKIE];
+        final int cookie = data[index + STYLE_ASSET_COOKIE];
         if (cookie < 0) {
             if (mXml != null) {
-                return mXml.getPooledString(
-                    data[index+AssetManager.STYLE_DATA]);
+                return mXml.getPooledString(data[index + STYLE_DATA]);
             }
             return null;
         }
-        return mAssets.getPooledStringForCookie(cookie, data[index+AssetManager.STYLE_DATA]);
+        return mAssets.getPooledStringForCookie(cookie, data[index + STYLE_DATA]);
     }
 
     /** @hide */

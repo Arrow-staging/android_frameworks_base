@@ -24,9 +24,10 @@
 #include <vector>
 
 #include "android-base/macros.h"
+#include "androidfw/ConfigDescription.h"
 #include "androidfw/StringPiece.h"
 
-#include "ConfigDescription.h"
+#include "Diagnostics.h"
 #include "util/BigBuffer.h"
 
 namespace aapt {
@@ -35,6 +36,10 @@ struct Span {
   std::string name;
   uint32_t first_char;
   uint32_t last_char;
+
+  bool operator==(const Span& right) const {
+    return name == right.name && first_char == right.first_char && last_char == right.last_char;
+  }
 };
 
 struct StyleString {
@@ -59,12 +64,12 @@ class StringPool {
       kLowPriority = 0xffffffffu,
     };
     uint32_t priority = kNormalPriority;
-    ConfigDescription config;
+    android::ConfigDescription config;
 
     Context() = default;
-    Context(uint32_t p, const ConfigDescription& c) : priority(p), config(c) {}
+    Context(uint32_t p, const android::ConfigDescription& c) : priority(p), config(c) {}
     explicit Context(uint32_t p) : priority(p) {}
-    explicit Context(const ConfigDescription& c) : priority(kNormalPriority), config(c) {
+    explicit Context(const android::ConfigDescription& c) : priority(kNormalPriority), config(c) {
     }
   };
 
@@ -152,8 +157,8 @@ class StringPool {
     int ref_;
   };
 
-  static bool FlattenUtf8(BigBuffer* out, const StringPool& pool);
-  static bool FlattenUtf16(BigBuffer* out, const StringPool& pool);
+  static bool FlattenUtf8(BigBuffer* out, const StringPool& pool, IDiagnostics* diag);
+  static bool FlattenUtf16(BigBuffer* out, const StringPool& pool, IDiagnostics* diag);
 
   StringPool() = default;
   StringPool(StringPool&&) = default;
@@ -207,7 +212,7 @@ class StringPool {
  private:
   DISALLOW_COPY_AND_ASSIGN(StringPool);
 
-  static bool Flatten(BigBuffer* out, const StringPool& pool, bool utf8);
+  static bool Flatten(BigBuffer* out, const StringPool& pool, bool utf8, IDiagnostics* diag);
 
   Ref MakeRefImpl(const android::StringPiece& str, const Context& context, bool unique);
   void ReAssignIndices();

@@ -17,9 +17,12 @@ include $(CLEAR_VARS)
 
 LOCAL_MODULE_TAGS := tests
 LOCAL_PACKAGE_NAME := CameraTooTests
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../NOTICE
 LOCAL_INSTRUMENTATION_FOR := CameraToo
 LOCAL_SDK_VERSION := current
 LOCAL_SRC_FILES := $(call all-java-files-under,src)
-LOCAL_STATIC_JAVA_LIBRARIES := android-support-test mockito-target-minus-junit4
+LOCAL_STATIC_JAVA_LIBRARIES := androidx.test.rules mockito-target-minus-junit4
 
 include $(BUILD_PACKAGE)

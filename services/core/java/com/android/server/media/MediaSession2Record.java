@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 The Android Open Source Project
+ * Copyright 2019 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,110 +16,208 @@
 
 package com.android.server.media;
 
-import android.annotation.NonNull;
-import android.content.Context;
 import android.media.MediaController2;
-import android.media.MediaSession2;
-import android.media.SessionToken2;
+import android.media.Session2CommandGroup;
+import android.media.Session2Token;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ResultReceiver;
+import android.os.UserHandle;
 import android.util.Log;
-import java.util.concurrent.Executor;
+import android.view.KeyEvent;
+
+import com.android.internal.annotations.GuardedBy;
+
+import java.io.PrintWriter;
 
 /**
- * Records a {@link MediaSession2} and holds {@link MediaController2}.
- * <p>
- * Owner of this object should handle synchronization.
+ * Keeps the record of {@link Session2Token} to help send command to the corresponding session.
  */
-class MediaSession2Record {
-    interface SessionDestroyedListener {
-        void onSessionDestroyed(MediaSession2Record record);
-    }
+// TODO(jaewan): Do not call service method directly -- introduce listener instead.
+public class MediaSession2Record implements MediaSessionRecordImpl {
+    private static final String TAG = "MediaSession2Record";
+    private static final boolean DEBUG = Log.isLoggable(TAG, Log.DEBUG);
+    private final Object mLock = new Object();
 
-    private static final String TAG = "Session2Record";
-    private static final boolean DEBUG = true; // TODO(jaewan): Change
+    @GuardedBy("mLock")
+    private final Session2Token mSessionToken;
+    @GuardedBy("mLock")
+    private final HandlerExecutor mHandlerExecutor;
+    @GuardedBy("mLock")
+    private final MediaController2 mController;
+    @GuardedBy("mLock")
+    private final MediaSessionService mService;
+    @GuardedBy("mLock")
+    private boolean mIsConnected;
+    @GuardedBy("mLock")
+    private int mPolicies;
+    @GuardedBy("mLock")
+    private boolean mIsClosed;
 
-    private final Context mContext;
-    private final SessionToken2 mSessionToken;
-    private final SessionDestroyedListener mSessionDestroyedListener;
-
-    // TODO(jaewan): Replace these with the mContext.getMainExecutor()
-    private final Executor mMainExecutor;
-
-    private MediaController2 mController;
-
-    /**
-     * Constructor
-     */
-    public MediaSession2Record(@NonNull Context context, @NonNull SessionToken2 token,
-            @NonNull SessionDestroyedListener listener) {
-        mContext = context;
-        mSessionToken = token;
-        mSessionDestroyedListener = listener;
-        mMainExecutor = (runnable) -> runnable.run();
-    }
-
-    public Context getContext() {
-        return mContext;
-    }
-
-    public void onSessionDestroyed() {
-        if (mController != null) {
-            mController.close();
-            // close() triggers ControllerCallback.onDisconnected() here already.
-            mController = null;
+    public MediaSession2Record(Session2Token sessionToken, MediaSessionService service,
+            Looper handlerLooper, int policies) {
+        // The lock is required to prevent `Controller2Callback` from using partially initialized
+        // `MediaSession2Record.this`.
+        synchronized (mLock) {
+            mSessionToken = sessionToken;
+            mService = service;
+            mHandlerExecutor = new HandlerExecutor(new Handler(handlerLooper));
+            mController = new MediaController2.Builder(service.getContext(), sessionToken)
+                    .setControllerCallback(mHandlerExecutor, new Controller2Callback())
+                    .build();
+            mPolicies = policies;
         }
     }
 
-    public boolean onSessionCreated(SessionToken2 token) {
-        if (mController != null) {
-            // Disclaimer: This may fail if following happens for an app.
-            //             Step 1) Create a session in the process #1
-            //             Step 2) Process #1 is killed
-            //             Step 3) Before the death of process #1 is delivered,
-            //                     (i.e. ControllerCallback#onDisconnected is called),
-            //                     new process is started and create another session with the same
-            //                     id in the new process.
-            //             Step 4) fail!!! But this is tricky case that wouldn't happen in normal.
-            Log.w(TAG, "Cannot create a new session with the id=" + token.getId() + " in the"
-                    + " pkg=" + token.getPackageName() + ". ID should be unique in a package");
-            return false;
-        }
-        mController = new MediaController2(mContext, token, mMainExecutor,
-                new ControllerCallback());
-        return true;
+    @Override
+    public String getPackageName() {
+        return mSessionToken.getPackageName();
     }
 
-    /**
-     * @return token
-     */
-    public SessionToken2 getToken() {
+    public Session2Token getSession2Token() {
         return mSessionToken;
     }
 
-    /**
-     * @return controller
-     */
-    public MediaController2 getController() {
-        return mController;
+    @Override
+    public int getUid() {
+        return mSessionToken.getUid();
+    }
+
+    @Override
+    public int getUserId() {
+        return UserHandle.getUserHandleForUid(mSessionToken.getUid()).getIdentifier();
+    }
+
+    @Override
+    public boolean isSystemPriority() {
+        // System priority session is currently only allowed for telephony, so it's OK to stick to
+        // the media1 API at this moment.
+        return false;
+    }
+
+    @Override
+    public void adjustVolume(String packageName, String opPackageName, int pid, int uid,
+            boolean asSystemService, int direction, int flags, boolean useSuggested) {
+        // TODO(jaewan): Add API to adjust volume.
+    }
+
+    @Override
+    public boolean isActive() {
+        synchronized (mLock) {
+            return mIsConnected;
+        }
+    }
+
+    @Override
+    public boolean checkPlaybackActiveState(boolean expected) {
+        synchronized (mLock) {
+            return mIsConnected && mController.isPlaybackActive() == expected;
+        }
+    }
+
+    @Override
+    public boolean isPlaybackTypeLocal() {
+        // TODO(jaewan): Implement -- need API to know whether the playback is remote or local.
+        return true;
+    }
+
+    @Override
+    public void close() {
+        synchronized (mLock) {
+            mIsClosed = true;
+            // Call close regardless of the mIsConnected. This may be called when it's not yet
+            // connected.
+            mController.close();
+        }
+    }
+
+    @Override
+    public boolean isClosed() {
+        synchronized (mLock) {
+            return mIsClosed;
+        }
+    }
+
+    @Override
+    public boolean sendMediaButton(String packageName, int pid, int uid, boolean asSystemService,
+            KeyEvent ke, int sequenceId, ResultReceiver cb) {
+        // TODO(jaewan): Implement.
+        return false;
+    }
+
+    @Override
+    public boolean canHandleVolumeKey() {
+        // TODO: Implement when MediaSession2 starts to get key events.
+        return false;
+    }
+
+    @Override
+    public int getSessionPolicies() {
+        synchronized (mLock) {
+            return mPolicies;
+        }
+    }
+
+    @Override
+    public void setSessionPolicies(int policies) {
+        synchronized (mLock) {
+            mPolicies = policies;
+        }
+    }
+
+    @Override
+    public void dump(PrintWriter pw, String prefix) {
+        pw.println(prefix + "token=" + mSessionToken);
+        pw.println(prefix + "controller=" + mController);
+
+        final String indent = prefix + "  ";
+        pw.println(indent + "playbackActive=" + mController.isPlaybackActive());
     }
 
     @Override
     public String toString() {
-        return getToken() == null
-                ? "Token {null}" : "SessionRecord {" + getToken().toString() + "}";
+        // TODO(jaewan): Also add getId().
+        return getPackageName() + " (userId=" + getUserId() + ")";
     }
 
-    private class ControllerCallback extends MediaController2.ControllerCallback {
-        // This is called on the random thread with no lock. So place ensure followings.
-        //   1. Don't touch anything in the parent class that needs synchronization.
-        //      All other APIs in the MediaSession2Record assumes that server would use them with
-        //      the lock hold.
-        //   2. This can be called after the controller registered is closed.
+    private class Controller2Callback extends MediaController2.ControllerCallback {
         @Override
-        public void onDisconnected() {
+        public void onConnected(MediaController2 controller, Session2CommandGroup allowedCommands) {
             if (DEBUG) {
-                Log.d(TAG, "onDisconnected, token=" + getToken());
+                Log.d(TAG, "connected to " + mSessionToken + ", allowed=" + allowedCommands);
             }
-            mSessionDestroyedListener.onSessionDestroyed(MediaSession2Record.this);
+            MediaSessionService service;
+            synchronized (mLock) {
+                mIsConnected = true;
+                service = mService;
+            }
+            service.onSessionActiveStateChanged(MediaSession2Record.this);
         }
-    };
+
+        @Override
+        public void onDisconnected(MediaController2 controller) {
+            if (DEBUG) {
+                Log.d(TAG, "disconnected from " + mSessionToken);
+            }
+            MediaSessionService service;
+            synchronized (mLock) {
+                mIsConnected = false;
+                service = mService;
+            }
+            service.onSessionDied(MediaSession2Record.this);
+        }
+
+        @Override
+        public void onPlaybackActiveChanged(MediaController2 controller, boolean playbackActive) {
+            if (DEBUG) {
+                Log.d(TAG, "playback active changed, " + mSessionToken + ", active="
+                        + playbackActive);
+            }
+            MediaSessionService service;
+            synchronized (mLock) {
+                service = mService;
+            }
+            service.onSessionPlaybackStateChanged(MediaSession2Record.this, playbackActive);
+        }
+    }
 }

@@ -40,18 +40,16 @@
         @dp
     </string>
 
+    <string translatable="false" name="config_mainBuiltInDisplayCutoutRectApproximation">@*android:string/config_mainBuiltInDisplayCutout</string>
+
     <!-- Whether the display cutout region of the main built-in display should be forced to
          black in software (to avoid aliasing or emulate a cutout that is not physically existent).
      -->
     <bool name="config_fillMainBuiltInDisplayCutout">true</bool>
 
     <!-- Height of the status bar -->
-    <dimen name="status_bar_height">48dp</dimen>
-    <!-- Height of area above QQS where battery/time go (equal to status bar height if > 48dp) -->
-    <dimen name="quick_qs_offset_height">48dp</dimen>
-    <!-- Total height of QQS (quick_qs_offset_height + 128) -->
-    <dimen name="quick_qs_total_height">176dp</dimen>
-
+    <dimen name="status_bar_height_portrait">48dp</dimen>
+    <dimen name="status_bar_height_landscape">28dp</dimen>
 </resources>
 
 

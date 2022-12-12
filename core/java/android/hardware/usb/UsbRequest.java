@@ -17,6 +17,8 @@
 package android.hardware.usb;
 
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.util.Log;
 
 import com.android.internal.util.Preconditions;
@@ -25,6 +27,7 @@ import dalvik.system.CloseGuard;
 
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
+import java.util.Objects;
 
 /**
  * A class representing USB request packet.
@@ -43,17 +46,20 @@ public class UsbRequest {
     private static final String TAG = "UsbRequest";
 
     // From drivers/usb/core/devio.c
-    private static final int MAX_USBFS_BUFFER_SIZE = 16384;
+    static final int MAX_USBFS_BUFFER_SIZE = 16384;
 
     // used by the JNI code
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private long mNativeContext;
 
     private UsbEndpoint mEndpoint;
 
     /** The buffer that is currently being read / written */
+    @UnsupportedAppUsage
     private ByteBuffer mBuffer;
 
     /** The amount of data to read / write when using {@link #queue} */
+    @UnsupportedAppUsage
     private int mLength;
 
     // for client use
@@ -91,13 +97,13 @@ public class UsbRequest {
      */
     public boolean initialize(UsbDeviceConnection connection, UsbEndpoint endpoint) {
         mEndpoint = endpoint;
-        mConnection = Preconditions.checkNotNull(connection, "connection");
+        mConnection = Objects.requireNonNull(connection, "connection");
 
         boolean wasInitialized = native_init(connection, endpoint.getAddress(),
                 endpoint.getAttributes(), endpoint.getMaxPacketSize(), endpoint.getInterval());
 
         if (wasInitialized) {
-            mCloseGuard.open("close");
+            mCloseGuard.open("UsbRequest.close");
         }
 
         return wasInitialized;
@@ -175,7 +181,9 @@ public class UsbRequest {
      *               capacity will be ignored. Once the request
      *               {@link UsbDeviceConnection#requestWait() is processed} the position will be set
      *               to the number of bytes read/written.
-     * @param length number of bytes to read or write.
+     * @param length number of bytes to read or write. Before {@value Build.VERSION_CODES#P}, a
+     *               value larger than 16384 bytes would be truncated down to 16384. In API
+     *               {@value Build.VERSION_CODES#P} and after, any value of length is valid.
      *
      * @return true if the queueing operation succeeded
      *
@@ -185,6 +193,11 @@ public class UsbRequest {
     public boolean queue(ByteBuffer buffer, int length) {
         boolean out = (mEndpoint.getDirection() == UsbConstants.USB_DIR_OUT);
         boolean result;
+
+        if (mConnection.getContext().getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.P
+                && length > MAX_USBFS_BUFFER_SIZE) {
+            length = MAX_USBFS_BUFFER_SIZE;
+        }
 
         synchronized (mLock) {
             // save our buffer for when the request has completed
@@ -222,7 +235,10 @@ public class UsbRequest {
      *               of the buffer is undefined until the request is returned by
      *               {@link UsbDeviceConnection#requestWait}. If the request failed the buffer
      *               will be unchanged; if the request succeeded the position of the buffer is
-     *               incremented by the number of bytes sent/received.
+     *               incremented by the number of bytes sent/received. Before
+     *               {@value Build.VERSION_CODES#P}, a buffer of length larger than 16384 bytes
+     *               would throw IllegalArgumentException. In API {@value Build.VERSION_CODES#P}
+     *               and after, any size buffer is valid.
      *
      * @return true if the queueing operation succeeded
      */
@@ -244,9 +260,12 @@ public class UsbRequest {
                 mIsUsingNewQueue = true;
                 wasQueued = native_queue(null, 0, 0);
             } else {
-                // Can only send/receive MAX_USBFS_BUFFER_SIZE bytes at once
-                Preconditions.checkArgumentInRange(buffer.remaining(), 0, MAX_USBFS_BUFFER_SIZE,
-                        "number of remaining bytes");
+                if (mConnection.getContext().getApplicationInfo().targetSdkVersion
+                        < Build.VERSION_CODES.P) {
+                    // Can only send/receive MAX_USBFS_BUFFER_SIZE bytes at once
+                    Preconditions.checkArgumentInRange(buffer.remaining(), 0, MAX_USBFS_BUFFER_SIZE,
+                            "number of remaining bytes");
+                }
 
                 // Can not receive into read-only buffers.
                 Preconditions.checkArgument(!(buffer.isReadOnly() && !isSend), "buffer can not be "
@@ -344,6 +363,30 @@ public class UsbRequest {
      * @return true if cancelling succeeded
      */
     public boolean cancel() {
+        if (mConnection == null) {
+            return false;
+        }
+
+        return mConnection.cancelRequest(this);
+    }
+
+    /**
+     * Cancels a pending queue operation (for use when the UsbDeviceConnection associated
+     * with this request is synchronized). This ensures we don't have a race where the
+     * device is closed and then the request is canceled which would lead to a
+     * use-after-free because the cancel operation uses the device connection
+     * information freed in the when UsbDeviceConnection is closed.<br/>
+     *
+     * This method assumes the connected is not closed while this method is executed.
+     *
+     * @return true if cancelling succeeded.
+     */
+    /* package */ boolean cancelIfOpen() {
+        if (mNativeContext == 0 || (mConnection != null && !mConnection.isOpen())) {
+            Log.w(TAG,
+                    "Detected attempt to cancel a request on a connection which isn't open");
+            return false;
+        }
         return native_cancel();
     }
 

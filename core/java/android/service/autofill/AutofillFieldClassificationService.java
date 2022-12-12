@@ -15,12 +15,15 @@
  */
 package android.service.autofill;
 
+import static com.android.internal.util.function.pooled.PooledLambda.obtainMessage;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcel;
@@ -30,22 +33,20 @@ import android.os.RemoteException;
 import android.util.Log;
 import android.view.autofill.AutofillValue;
 
-import com.android.internal.os.HandlerCaller;
-import com.android.internal.os.SomeArgs;
-
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A service that calculates field classification scores.
  *
  * <p>A field classification score is a {@code float} representing how well an
  * {@link AutofillValue} filled matches a expected value predicted by an autofill service
- * &mdash;a full-match is {@code 1.0} (representing 100%), while a full mismatch is {@code 0.0}.
+ * &mdash;a full match is {@code 1.0} (representing 100%), while a full mismatch is {@code 0.0}.
  *
- * <p>The exact score depends on the algorithm used to calculate it&mdash; the service must provide
+ * <p>The exact score depends on the algorithm used to calculate it&mdash;the service must provide
  * at least one default algorithm (which is used when the algorithm is not specified or is invalid),
- * but it could provide more (in which case the algorithm name should be specifiied by the caller
+ * but it could provide more (in which case the algorithm name should be specified by the caller
  * when calculating the scores).
  *
  * {@hide}
@@ -54,8 +55,6 @@ import java.util.List;
 public abstract class AutofillFieldClassificationService extends Service {
 
     private static final String TAG = "AutofillFieldClassificationService";
-
-    private static final int MSG_GET_SCORES = 1;
 
     /**
      * The {@link Intent} action that must be declared as handled by a service
@@ -77,45 +76,50 @@ public abstract class AutofillFieldClassificationService extends Service {
     public static final String SERVICE_META_DATA_KEY_AVAILABLE_ALGORITHMS =
             "android.autofill.field_classification.available_algorithms";
 
+    /**
+     * Field classification algorithm that computes the edit distance between two Strings.
+     *
+     * <p>Service implementation must provide this algorithm.</p>
+     */
+    public static final String REQUIRED_ALGORITHM_EDIT_DISTANCE = "EDIT_DISTANCE";
+
+    /**
+     * Field classification algorithm that computes whether the last four digits between two
+     * Strings match exactly.
+     *
+     * <p>Service implementation must provide this algorithm.</p>
+     */
+    public static final String REQUIRED_ALGORITHM_EXACT_MATCH = "EXACT_MATCH";
+
+    /**
+     * Field classification algorithm that compares a credit card string to known last four digits.
+     *
+     * <p>Service implementation must provide this algorithm.</p>
+     */
+    public static final String REQUIRED_ALGORITHM_CREDIT_CARD = "CREDIT_CARD";
 
     /** {@hide} **/
     public static final String EXTRA_SCORES = "scores";
 
     private AutofillFieldClassificationServiceWrapper mWrapper;
 
-    private final HandlerCaller.Callback mHandlerCallback = (msg) -> {
-        final int action = msg.what;
+    private void calculateScores(RemoteCallback callback, List<AutofillValue> actualValues,
+            String[] userDataValues, String[] categoryIds, String defaultAlgorithm,
+            Bundle defaultArgs, Map algorithms, Map args) {
         final Bundle data = new Bundle();
-        final RemoteCallback callback;
-        switch (action) {
-            case MSG_GET_SCORES:
-                final SomeArgs args = (SomeArgs) msg.obj;
-                callback = (RemoteCallback) args.arg1;
-                final String algorithmName = (String) args.arg2;
-                final Bundle algorithmArgs = (Bundle) args.arg3;
-                @SuppressWarnings("unchecked")
-                final List<AutofillValue> actualValues = ((List<AutofillValue>) args.arg4);
-                @SuppressWarnings("unchecked")
-                final String[] userDataValues = (String[]) args.arg5;
-                final float[][] scores = onGetScores(algorithmName, algorithmArgs, actualValues,
-                        Arrays.asList(userDataValues));
-                if (scores != null) {
-                    data.putParcelable(EXTRA_SCORES, new Scores(scores));
-                }
-                break;
-            default:
-                Log.w(TAG, "Handling unknown message: " + action);
-                return;
+        final float[][] scores = onCalculateScores(actualValues, Arrays.asList(userDataValues),
+                Arrays.asList(categoryIds), defaultAlgorithm, defaultArgs, algorithms, args);
+        if (scores != null) {
+            data.putParcelable(EXTRA_SCORES, new Scores(scores));
         }
         callback.sendResult(data);
-    };
+    }
 
-    private final HandlerCaller mHandlerCaller = new HandlerCaller(null, Looper.getMainLooper(),
-            mHandlerCallback, true);
+    private final Handler mHandler = new Handler(Looper.getMainLooper(), null, true);
 
     /** @hide */
+    @SystemApi
     public AutofillFieldClassificationService() {
-
     }
 
     @Override
@@ -132,37 +136,167 @@ public abstract class AutofillFieldClassificationService extends Service {
     /**
      * Calculates field classification scores in a batch.
      *
-     * <p>See {@link AutofillFieldClassificationService} for more info about field classification
-     * scores.
+     * <p>A field classification score is a {@code float} representing how well an
+     * {@link AutofillValue} filled matches a expected value predicted by an autofill service
+     * &mdash;a full match is {@code 1.0} (representing 100%), while a full mismatch is {@code 0.0}.
      *
-     * @param algorithm name of the algorithm to be used to calculate the scores. If invalid, the
-     * default algorithm will be used instead.
-     * @param args optional arguments to be passed to the algorithm.
+     * <p>The exact score depends on the algorithm used to calculate it&mdash;the service must
+     * provide at least one default algorithm (which is used when the algorithm is not specified
+     * or is invalid), but it could provide more (in which case the algorithm name should be
+     * specified by the caller when calculating the scores).
+     *
+     * <p>For example, if the service provides an algorithm named {@code EXACT_MATCH} that
+     * returns {@code 1.0} if all characters match or {@code 0.0} otherwise, a call to:
+     *
+     * <pre>
+     * service.onGetScores("EXACT_MATCH", null,
+     *   Arrays.asList(AutofillValue.forText("email1"), AutofillValue.forText("PHONE1")),
+     *   Arrays.asList("email1", "phone1"));
+     * </pre>
+     *
+     * <p>Returns:
+     *
+     * <pre>
+     * [
+     *   [1.0, 0.0], // "email1" compared against ["email1", "phone1"]
+     *   [0.0, 0.0]  // "PHONE1" compared against ["email1", "phone1"]
+     * ];
+     * </pre>
+     *
+     * <p>If the same algorithm allows the caller to specify whether the comparisons should be
+     * case sensitive by passing a boolean option named {@code "case_sensitive"}, then a call to:
+     *
+     * <pre>
+     * Bundle algorithmOptions = new Bundle();
+     * algorithmOptions.putBoolean("case_sensitive", false);
+     *
+     * service.onGetScores("EXACT_MATCH", algorithmOptions,
+     *   Arrays.asList(AutofillValue.forText("email1"), AutofillValue.forText("PHONE1")),
+     *   Arrays.asList("email1", "phone1"));
+     * </pre>
+     *
+     * <p>Returns:
+     *
+     * <pre>
+     * [
+     *   [1.0, 0.0], // "email1" compared against ["email1", "phone1"]
+     *   [0.0, 1.0]  // "PHONE1" compared against ["email1", "phone1"]
+     * ];
+     * </pre>
+     *
+     * @param algorithm name of the algorithm to be used to calculate the scores. If invalid or
+     * {@code null}, the default algorithm is used instead.
+     * @param algorithmOptions optional arguments to be passed to the algorithm.
      * @param actualValues values entered by the user.
      * @param userDataValues values predicted from the user data.
-     * @return the calculated scores, with the first dimension representing actual values and the
-     * second dimension values from {@link UserData}.
+     * @return the calculated scores of {@code actualValues} x {@code userDataValues}.
+     *
+     * {@hide}
+     *
+     * @deprecated Use {@link AutofillFieldClassificationService#onCalculateScores} instead.
+     */
+    @Nullable
+    @SystemApi
+    @Deprecated
+    public float[][] onGetScores(@Nullable String algorithm,
+            @Nullable Bundle algorithmOptions, @NonNull List<AutofillValue> actualValues,
+            @NonNull List<String> userDataValues) {
+        Log.e(TAG, "service implementation (" + getClass() + " does not implement onGetScores()");
+        return null;
+    }
+
+    /**
+     * Calculates field classification scores in a batch.
+     *
+     * <p>A field classification score is a {@code float} representing how well an
+     * {@link AutofillValue} matches a expected value predicted by an autofill service
+     * &mdash;a full match is {@code 1.0} (representing 100%), while a full mismatch is {@code 0.0}.
+     *
+     * <p>The exact score depends on the algorithm used to calculate it&mdash;the service must
+     * provide at least one default algorithm (which is used when the algorithm is not specified
+     * or is invalid), but it could provide more (in which case the algorithm name should be
+     * specified by the caller when calculating the scores).
+     *
+     * <p>For example, if the service provides an algorithm named {@code EXACT_MATCH} that
+     * returns {@code 1.0} if all characters match or {@code 0.0} otherwise, a call to:
+     *
+     * <pre>
+     * HashMap algorithms = new HashMap<>();
+     * algorithms.put("email", "EXACT_MATCH");
+     * algorithms.put("phone", "EXACT_MATCH");
+     *
+     * HashMap args = new HashMap<>();
+     * args.put("email", null);
+     * args.put("phone", null);
+     *
+     * service.onCalculateScores(Arrays.asList(AutofillValue.forText("email1"),
+     * AutofillValue.forText("PHONE1")), Arrays.asList("email1", "phone1"),
+     * Array.asList("email", "phone"), algorithms, args);
+     * </pre>
+     *
+     * <p>Returns:
+     *
+     * <pre>
+     * [
+     *   [1.0, 0.0], // "email1" compared against ["email1", "phone1"]
+     *   [0.0, 0.0]  // "PHONE1" compared against ["email1", "phone1"]
+     * ];
+     * </pre>
+     *
+     * <p>If the same algorithm allows the caller to specify whether the comparisons should be
+     * case sensitive by passing a boolean option named {@code "case_sensitive"}, then a call to:
+     *
+     * <pre>
+     * Bundle algorithmOptions = new Bundle();
+     * algorithmOptions.putBoolean("case_sensitive", false);
+     * args.put("phone", algorithmOptions);
+     *
+     * service.onCalculateScores(Arrays.asList(AutofillValue.forText("email1"),
+     * AutofillValue.forText("PHONE1")), Arrays.asList("email1", "phone1"),
+     * Array.asList("email", "phone"), algorithms, args);
+     * </pre>
+     *
+     * <p>Returns:
+     *
+     * <pre>
+     * [
+     *   [1.0, 0.0], // "email1" compared against ["email1", "phone1"]
+     *   [0.0, 1.0]  // "PHONE1" compared against ["email1", "phone1"]
+     * ];
+     * </pre>
+     *
+     * @param actualValues values entered by the user.
+     * @param userDataValues values predicted from the user data.
+     * @param categoryIds category Ids correspoinding to userDataValues
+     * @param defaultAlgorithm default field classification algorithm
+     * @param algorithms array of field classification algorithms
+     * @return the calculated scores of {@code actualValues} x {@code userDataValues}.
      *
      * {@hide}
      */
     @Nullable
     @SystemApi
-    public float[][] onGetScores(@Nullable String algorithm,
-            @Nullable Bundle args, @NonNull List<AutofillValue> actualValues,
-            @NonNull List<String> userDataValues) {
-        Log.e(TAG, "service implementation (" + getClass() + " does not implement onGetScore()");
+    public float[][] onCalculateScores(@NonNull List<AutofillValue> actualValues,
+            @NonNull List<String> userDataValues, @NonNull List<String> categoryIds,
+            @Nullable String defaultAlgorithm, @Nullable Bundle defaultArgs,
+            @Nullable Map algorithms, @Nullable Map args) {
+        Log.e(TAG, "service implementation (" + getClass()
+                + " does not implement onCalculateScore()");
         return null;
     }
 
     private final class AutofillFieldClassificationServiceWrapper
             extends IAutofillFieldClassificationService.Stub {
         @Override
-        public void getScores(RemoteCallback callback, String algorithmName, Bundle algorithmArgs,
-                List<AutofillValue> actualValues, String[] userDataValues)
-                        throws RemoteException {
-            // TODO(b/70939974): refactor to use PooledLambda
-            mHandlerCaller.obtainMessageOOOOO(MSG_GET_SCORES, callback, algorithmName,
-                    algorithmArgs, actualValues, userDataValues).sendToTarget();
+        public void calculateScores(RemoteCallback callback, List<AutofillValue> actualValues,
+                String[] userDataValues, String[] categoryIds, String defaultAlgorithm,
+                Bundle defaultArgs, Map algorithms, Map args)
+                throws RemoteException {
+            mHandler.sendMessage(obtainMessage(
+                    AutofillFieldClassificationService::calculateScores,
+                    AutofillFieldClassificationService.this,
+                    callback, actualValues, userDataValues, categoryIds, defaultAlgorithm,
+                    defaultArgs, algorithms, args));
         }
     }
 
@@ -220,7 +354,7 @@ public abstract class AutofillFieldClassificationService extends Service {
             }
         }
 
-        public static final Creator<Scores> CREATOR = new Creator<Scores>() {
+        public static final @android.annotation.NonNull Creator<Scores> CREATOR = new Creator<Scores>() {
             @Override
             public Scores createFromParcel(Parcel parcel) {
                 return new Scores(parcel);

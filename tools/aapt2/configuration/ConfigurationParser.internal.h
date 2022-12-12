@@ -17,6 +17,8 @@
 #ifndef AAPT2_CONFIGURATIONPARSER_INTERNAL_H
 #define AAPT2_CONFIGURATIONPARSER_INTERNAL_H
 
+#include "androidfw/ConfigDescription.h"
+
 #include "configuration/ConfigurationParser.h"
 
 #include <algorithm>
@@ -33,17 +35,30 @@ namespace configuration {
 
 template <typename T>
 struct OrderedEntry {
-  size_t order;
+  int32_t order;
   std::vector<T> entry;
 };
-
-/** A mapping of group labels to group of configuration items. */
-template <class T>
-using Group = std::unordered_map<std::string, OrderedEntry<T>>;
 
 /** A mapping of group label to a single configuration item. */
 template <class T>
 using Entry = std::unordered_map<std::string, T>;
+
+/** A mapping of group labels to group of configuration items. */
+template <class T>
+using Group = Entry<OrderedEntry<T>>;
+
+template<typename T>
+bool IsGroupValid(const Group<T>& group, const std::string& name, IDiagnostics* diag) {
+  std::set<int32_t> orders;
+  for (const auto& p : group) {
+    orders.insert(p.second.order);
+  }
+  bool valid = orders.size() == group.size();
+  if (!valid) {
+    diag->Error(DiagMessage() << name << " have overlapping version-code-order attributes");
+  }
+  return valid;
+}
 
 /** Retrieves an entry from the provided Group, creating a new instance if one does not exist. */
 template <typename T>
@@ -69,8 +84,8 @@ class ComparisonChain {
    * have not been able to determine the sort order with the previous comparisons.
    */
   template <typename T>
-  ComparisonChain& Add(const Group<T>& groups, const Maybe<std::string>& lhs,
-                       const Maybe<std::string>& rhs) {
+  ComparisonChain& Add(const Group<T>& groups, const std::optional<std::string>& lhs,
+                       const std::optional<std::string>& rhs) {
     return Add(GetGroupOrder(groups, lhs), GetGroupOrder(groups, rhs));
   }
 
@@ -93,7 +108,7 @@ class ComparisonChain {
 
  private:
   template <typename T>
-  inline size_t GetGroupOrder(const Group<T>& groups, const Maybe<std::string>& label) {
+  inline size_t GetGroupOrder(const Entry<T>& groups, const std::optional<std::string>& label) {
     if (!label) {
       return std::numeric_limits<size_t>::max();
     }
@@ -107,39 +122,49 @@ class ComparisonChain {
 /** Output artifact configuration options. */
 struct ConfiguredArtifact {
   /** Name to use for output of processing foo.apk -> foo.<name>.apk. */
-  Maybe<std::string> name;
+  std::optional<std::string> name;
   /** If present, uses the ABI group with this name. */
-  Maybe<std::string> abi_group;
+  std::optional<std::string> abi_group;
   /** If present, uses the screen density group with this name. */
-  Maybe<std::string> screen_density_group;
+  std::optional<std::string> screen_density_group;
   /** If present, uses the locale group with this name. */
-  Maybe<std::string> locale_group;
+  std::optional<std::string> locale_group;
   /** If present, uses the Android SDK with this name. */
-  Maybe<std::string> android_sdk;
+  std::optional<std::string> android_sdk;
   /** If present, uses the device feature group with this name. */
-  Maybe<std::string> device_feature_group;
+  std::optional<std::string> device_feature_group;
   /** If present, uses the OpenGL texture group with this name. */
-  Maybe<std::string> gl_texture_group;
+  std::optional<std::string> gl_texture_group;
 
   /** Convert an artifact name template into a name string based on configuration contents. */
-  Maybe<std::string> ToArtifactName(const android::StringPiece& format,
-                                    const android::StringPiece& apk_name, IDiagnostics* diag) const;
+  std::optional<std::string> ToArtifactName(const android::StringPiece& format,
+                                            const android::StringPiece& apk_name,
+                                            IDiagnostics* diag) const;
 
   /** Convert an artifact name template into a name string based on configuration contents. */
-  Maybe<std::string> Name(const android::StringPiece& apk_name, IDiagnostics* diag) const;
+  std::optional<std::string> Name(const android::StringPiece& apk_name, IDiagnostics* diag) const;
 };
 
 /** AAPT2 XML configuration file binary representation. */
 struct PostProcessingConfiguration {
   std::vector<ConfiguredArtifact> artifacts;
-  Maybe<std::string> artifact_format;
+  std::optional<std::string> artifact_format;
 
   Group<Abi> abi_groups;
-  Group<ConfigDescription> screen_density_groups;
-  Group<ConfigDescription> locale_groups;
+  Group<android::ConfigDescription> screen_density_groups;
+  Group<android::ConfigDescription> locale_groups;
   Group<DeviceFeature> device_feature_groups;
   Group<GlTexture> gl_texture_groups;
   Entry<AndroidSdk> android_sdks;
+
+  bool ValidateVersionCodeOrdering(IDiagnostics* diag) {
+    bool valid = IsGroupValid(abi_groups, "abi-groups", diag);
+    valid &= IsGroupValid(screen_density_groups, "screen-density-groups", diag);
+    valid &= IsGroupValid(locale_groups, "locale-groups", diag);
+    valid &= IsGroupValid(device_feature_groups, "device-feature-groups", diag);
+    valid &= IsGroupValid(gl_texture_groups, "gl-texture-groups", diag);
+    return valid;
+  }
 
   /**
    * Sorts the configured artifacts based on the ordering of the groups in the configuration file.
@@ -188,9 +213,9 @@ struct PostProcessingConfiguration {
 };
 
 /** Parses the provided XML document returning the post processing configuration. */
-Maybe<PostProcessingConfiguration> ExtractConfiguration(const std::string& contents,
-                                                        const std::string& config_path,
-                                                        IDiagnostics* diag);
+std::optional<PostProcessingConfiguration> ExtractConfiguration(const std::string& contents,
+                                                                const std::string& config_path,
+                                                                IDiagnostics* diag);
 
 namespace handler {
 

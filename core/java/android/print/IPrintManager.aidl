@@ -91,6 +91,15 @@ interface IPrintManager {
     void setPrintServiceEnabled(in ComponentName service, boolean isEnabled, int userId);
 
     /**
+     * Checks whether the given print service is enabled.
+     *
+     * @param service the service to check
+     * @param userId the id of the user requesting the check
+     * @return whether the given print service is enabled
+     */
+    boolean isPrintServiceEnabled(in ComponentName service, int userId);
+
+    /**
      * Listen for changes to the print service recommendations.
      *
      * @param listener the listener to add
@@ -143,4 +152,21 @@ interface IPrintManager {
     void stopPrinterStateTracking(in PrinterId printerId, int userId);
     void destroyPrinterDiscoverySession(in IPrinterDiscoveryObserver observer,
             int userId);
+
+    /**
+     * Check if the system will bind to print services in intant app.
+     *
+     * @param userId the Id of the user the behavior should be checked for
+     *
+     * @return {@code true} iff the system will bind to print services in instant apps.
+     */
+    boolean getBindInstantServiceAllowed(int userId);
+
+    /**
+     * Set if the system will bind to print services in intant app.
+     *
+     * @param userId the Id of the user the behavior should be changed for
+     * @param allows iff {@code true} the system will bind to print services in instant apps
+     */
+    void setBindInstantServiceAllowed(int userId, boolean allowed);
 }

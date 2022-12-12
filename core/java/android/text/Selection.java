@@ -17,6 +17,7 @@
 package android.text;
 
 import android.annotation.TestApi;
+import android.compat.annotation.UnsupportedAppUsage;
 
 import java.text.BreakIterator;
 
@@ -180,7 +181,7 @@ public class Selection {
      * Remove the selection or cursor, if any, from the text.
      */
     public static final void removeSelection(Spannable text) {
-        text.removeSpan(SELECTION_START);
+        text.removeSpan(SELECTION_START, Spanned.SPAN_INTERMEDIATE);
         text.removeSpan(SELECTION_END);
         removeMemory(text);
     }
@@ -448,6 +449,7 @@ public class Selection {
     }
 
     /** {@hide} */
+    @UnsupportedAppUsage
     public static boolean moveToPreceding(
             Spannable text, PositionIterator iter, boolean extendSelection) {
         final int offset = iter.preceding(getSelectionEnd(text));
@@ -462,6 +464,7 @@ public class Selection {
     }
 
     /** {@hide} */
+    @UnsupportedAppUsage
     public static boolean moveToFollowing(
             Spannable text, PositionIterator iter, boolean extendSelection) {
         final int offset = iter.following(getSelectionEnd(text));

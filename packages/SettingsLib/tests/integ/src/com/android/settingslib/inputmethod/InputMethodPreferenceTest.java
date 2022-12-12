@@ -20,11 +20,13 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.os.UserHandle;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodSubtype;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -111,7 +113,8 @@ public class InputMethodPreferenceTest {
                 createInputMethodInfo(systemIme, name),
                 title,
                 true /* isAllowedByOrganization */,
-                p -> {} /* onSavePreferenceListener */);
+                p -> {} /* onSavePreferenceListener */,
+                UserHandle.myUserId());
     }
 
     private static InputMethodInfo createInputMethodInfo(
@@ -125,6 +128,7 @@ public class InputMethodPreferenceTest {
         final InputMethodSubtype systemLocaleSubtype =
                 new InputMethodSubtype.InputMethodSubtypeBuilder()
                         .setIsAsciiCapable(true)
+                        .setSubtypeMode("keyboard")
                         .setSubtypeLocale(systemLocale.getLanguage())
                         .build();
 

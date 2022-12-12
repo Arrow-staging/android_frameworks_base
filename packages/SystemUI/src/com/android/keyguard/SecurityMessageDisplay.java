@@ -16,9 +16,12 @@
 
 package com.android.keyguard;
 
+import android.content.res.ColorStateList;
+
 public interface SecurityMessageDisplay {
 
-    void setNextMessageColor(int color);
+    /** Set text color for the next security message. */
+    default void setNextMessageColor(ColorStateList colorState) {}
 
     void setMessage(CharSequence msg);
 

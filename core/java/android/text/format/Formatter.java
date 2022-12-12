@@ -18,15 +18,17 @@ package android.text.format;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Resources;
 import android.icu.text.MeasureFormat;
 import android.icu.util.Measure;
 import android.icu.util.MeasureUnit;
-import android.net.NetworkUtils;
 import android.text.BidiFormatter;
 import android.text.TextUtils;
 import android.view.View;
+
+import com.android.net.module.util.Inet4AddressUtils;
 
 import java.util.Locale;
 
@@ -40,6 +42,10 @@ public final class Formatter {
     public static final int FLAG_SHORTER = 1 << 0;
     /** {@hide} */
     public static final int FLAG_CALCULATE_ROUNDED = 1 << 1;
+    /** {@hide} */
+    public static final int FLAG_SI_UNITS = 1 << 2;
+    /** {@hide} */
+    public static final int FLAG_IEC_UNITS = 1 << 3;
 
     /** {@hide} */
     public static class BytesResult {
@@ -87,10 +93,15 @@ public final class Formatter {
      * @return formatted string with the number
      */
     public static String formatFileSize(@Nullable Context context, long sizeBytes) {
+        return formatFileSize(context, sizeBytes, FLAG_SI_UNITS);
+    }
+
+    /** @hide */
+    public static String formatFileSize(@Nullable Context context, long sizeBytes, int flags) {
         if (context == null) {
             return "";
         }
-        final BytesResult res = formatBytes(context.getResources(), sizeBytes, 0);
+        final BytesResult res = formatBytes(context.getResources(), sizeBytes, flags);
         return bidiWrap(context, context.getString(com.android.internal.R.string.fileSizeSuffix,
                 res.value, res.units));
     }
@@ -103,41 +114,44 @@ public final class Formatter {
         if (context == null) {
             return "";
         }
-        final BytesResult res = formatBytes(context.getResources(), sizeBytes, FLAG_SHORTER);
+        final BytesResult res = formatBytes(context.getResources(), sizeBytes,
+                FLAG_SI_UNITS | FLAG_SHORTER);
         return bidiWrap(context, context.getString(com.android.internal.R.string.fileSizeSuffix,
                 res.value, res.units));
     }
 
     /** {@hide} */
+    @UnsupportedAppUsage
     public static BytesResult formatBytes(Resources res, long sizeBytes, int flags) {
+        final int unit = ((flags & FLAG_IEC_UNITS) != 0) ? 1024 : 1000;
         final boolean isNegative = (sizeBytes < 0);
         float result = isNegative ? -sizeBytes : sizeBytes;
         int suffix = com.android.internal.R.string.byteShort;
         long mult = 1;
         if (result > 900) {
             suffix = com.android.internal.R.string.kilobyteShort;
-            mult = 1000;
-            result = result / 1000;
+            mult = unit;
+            result = result / unit;
         }
         if (result > 900) {
             suffix = com.android.internal.R.string.megabyteShort;
-            mult *= 1000;
-            result = result / 1000;
+            mult *= unit;
+            result = result / unit;
         }
         if (result > 900) {
             suffix = com.android.internal.R.string.gigabyteShort;
-            mult *= 1000;
-            result = result / 1000;
+            mult *= unit;
+            result = result / unit;
         }
         if (result > 900) {
             suffix = com.android.internal.R.string.terabyteShort;
-            mult *= 1000;
-            result = result / 1000;
+            mult *= unit;
+            result = result / unit;
         }
         if (result > 900) {
             suffix = com.android.internal.R.string.petabyteShort;
-            mult *= 1000;
-            result = result / 1000;
+            mult *= unit;
+            result = result / unit;
         }
         // Note we calculate the rounded long by ourselves, but still let String.format()
         // compute the rounded value. String.format("%f", 0.1) might not return "0.1" due to
@@ -194,7 +208,7 @@ public final class Formatter {
      */
     @Deprecated
     public static String formatIpAddress(int ipv4Address) {
-        return NetworkUtils.intToInetAddress(ipv4Address).getHostAddress();
+        return Inet4AddressUtils.intToInet4AddressHTL(ipv4Address).getHostAddress();
     }
 
     private static final int SECONDS_PER_MINUTE = 60;
@@ -210,6 +224,7 @@ public final class Formatter {
      * @return the formatted elapsed time
      * @hide
      */
+    @UnsupportedAppUsage
     public static String formatShortElapsedTime(Context context, long millis) {
         long secondsLong = millis / 1000;
 
@@ -265,6 +280,7 @@ public final class Formatter {
      * @return the formatted elapsed time
      * @hide
      */
+    @UnsupportedAppUsage
     public static String formatShortElapsedTimeRoundingUpToMinutes(Context context, long millis) {
         long minutesRoundedUp = (millis + MILLIS_PER_MINUTE - 1) / MILLIS_PER_MINUTE;
 

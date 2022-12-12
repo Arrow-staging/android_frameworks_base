@@ -17,25 +17,28 @@
 #ifndef AAPT_SOURCE_H
 #define AAPT_SOURCE_H
 
+#include <optional>
 #include <ostream>
 #include <string>
 
 #include "android-base/stringprintf.h"
 #include "androidfw/StringPiece.h"
 
-#include "util/Maybe.h"
-
 namespace aapt {
 
 // Represents a file on disk. Used for logging and showing errors.
 struct Source {
   std::string path;
-  Maybe<size_t> line;
+  std::optional<size_t> line;
+  std::optional<std::string> archive;
 
   Source() = default;
 
   inline Source(const android::StringPiece& path) : path(path.to_string()) {  // NOLINT(implicit)
   }
+
+  inline Source(const android::StringPiece& path, const android::StringPiece& archive)
+      : path(path.to_string()), archive(archive.to_string()) {}
 
   inline Source(const android::StringPiece& path, size_t line)
       : path(path.to_string()), line(line) {}
@@ -45,10 +48,14 @@ struct Source {
   }
 
   std::string to_string() const {
-    if (line) {
-      return ::android::base::StringPrintf("%s:%zd", path.c_str(), line.value());
+    std::string s = path;
+    if (archive) {
+      s = ::android::base::StringPrintf("%s@%s", archive.value().c_str(), s.c_str());
     }
-    return path;
+    if (line) {
+      s = ::android::base::StringPrintf("%s:%zd", s.c_str(), line.value());
+    }
+    return s;
   }
 };
 

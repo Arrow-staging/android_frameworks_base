@@ -18,7 +18,6 @@
 #define ANDROID_HWUI_PROPERTIES_H
 
 #include <cutils/compiler.h>
-#include <cutils/properties.h>
 
 /**
  * This file contains the list of system properties used to configure libhwui.
@@ -95,20 +94,6 @@ enum DebugLevel {
 #define PROPERTY_PROFILE_VISUALIZE_BARS "visual_bars"
 
 /**
- * Used to enable/disable non-rectangular clipping debugging.
- *
- * The accepted values are:
- * "highlight", drawing commands clipped by the stencil will
- *              be colored differently
- * "region", renders the clipping region on screen whenever
- *           the stencil is set
- * "hide", don't show the clip
- *
- * The default value is "hide".
- */
-#define PROPERTY_DEBUG_STENCIL_CLIP "debug.hwui.show_non_rect_clip"
-
-/**
  * Turn on to draw dirty regions every other frame.
  *
  * Possible values:
@@ -116,19 +101,6 @@ enum DebugLevel {
  * "false", to disable dirty regions debugging
  */
 #define PROPERTY_DEBUG_SHOW_DIRTY_REGIONS "debug.hwui.show_dirty_regions"
-
-/**
- * Disables draw operation deferral if set to "true", forcing draw
- * commands to be issued to OpenGL in order, and processed in sequence
- * with state-manipulation canvas commands.
- */
-#define PROPERTY_DISABLE_DRAW_DEFER "debug.hwui.disable_draw_defer"
-
-/**
- * Used to disable draw operation reordering when deferring draw operations
- * Has no effect if PROPERTY_DISABLE_DRAW_DEFER is set to "true"
- */
-#define PROPERTY_DISABLE_DRAW_REORDER "debug.hwui.disable_draw_reorder"
 
 /**
  * Setting this property will enable or disable the dropping of frames with
@@ -171,6 +143,11 @@ enum DebugLevel {
 #define PROPERTY_CAPTURE_SKP_ENABLED "debug.hwui.capture_skp_enabled"
 
 /**
+ * Allows to record Skia drawing commands with systrace.
+ */
+#define PROPERTY_SKIA_ATRACE_ENABLED "debug.hwui.skia_atrace_enabled"
+
+/**
  * Defines how many frames in a sequence to capture.
  */
 #define PROPERTY_CAPTURE_SKP_FRAMES "debug.hwui.capture_skp_frames"
@@ -181,9 +158,40 @@ enum DebugLevel {
 #define PROPERTY_CAPTURE_SKP_FILENAME "debug.hwui.skp_filename"
 
 /**
+ * Controls whether HWUI will send timing hints to HintManager for
+ * better CPU scheduling. Accepted values are "true" and "false".
+ */
+#define PROPERTY_USE_HINT_MANAGER "debug.hwui.use_hint_manager"
+
+/**
+ * Percentage of frame time that's used for CPU work. The rest is
+ * reserved for GPU work. This is used with use_hint_manager to
+ * provide timing hints to HintManager. Accepted values are
+ * integer from 1-100.
+ */
+#define PROPERTY_TARGET_CPU_TIME_PERCENTAGE "debug.hwui.target_cpu_time_percent"
+
+/**
  * Property for whether this is running in the emulator.
  */
-#define PROPERTY_QEMU_KERNEL "ro.kernel.qemu"
+#define PROPERTY_IS_EMULATOR "ro.boot.qemu"
+
+/**
+ * Turns on the Skia GPU option "reduceOpsTaskSplitting" which improves GPU
+ * efficiency but may increase VRAM consumption. Default is "true".
+ */
+#define PROPERTY_REDUCE_OPS_TASK_SPLITTING "renderthread.skia.reduceopstasksplitting"
+
+/**
+ * Enable WebView Overlays feature.
+ */
+#define PROPERTY_WEBVIEW_OVERLAYS_ENABLED "debug.hwui.webview_overlays_enabled"
+
+/**
+ * Property for globally GL drawing state. Can be overridden per process with
+ * setDrawingEnabled.
+ */
+#define PROPERTY_DRAWING_ENABLED "debug.hwui.drawing_enabled"
 
 ///////////////////////////////////////////////////////////////////////////////
 // Misc
@@ -198,9 +206,15 @@ enum class ProfileType { None, Console, Bars };
 
 enum class OverdrawColorSet { Default = 0, Deuteranomaly };
 
-enum class StencilClipDebug { Hide, ShowHighlight, ShowRegion };
+enum class RenderPipelineType { SkiaGL, SkiaVulkan, NotInitialized = 128 };
 
-enum class RenderPipelineType { OpenGL = 0, SkiaGL, SkiaVulkan, NotInitialized = 128 };
+enum class StretchEffectBehavior {
+    ShaderHWUI,   // Stretch shader in HWUI only, matrix scale in SF
+    Shader,       // Stretch shader in both HWUI and SF
+    UniformScale  // Uniform scale stretch everywhere
+};
+
+enum class DrawingEnabled { NotInitialized, On, Off };
 
 /**
  * Renderthread-only singleton which manages several static rendering properties. Most of these
@@ -211,8 +225,6 @@ class Properties {
 public:
     static bool load();
 
-    static bool drawDeferDisabled;
-    static bool drawReorderDisabled;
     static bool debugLayersUpdates;
     static bool debugOverdraw;
     static bool showDirtyRegions;
@@ -220,13 +232,13 @@ public:
     static bool skipEmptyFrames;
     static bool useBufferAge;
     static bool enablePartialUpdates;
+    static bool enableRenderEffectCache;
 
     // TODO: Move somewhere else?
     static constexpr float textGamma = 1.45f;
 
     static DebugLevel debugLevel;
     static OverdrawColorSet overdrawColorSet;
-    static StencilClipDebug debugStencilClip;
 
     // Override the value for a subset of properties in this class
     static void overrideProperty(const char* name, const char* value);
@@ -239,10 +251,10 @@ public:
     static int overrideSpotShadowStrength;
 
     static ProfileType getProfileType();
-    ANDROID_API static RenderPipelineType getRenderPipelineType();
-    static bool isSkiaEnabled();
+    static RenderPipelineType peekRenderPipelineType();
+    static RenderPipelineType getRenderPipelineType();
 
-    ANDROID_API static bool enableHighContrastText;
+    static bool enableHighContrastText;
 
     // Should be used only by test apps
     static bool waitForGpuCompletion;
@@ -261,20 +273,56 @@ public:
     static bool skpCaptureEnabled;
 
     // For experimentation b/68769804
-    ANDROID_API static bool enableRTAnimations;
+    static bool enableRTAnimations;
 
     // Used for testing only to change the render pipeline.
-    static void overrideRenderPipelineType(RenderPipelineType);
+    static void overrideRenderPipelineType(RenderPipelineType, bool inUnitTest = false);
 
     static bool runningInEmulator;
 
+    static bool debuggingEnabled;
+    static bool isolatedProcess;
+
+    static int contextPriority;
+
+    static float defaultSdrWhitePoint;
+
+    static bool useHintManager;
+    static int targetCpuTimePercentage;
+
+    static bool enableWebViewOverlays;
+
+    static StretchEffectBehavior getStretchEffectBehavior() {
+        return stretchEffectBehavior;
+    }
+
+    static void setIsHighEndGfx(bool isHighEndGfx) {
+        stretchEffectBehavior = isHighEndGfx ?
+            StretchEffectBehavior::ShaderHWUI :
+            StretchEffectBehavior::UniformScale;
+    }
+
+    /**
+     * Used for testing. Typical configuration of stretch behavior is done
+     * through setIsHighEndGfx
+     */
+    static void setStretchEffectBehavior(StretchEffectBehavior behavior) {
+        stretchEffectBehavior = behavior;
+    }
+
+    // Represents if drawing is enabled. Should only be Off in headless testing environments
+    static DrawingEnabled drawingEnabled;
+    static bool isDrawingEnabled();
+    static void setDrawingEnabled(bool enable);
+
 private:
+    static StretchEffectBehavior stretchEffectBehavior;
     static ProfileType sProfileType;
     static bool sDisableProfileBars;
     static RenderPipelineType sRenderPipelineType;
 };  // class Caches
 
-};  // namespace uirenderer
-};  // namespace android
+}  // namespace uirenderer
+}  // namespace android
 
 #endif  // ANDROID_HWUI_PROPERTIES_H

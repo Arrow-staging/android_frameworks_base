@@ -28,7 +28,8 @@ import android.graphics.Bitmap;
 
 /** {@hide} */
 interface IPackageInstaller {
-    int createSession(in PackageInstaller.SessionParams params, String installerPackageName, int userId);
+    int createSession(in PackageInstaller.SessionParams params, String installerPackageName,
+            String installerAttributionTag, int userId);
 
     void updateSessionAppIcon(int sessionId, in Bitmap appIcon);
     void updateSessionAppLabel(int sessionId, String appLabel);
@@ -42,11 +43,27 @@ interface IPackageInstaller {
     ParceledListSlice getAllSessions(int userId);
     ParceledListSlice getMySessions(String installerPackageName, int userId);
 
+    ParceledListSlice getStagedSessions();
+
     void registerCallback(IPackageInstallerCallback callback, int userId);
     void unregisterCallback(IPackageInstallerCallback callback);
 
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void uninstall(in VersionedPackage versionedPackage, String callerPackageName, int flags,
             in IntentSender statusReceiver, int userId);
 
+    void uninstallExistingPackage(in VersionedPackage versionedPackage, String callerPackageName,
+            in IntentSender statusReceiver, int userId);
+
+    void installExistingPackage(String packageName, int installFlags, int installReason,
+            in IntentSender statusReceiver, int userId, in List<String> whiteListedPermissions);
+
     void setPermissionsResult(int sessionId, boolean accepted);
+
+    void bypassNextStagedInstallerCheck(boolean value);
+
+    void bypassNextAllowedApexUpdateCheck(boolean value);
+
+    void setAllowUnlimitedSilentUpdates(String installerPackageName);
+    void setSilentUpdatesThrottleTime(long throttleTimeInSeconds);
 }

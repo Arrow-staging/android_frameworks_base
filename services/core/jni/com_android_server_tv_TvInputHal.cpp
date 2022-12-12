@@ -261,7 +261,7 @@ public:
 
     void onDeviceAvailable(const TvInputDeviceInfo& info);
     void onDeviceUnavailable(int deviceId);
-    void onStreamConfigurationsChanged(int deviceId);
+    void onStreamConfigurationsChanged(int deviceId, int cableConnectionStatus);
     void onCaptured(int deviceId, int streamId, uint32_t seq, bool succeeded);
 
 private:
@@ -292,7 +292,7 @@ private:
 
     class TvInputCallback : public ITvInputCallback {
     public:
-        TvInputCallback(JTvInputHal* hal);
+        explicit TvInputCallback(JTvInputHal* hal);
         Return<void> notify(const TvInputEvent& event) override;
     private:
         JTvInputHal* mHal;
@@ -301,6 +301,7 @@ private:
     JTvInputHal(JNIEnv* env, jobject thiz, sp<ITvInput> tvInput, const sp<Looper>& looper);
 
     Mutex mLock;
+    Mutex mStreamLock;
     jweak mThiz;
     sp<Looper> mLooper;
 
@@ -338,6 +339,7 @@ JTvInputHal* JTvInputHal::createInstance(JNIEnv* env, jobject thiz, const sp<Loo
 }
 
 int JTvInputHal::addOrUpdateStream(int deviceId, int streamId, const sp<Surface>& surface) {
+    Mutex::Autolock autoLock(&mStreamLock);
     KeyedVector<int, Connection>& connections = mConnections.editValueFor(deviceId);
     if (connections.indexOfKey(streamId) < 0) {
         connections.add(streamId, Connection());
@@ -390,7 +392,11 @@ int JTvInputHal::addOrUpdateStream(int deviceId, int streamId, const sp<Surface>
                 [&result, &sidebandStream](Result res, const native_handle_t* handle) {
                     result = res;
                     if (res == Result::OK) {
-                        sidebandStream = handle;
+                        if (handle) {
+                            sidebandStream = native_handle_clone(handle);
+                        } else {
+                            result = Result::UNKNOWN;
+                        }
                     }
                 });
         if (result != Result::OK) {
@@ -398,7 +404,7 @@ int JTvInputHal::addOrUpdateStream(int deviceId, int streamId, const sp<Surface>
                     result);
             return UNKNOWN_ERROR;
         }
-        connection.mSourceHandle = NativeHandle::create((native_handle_t*)sidebandStream, false);
+        connection.mSourceHandle = NativeHandle::create((native_handle_t*)sidebandStream, true);
     }
     connection.mSurface = surface;
     if (connection.mSurface != nullptr) {
@@ -408,6 +414,7 @@ int JTvInputHal::addOrUpdateStream(int deviceId, int streamId, const sp<Surface>
 }
 
 int JTvInputHal::removeStream(int deviceId, int streamId) {
+    Mutex::Autolock autoLock(&mStreamLock);
     KeyedVector<int, Connection>& connections = mConnections.editValueFor(deviceId);
     if (connections.indexOfKey(streamId) < 0) {
         return BAD_VALUE;
@@ -512,7 +519,7 @@ void JTvInputHal::onDeviceUnavailable(int deviceId) {
             deviceId);
 }
 
-void JTvInputHal::onStreamConfigurationsChanged(int deviceId) {
+void JTvInputHal::onStreamConfigurationsChanged(int deviceId, int cableConnectionStatus) {
     {
         Mutex::Autolock autoLock(&mLock);
         KeyedVector<int, Connection>& connections = mConnections.editValueFor(deviceId);
@@ -522,10 +529,8 @@ void JTvInputHal::onStreamConfigurationsChanged(int deviceId) {
         connections.clear();
     }
     JNIEnv* env = AndroidRuntime::getJNIEnv();
-    env->CallVoidMethod(
-            mThiz,
-            gTvInputHalClassInfo.streamConfigsChanged,
-            deviceId);
+    env->CallVoidMethod(mThiz, gTvInputHalClassInfo.streamConfigsChanged, deviceId,
+                        cableConnectionStatus);
 }
 
 void JTvInputHal::onCaptured(int deviceId, int streamId, uint32_t seq, bool succeeded) {
@@ -565,7 +570,8 @@ void JTvInputHal::NotifyHandler::handleMessage(const Message& message) {
             mHal->onDeviceUnavailable(mEvent.deviceInfo.deviceId);
         } break;
         case TvInputEventType::STREAM_CONFIGURATIONS_CHANGED: {
-            mHal->onStreamConfigurationsChanged(mEvent.deviceInfo.deviceId);
+            int cableConnectionStatus = static_cast<int>(mEvent.deviceInfo.cableConnectionStatus);
+            mHal->onStreamConfigurationsChanged(mEvent.deviceInfo.deviceId, cableConnectionStatus);
         } break;
         default:
             ALOGE("Unrecognizable event");
@@ -681,9 +687,8 @@ int register_android_server_tv_TvInputHal(JNIEnv* env) {
             "deviceAvailableFromNative", "(Landroid/media/tv/TvInputHardwareInfo;)V");
     GET_METHOD_ID(
             gTvInputHalClassInfo.deviceUnavailable, clazz, "deviceUnavailableFromNative", "(I)V");
-    GET_METHOD_ID(
-            gTvInputHalClassInfo.streamConfigsChanged, clazz,
-            "streamConfigsChangedFromNative", "(I)V");
+    GET_METHOD_ID(gTvInputHalClassInfo.streamConfigsChanged, clazz,
+                  "streamConfigsChangedFromNative", "(II)V");
     GET_METHOD_ID(
             gTvInputHalClassInfo.firstFrameCaptured, clazz,
             "firstFrameCapturedFromNative", "(II)V");

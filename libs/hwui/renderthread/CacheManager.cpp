@@ -16,15 +16,21 @@
 
 #include "CacheManager.h"
 
+#include "DeviceInfo.h"
 #include "Layer.h"
 #include "Properties.h"
 #include "RenderThread.h"
+#include "pipeline/skia/ATraceMemoryDump.h"
 #include "pipeline/skia/ShaderCache.h"
+#include "pipeline/skia/SkiaMemoryTracer.h"
 #include "renderstate/RenderState.h"
+#include "thread/CommonPool.h"
+#include <utils/Trace.h>
 
 #include <GrContextOptions.h>
 #include <SkExecutor.h>
-#include <gui/Surface.h>
+#include <SkGraphics.h>
+#include <SkMathPriv.h>
 #include <math.h>
 #include <set>
 
@@ -39,101 +45,55 @@ namespace renderthread {
 #define SURFACE_SIZE_MULTIPLIER (12.0f * 4.0f)
 #define BACKGROUND_RETENTION_PERCENTAGE (0.5f)
 
-// for super large fonts we will draw them as paths so no need to keep linearly
-// increasing the font cache size.
-#define FONT_CACHE_MIN_MB (0.5f)
-#define FONT_CACHE_MAX_MB (4.0f)
-
-CacheManager::CacheManager(const DisplayInfo& display) : mMaxSurfaceArea(display.w * display.h) {
-    mVectorDrawableAtlas = new skiapipeline::VectorDrawableAtlas(
-            mMaxSurfaceArea / 2,
-            skiapipeline::VectorDrawableAtlas::StorageMode::disallowSharedSurface);
-    if (Properties::isSkiaEnabled()) {
-        skiapipeline::ShaderCache::get().initShaderDiskCache();
-    }
+CacheManager::CacheManager()
+        : mMaxSurfaceArea(DeviceInfo::getWidth() * DeviceInfo::getHeight())
+        , mMaxResourceBytes(mMaxSurfaceArea * SURFACE_SIZE_MULTIPLIER)
+        , mBackgroundResourceBytes(mMaxResourceBytes * BACKGROUND_RETENTION_PERCENTAGE)
+        // This sets the maximum size for a single texture atlas in the GPU font cache. If
+        // necessary, the cache can allocate additional textures that are counted against the
+        // total cache limits provided to Skia.
+        , mMaxGpuFontAtlasBytes(GrNextSizePow2(mMaxSurfaceArea))
+        // This sets the maximum size of the CPU font cache to be at least the same size as the
+        // total number of GPU font caches (i.e. 4 separate GPU atlases).
+        , mMaxCpuFontCacheBytes(
+                  std::max(mMaxGpuFontAtlasBytes * 4, SkGraphics::GetFontCacheLimit()))
+        , mBackgroundCpuFontCacheBytes(mMaxCpuFontCacheBytes * BACKGROUND_RETENTION_PERCENTAGE) {
+    SkGraphics::SetFontCacheLimit(mMaxCpuFontCacheBytes);
 }
 
-void CacheManager::reset(sk_sp<GrContext> context) {
+void CacheManager::reset(sk_sp<GrDirectContext> context) {
     if (context != mGrContext) {
         destroy();
     }
 
     if (context) {
         mGrContext = std::move(context);
-        mGrContext->getResourceCacheLimits(&mMaxResources, nullptr);
-        updateContextCacheSizes();
+        mGrContext->setResourceCacheLimit(mMaxResourceBytes);
     }
 }
 
 void CacheManager::destroy() {
     // cleanup any caches here as the GrContext is about to go away...
     mGrContext.reset(nullptr);
-    mVectorDrawableAtlas = new skiapipeline::VectorDrawableAtlas(
-            mMaxSurfaceArea / 2,
-            skiapipeline::VectorDrawableAtlas::StorageMode::disallowSharedSurface);
 }
 
-void CacheManager::updateContextCacheSizes() {
-    mMaxResourceBytes = mMaxSurfaceArea * SURFACE_SIZE_MULTIPLIER;
-    mBackgroundResourceBytes = mMaxResourceBytes * BACKGROUND_RETENTION_PERCENTAGE;
-
-    mGrContext->setResourceCacheLimits(mMaxResources, mMaxResourceBytes);
-}
-
-class CacheManager::SkiaTaskProcessor : public TaskProcessor<bool>, public SkExecutor {
+class CommonPoolExecutor : public SkExecutor {
 public:
-    explicit SkiaTaskProcessor(TaskManager* taskManager) : TaskProcessor<bool>(taskManager) {}
-
-    // This is really a Task<void> but that doesn't really work when Future<>
-    // expects to be able to get/set a value
-    struct SkiaTask : public Task<bool> {
-        std::function<void()> func;
-    };
-
-    virtual void add(std::function<void(void)> func) override {
-        sp<SkiaTask> task(new SkiaTask());
-        task->func = func;
-        TaskProcessor<bool>::add(task);
-    }
-
-    virtual void onProcess(const sp<Task<bool> >& task) override {
-        SkiaTask* t = static_cast<SkiaTask*>(task.get());
-        t->func();
-        task->setResult(true);
-    }
+    virtual void add(std::function<void(void)> func) override { CommonPool::post(std::move(func)); }
 };
 
-void CacheManager::configureContext(GrContextOptions* contextOptions) {
+static CommonPoolExecutor sDefaultExecutor;
+
+void CacheManager::configureContext(GrContextOptions* contextOptions, const void* identity,
+                                    ssize_t size) {
     contextOptions->fAllowPathMaskCaching = true;
+    contextOptions->fGlyphCacheTextureMaximumBytes = mMaxGpuFontAtlasBytes;
+    contextOptions->fExecutor = &sDefaultExecutor;
 
-    float screenMP = mMaxSurfaceArea / 1024.0f / 1024.0f;
-    float fontCacheMB = 0;
-    float decimalVal = std::modf(screenMP, &fontCacheMB);
-
-    // This is a basic heuristic to size the cache to a multiple of 512 KB
-    if (decimalVal > 0.8f) {
-        fontCacheMB += 1.0f;
-    } else if (decimalVal > 0.5f) {
-        fontCacheMB += 0.5f;
-    }
-
-    // set limits on min/max size of the cache
-    fontCacheMB = std::max(FONT_CACHE_MIN_MB, std::min(FONT_CACHE_MAX_MB, fontCacheMB));
-
-    // We must currently set the size of the text cache based on the size of the
-    // display even though we like to  be dynamicallysizing it to the size of the window.
-    // Skia's implementation doesn't provide a mechanism to resize the font cache due to
-    // the potential cost of recreating the glyphs.
-    contextOptions->fGlyphCacheTextureMaximumBytes = fontCacheMB * 1024 * 1024;
-
-    if (mTaskManager.canRunTasks()) {
-        if (!mTaskProcessor.get()) {
-            mTaskProcessor = new SkiaTaskProcessor(&mTaskManager);
-        }
-        contextOptions->fExecutor = mTaskProcessor.get();
-    }
-
-    contextOptions->fPersistentCache = &skiapipeline::ShaderCache::get();
+    auto& cache = skiapipeline::ShaderCache::get();
+    cache.initShaderDiskCache(identity, size);
+    contextOptions->fPersistentCache = &cache;
+    contextOptions->fGpuPathRenderers &= ~GpuPathRenderers::kCoverageCounting;
 }
 
 void CacheManager::trimMemory(TrimMemoryMode mode) {
@@ -141,15 +101,23 @@ void CacheManager::trimMemory(TrimMemoryMode mode) {
         return;
     }
 
-    mGrContext->flush();
+    // flush and submit all work to the gpu and wait for it to finish
+    mGrContext->flushAndSubmit(/*syncCpu=*/true);
 
     switch (mode) {
         case TrimMemoryMode::Complete:
-            mVectorDrawableAtlas = new skiapipeline::VectorDrawableAtlas(mMaxSurfaceArea / 2);
             mGrContext->freeGpuResources();
+            SkGraphics::PurgeAllCaches();
             break;
         case TrimMemoryMode::UiHidden:
-            mGrContext->purgeUnlockedResources(mMaxResourceBytes - mBackgroundResourceBytes, true);
+            // Here we purge all the unlocked scratch resources and then toggle the resources cache
+            // limits between the background and max amounts. This causes the unlocked resources
+            // that have persistent data to be purged in LRU order.
+            mGrContext->purgeUnlockedResources(true);
+            mGrContext->setResourceCacheLimit(mBackgroundResourceBytes);
+            mGrContext->setResourceCacheLimit(mMaxResourceBytes);
+            SkGraphics::SetFontCacheLimit(mBackgroundCpuFontCacheBytes);
+            SkGraphics::SetFontCacheLimit(mMaxCpuFontCacheBytes);
             break;
     }
 }
@@ -158,18 +126,24 @@ void CacheManager::trimStaleResources() {
     if (!mGrContext) {
         return;
     }
-    mGrContext->flush();
+    mGrContext->flushAndSubmit();
     mGrContext->purgeResourcesNotUsedInMs(std::chrono::seconds(30));
 }
 
-sp<skiapipeline::VectorDrawableAtlas> CacheManager::acquireVectorDrawableAtlas() {
-    LOG_ALWAYS_FATAL_IF(mVectorDrawableAtlas.get() == nullptr);
-    LOG_ALWAYS_FATAL_IF(mGrContext == nullptr);
+void CacheManager::getMemoryUsage(size_t* cpuUsage, size_t* gpuUsage) {
+    *cpuUsage = 0;
+    *gpuUsage = 0;
+    if (!mGrContext) {
+        return;
+    }
 
-    /**
-     * TODO: define memory conditions where we clear the cache (e.g. surface->reset())
-     */
-    return mVectorDrawableAtlas;
+    skiapipeline::SkiaMemoryTracer cpuTracer("category", true);
+    SkGraphics::DumpMemoryStatistics(&cpuTracer);
+    *cpuUsage += cpuTracer.total();
+
+    skiapipeline::SkiaMemoryTracer gpuTracer("category", true);
+    mGrContext->dumpMemoryStatistics(&gpuTracer);
+    *gpuUsage += gpuTracer.total();
 }
 
 void CacheManager::dumpMemoryUsage(String8& log, const RenderState* renderState) {
@@ -178,36 +152,70 @@ void CacheManager::dumpMemoryUsage(String8& log, const RenderState* renderState)
         return;
     }
 
-    size_t bytesCached;
-    mGrContext->getResourceCacheUsage(nullptr, &bytesCached);
+    std::vector<skiapipeline::ResourcePair> cpuResourceMap = {
+            {"skia/sk_resource_cache/bitmap_", "Bitmaps"},
+            {"skia/sk_resource_cache/rrect-blur_", "Masks"},
+            {"skia/sk_resource_cache/rects-blur_", "Masks"},
+            {"skia/sk_resource_cache/tessellated", "Shadows"},
+            {"skia/sk_glyph_cache", "Glyph Cache"},
+    };
+    skiapipeline::SkiaMemoryTracer cpuTracer(cpuResourceMap, false);
+    SkGraphics::DumpMemoryStatistics(&cpuTracer);
+    if (cpuTracer.hasOutput()) {
+        log.appendFormat("CPU Caches:\n");
+        cpuTracer.logOutput(log);
+        log.appendFormat("  Glyph Count: %d \n", SkGraphics::GetFontCacheCountUsed());
+        log.appendFormat("Total CPU memory usage:\n");
+        cpuTracer.logTotals(log);
+    }
 
-    log.appendFormat("Caches:\n");
-    log.appendFormat("                         Current / Maximum\n");
-    log.appendFormat("  VectorDrawableAtlas  %6.2f kB / %6.2f kB (entries = %zu)\n", 0.0f, 0.0f,
-                     (size_t)0);
+    skiapipeline::SkiaMemoryTracer gpuTracer("category", true);
+    mGrContext->dumpMemoryStatistics(&gpuTracer);
+    if (gpuTracer.hasOutput()) {
+        log.appendFormat("GPU Caches:\n");
+        gpuTracer.logOutput(log);
+    }
 
-    if (renderState) {
-        if (renderState->mActiveLayers.size() > 0) {
-            log.appendFormat("  Layer Info:\n");
-        }
+    if (renderState && renderState->mActiveLayers.size() > 0) {
+        log.appendFormat("Layer Info:\n");
 
+        const char* layerType = Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL
+                                        ? "GlLayer"
+                                        : "VkLayer";
         size_t layerMemoryTotal = 0;
         for (std::set<Layer*>::iterator it = renderState->mActiveLayers.begin();
              it != renderState->mActiveLayers.end(); it++) {
             const Layer* layer = *it;
-            const char* layerType = layer->getApi() == Layer::Api::OpenGL ? "GlLayer" : "VkLayer";
             log.appendFormat("    %s size %dx%d\n", layerType, layer->getWidth(),
                              layer->getHeight());
             layerMemoryTotal += layer->getWidth() * layer->getHeight() * 4;
         }
-        log.appendFormat("  Layers Total         %6.2f kB (numLayers = %zu)\n",
+        log.appendFormat("  Layers Total         %6.2f KB (numLayers = %zu)\n",
                          layerMemoryTotal / 1024.0f, renderState->mActiveLayers.size());
     }
 
-    log.appendFormat("Total memory usage:\n");
-    log.appendFormat("  %zu bytes, %.2f MB (%.2f MB is purgeable)\n", bytesCached,
-                     bytesCached / 1024.0f / 1024.0f,
-                     mGrContext->getResourceCachePurgeableBytes() / 1024.0f / 1024.0f);
+    log.appendFormat("Total GPU memory usage:\n");
+    gpuTracer.logTotals(log);
+}
+
+void CacheManager::onFrameCompleted() {
+    if (ATRACE_ENABLED()) {
+        static skiapipeline::ATraceMemoryDump tracer;
+        tracer.startFrame();
+        SkGraphics::DumpMemoryStatistics(&tracer);
+        if (mGrContext) {
+            mGrContext->dumpMemoryStatistics(&tracer);
+        }
+        tracer.logTraces();
+    }
+}
+
+void CacheManager::performDeferredCleanup(nsecs_t cleanupOlderThanMillis) {
+    if (mGrContext) {
+        mGrContext->performDeferredCleanup(
+            std::chrono::milliseconds(cleanupOlderThanMillis),
+            /* scratchResourcesOnly */true);
+    }
 }
 
 } /* namespace renderthread */

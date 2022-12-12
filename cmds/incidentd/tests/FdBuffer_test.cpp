@@ -11,27 +11,28 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-#define LOG_TAG "incidentd"
+#define DEBUG false
+#include "Log.h"
 
 #include "FdBuffer.h"
-#include "io_util.h"
+#include "incidentd_util.h"
 
-#include <android-base/file.h>
-#include <android-base/test_utils.h>
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <signal.h>
 #include <string.h>
+
+#include <android-base/file.h>
+#include <gtest/gtest.h>
+
+using namespace android;
+using namespace android::base;
+using namespace android::os::incidentd;
+using ::testing::Test;
 
 const int READ_TIMEOUT = 5 * 1000;
 const int BUFFER_SIZE = 16 * 1024;
 const int QUICK_TIMEOUT_MS = 100;
 const std::string HEAD = "[OK]";
-
-using namespace android;
-using namespace android::base;
-using ::testing::Test;
 
 class FdBufferTest : public Test {
 public:
@@ -48,21 +49,21 @@ public:
     }
 
     void AssertBufferContent(const char* expected) {
-        int i=0;
-        EncodedBuffer::iterator it = buffer.data();
-        while (it.hasNext()) {
-            ASSERT_EQ(it.next(), expected[i++]);
+        int i = 0;
+        sp<ProtoReader> reader = buffer.data()->read();
+        while (reader->hasNext()) {
+            ASSERT_EQ(reader->next(), expected[i++]);
         }
         EXPECT_EQ(expected[i], '\0');
     }
 
-    bool DoDataStream(int rFd, int wFd) {
+    bool DoDataStream(const unique_fd& rFd, const unique_fd& wFd) {
         char buf[BUFFER_SIZE];
         ssize_t nRead;
-        while ((nRead = read(rFd, buf, BUFFER_SIZE)) > 0) {
+        while ((nRead = read(rFd.get(), buf, BUFFER_SIZE)) > 0) {
             ssize_t nWritten = 0;
             while (nWritten < nRead) {
-                ssize_t amt = write(wFd, buf + nWritten, nRead - nWritten);
+                ssize_t amt = write(wFd.get(), buf + nWritten, nRead - nWritten);
                 if (amt < 0) {
                     return false;
                 }
@@ -91,8 +92,8 @@ TEST_F(FdBufferTest, ReadAndWrite) {
 }
 
 TEST_F(FdBufferTest, IterateEmpty) {
-    EncodedBuffer::iterator it = buffer.data();
-    EXPECT_FALSE(it.hasNext());
+    sp<ProtoReader> reader = buffer.data()->read();
+    EXPECT_FALSE(reader->hasNext());
 }
 
 TEST_F(FdBufferTest, ReadAndIterate) {
@@ -100,16 +101,24 @@ TEST_F(FdBufferTest, ReadAndIterate) {
     ASSERT_TRUE(WriteStringToFile(testdata, tf.path));
     ASSERT_EQ(NO_ERROR, buffer.read(tf.fd, READ_TIMEOUT));
 
-    int i=0;
-    EncodedBuffer::iterator it = buffer.data();
-    while (it.hasNext()) {
-        EXPECT_EQ(it.next(), (uint8_t)testdata[i++]);
-    }
+    int i = 0;
+    sp<ProtoReader> reader = buffer.data()->read();
 
-    it.rp()->rewind();
-    it.rp()->move(buffer.size());
-    EXPECT_EQ(it.bytesRead(), testdata.size());
-    EXPECT_FALSE(it.hasNext());
+    while (reader->hasNext()) {
+        EXPECT_EQ(reader->next(), (uint8_t)testdata[i++]);
+    }
+}
+
+TEST_F(FdBufferTest, Move) {
+    std::string testdata = "FdBuffer test string";
+    ASSERT_TRUE(WriteStringToFile(testdata, tf.path));
+    ASSERT_EQ(NO_ERROR, buffer.read(tf.fd, READ_TIMEOUT));
+
+    sp<ProtoReader> reader = buffer.data()->read();
+    reader->move(buffer.size());
+
+    EXPECT_EQ(reader->bytesRead(), testdata.size());
+    EXPECT_FALSE(reader->hasNext());
 }
 
 TEST_F(FdBufferTest, ReadTimeout) {
@@ -117,20 +126,20 @@ TEST_F(FdBufferTest, ReadTimeout) {
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(c2pPipe.readFd());
-        while(true) {
+        c2pPipe.readFd().reset();
+        while (true) {
             write(c2pPipe.writeFd(), "poo", 3);
             sleep(1);
         }
         _exit(EXIT_FAILURE);
     } else {
-        close(c2pPipe.writeFd());
+        c2pPipe.writeFd().reset();
 
-        status_t status = buffer.read(c2pPipe.readFd(), QUICK_TIMEOUT_MS);
+        status_t status = buffer.read(c2pPipe.readFd().get(), QUICK_TIMEOUT_MS);
         ASSERT_EQ(NO_ERROR, status);
         EXPECT_TRUE(buffer.timedOut());
 
-        kill(pid, SIGKILL); // reap the child process
+        kill(pid, SIGKILL);  // reap the child process
     }
 }
 
@@ -143,20 +152,21 @@ TEST_F(FdBufferTest, ReadInStreamAndWrite) {
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(p2cPipe.writeFd());
-        close(c2pPipe.readFd());
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
         ASSERT_TRUE(WriteStringToFd(HEAD, c2pPipe.writeFd()));
         ASSERT_TRUE(DoDataStream(p2cPipe.readFd(), c2pPipe.writeFd()));
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
         // Must exit here otherwise the child process will continue executing the test binary.
         _exit(EXIT_SUCCESS);
     } else {
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
 
-        ASSERT_EQ(NO_ERROR, buffer.readProcessedDataInStream(tf.fd,
-            p2cPipe.writeFd(), c2pPipe.readFd(), READ_TIMEOUT));
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(tf.fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), READ_TIMEOUT));
         AssertBufferReadSuccessful(HEAD.size() + testdata.size());
         AssertBufferContent(expected.c_str());
         wait(&pid);
@@ -172,23 +182,24 @@ TEST_F(FdBufferTest, ReadInStreamAndWriteAllAtOnce) {
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(p2cPipe.writeFd());
-        close(c2pPipe.readFd());
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
         std::string data;
         // wait for read finishes then write.
         ASSERT_TRUE(ReadFdToString(p2cPipe.readFd(), &data));
         data = HEAD + data;
         ASSERT_TRUE(WriteStringToFd(data, c2pPipe.writeFd()));
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
         // Must exit here otherwise the child process will continue executing the test binary.
         _exit(EXIT_SUCCESS);
     } else {
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
 
-        ASSERT_EQ(NO_ERROR, buffer.readProcessedDataInStream(tf.fd,
-            p2cPipe.writeFd(), c2pPipe.readFd(), READ_TIMEOUT));
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(tf.fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), READ_TIMEOUT));
         AssertBufferReadSuccessful(HEAD.size() + testdata.size());
         AssertBufferContent(expected.c_str());
         wait(&pid);
@@ -202,58 +213,90 @@ TEST_F(FdBufferTest, ReadInStreamEmpty) {
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(p2cPipe.writeFd());
-        close(c2pPipe.readFd());
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
         ASSERT_TRUE(DoDataStream(p2cPipe.readFd(), c2pPipe.writeFd()));
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
         _exit(EXIT_SUCCESS);
     } else {
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
 
-        ASSERT_EQ(NO_ERROR, buffer.readProcessedDataInStream(tf.fd,
-            p2cPipe.writeFd(), c2pPipe.readFd(), READ_TIMEOUT));
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(tf.fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), READ_TIMEOUT));
         AssertBufferReadSuccessful(0);
         AssertBufferContent("");
         wait(&pid);
     }
 }
 
-TEST_F(FdBufferTest, ReadInStreamMoreThan4MB) {
-    const std::string testFile = kTestDataPath + "morethan4MB.txt";
-    size_t fourMB = (size_t) 4 * 1024 * 1024;
-    int fd = open(testFile.c_str(), O_RDONLY | O_CLOEXEC);
-    ASSERT_NE(fd, -1);
+TEST_F(FdBufferTest, ReadInStreamMoreThan4MBWithMove) {
+    const std::string testFile = kTestDataPath + "morethan96MB.txt";
+    size_t ninetySixMB = (size_t)96 * 1024 * 1024;
+    unique_fd fd(open(testFile.c_str(), O_RDONLY | O_CLOEXEC));
+    ASSERT_NE(fd.get(), -1);
     int pid = fork();
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(p2cPipe.writeFd());
-        close(c2pPipe.readFd());
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
         ASSERT_TRUE(DoDataStream(p2cPipe.readFd(), c2pPipe.writeFd()));
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
         _exit(EXIT_SUCCESS);
     } else {
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
 
-        ASSERT_EQ(NO_ERROR, buffer.readProcessedDataInStream(fd,
-            p2cPipe.writeFd(), c2pPipe.readFd(), READ_TIMEOUT));
-        EXPECT_EQ(buffer.size(), fourMB);
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), READ_TIMEOUT));
+        EXPECT_EQ(buffer.size(), ninetySixMB);
         EXPECT_FALSE(buffer.timedOut());
         EXPECT_TRUE(buffer.truncated());
         wait(&pid);
-        EncodedBuffer::iterator it = buffer.data();
-        it.rp()->move(fourMB);
-        EXPECT_EQ(it.bytesRead(), fourMB);
-        EXPECT_FALSE(it.hasNext());
+        sp<ProtoReader> reader = buffer.data()->read();
+        reader->move(ninetySixMB);
 
-        it.rp()->rewind();
-        while (it.hasNext()) {
-            char c = 'A' + (it.bytesRead() % 64 / 8);
-            ASSERT_TRUE(it.next() == c);
+        EXPECT_EQ(reader->bytesRead(), ninetySixMB);
+        EXPECT_FALSE(reader->hasNext());
+    }
+}
+
+TEST_F(FdBufferTest, ReadInStreamMoreThan4MBWithNext) {
+    const std::string testFile = kTestDataPath + "morethan96MB.txt";
+    size_t ninetySixMB = (size_t)96 * 1024 * 1024;
+    unique_fd fd(open(testFile.c_str(), O_RDONLY | O_CLOEXEC));
+    ASSERT_NE(fd.get(), -1);
+    int pid = fork();
+    ASSERT_TRUE(pid != -1);
+
+    if (pid == 0) {
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
+        ASSERT_TRUE(DoDataStream(p2cPipe.readFd(), c2pPipe.writeFd()));
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
+        _exit(EXIT_SUCCESS);
+    } else {
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
+
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), READ_TIMEOUT));
+        EXPECT_EQ(buffer.size(), ninetySixMB);
+        EXPECT_FALSE(buffer.timedOut());
+        EXPECT_TRUE(buffer.truncated());
+        wait(&pid);
+        sp<ProtoReader> reader = buffer.data()->read();
+
+        while (reader->hasNext()) {
+            char c = 'A' + (reader->bytesRead() % 64 / 8);
+            ASSERT_TRUE(reader->next() == c);
         }
     }
 }
@@ -266,19 +309,20 @@ TEST_F(FdBufferTest, ReadInStreamTimeOut) {
     ASSERT_TRUE(pid != -1);
 
     if (pid == 0) {
-        close(p2cPipe.writeFd());
-        close(c2pPipe.readFd());
+        p2cPipe.writeFd().reset();
+        c2pPipe.readFd().reset();
         while (true) {
             sleep(1);
         }
         _exit(EXIT_FAILURE);
     } else {
-        close(p2cPipe.readFd());
-        close(c2pPipe.writeFd());
+        p2cPipe.readFd().reset();
+        c2pPipe.writeFd().reset();
 
-        ASSERT_EQ(NO_ERROR, buffer.readProcessedDataInStream(tf.fd,
-            p2cPipe.writeFd(), c2pPipe.readFd(), QUICK_TIMEOUT_MS));
+        ASSERT_EQ(NO_ERROR,
+                  buffer.readProcessedDataInStream(tf.fd, std::move(p2cPipe.writeFd()),
+                                                   std::move(c2pPipe.readFd()), QUICK_TIMEOUT_MS));
         EXPECT_TRUE(buffer.timedOut());
-        kill(pid, SIGKILL); // reap the child process
+        kill(pid, SIGKILL);  // reap the child process
     }
 }

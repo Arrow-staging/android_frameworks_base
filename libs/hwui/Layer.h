@@ -16,13 +16,16 @@
 
 #pragma once
 
-#include <GpuMemoryTracker.h>
 #include <utils/RefBase.h>
 
 #include <SkBlendMode.h>
+#include <SkColorFilter.h>
+#include <SkColorSpace.h>
+#include <SkCanvas.h>
 #include <SkPaint.h>
-
-#include "Matrix.h"
+#include <SkImage.h>
+#include <SkMatrix.h>
+#include <system/graphics.h>
 
 namespace android {
 namespace uirenderer {
@@ -36,26 +39,21 @@ class RenderState;
 /**
  * A layer has dimensions and is backed by a backend specific texture or framebuffer.
  */
-class Layer : public VirtualLightRefBase, GpuMemoryTracker {
+class Layer : public VirtualLightRefBase {
 public:
-    enum class Api {
-        OpenGL = 0,
-        Vulkan = 1,
-    };
-
-    Api getApi() const { return mApi; }
+    Layer(RenderState& renderState, sk_sp<SkColorFilter>, int alpha, SkBlendMode mode);
 
     ~Layer();
 
-    virtual uint32_t getWidth() const = 0;
+    uint32_t getWidth() const { return mWidth; }
 
-    virtual uint32_t getHeight() const = 0;
+    uint32_t getHeight() const { return mHeight; }
 
-    virtual void setSize(uint32_t width, uint32_t height) = 0;
+    void setSize(uint32_t width, uint32_t height) { mWidth = width; mHeight = height; }
 
-    virtual void setBlend(bool blend) = 0;
+    void setBlend(bool blend) { mBlend = blend; }
 
-    virtual bool isBlend() const = 0;
+    bool isBlend() const { return mBlend; }
 
     inline void setForceFilter(bool forceFilter) { this->forceFilter = forceFilter; }
 
@@ -70,15 +68,23 @@ public:
 
     inline int getAlpha() const { return alpha; }
 
-    inline SkBlendMode getMode() const { return mode; }
+    SkBlendMode getMode() const;
 
-    inline SkColorFilter* getColorFilter() const { return colorFilter; }
+    inline sk_sp<SkColorFilter> getColorFilter() const { return mColorFilter; }
 
-    void setColorFilter(SkColorFilter* filter);
+    void setColorFilter(sk_sp<SkColorFilter> filter) { mColorFilter = filter; };
 
-    inline mat4& getTexTransform() { return texTransform; }
+    inline SkMatrix& getTransform() { return transform; }
 
-    inline mat4& getTransform() { return transform; }
+    inline SkRect getCurrentCropRect() { return mCurrentCropRect; }
+
+    inline void setCurrentCropRect(const SkRect currentCropRect) {
+        mCurrentCropRect = currentCropRect;
+    }
+
+    inline void setWindowTransform(uint32_t windowTransform) { mWindowTransform = windowTransform; }
+
+    inline uint32_t getWindowTransform() { return mWindowTransform; }
 
     /**
      * Posts a decStrong call to the appropriate thread.
@@ -86,19 +92,27 @@ public:
      */
     void postDecStrong();
 
+    inline void setImage(const sk_sp<SkImage>& image) { this->layerImage = image; }
+
+    inline sk_sp<SkImage> getImage() const { return this->layerImage; }
+
+    inline void setMaxLuminanceNits(float maxLuminanceNits) {
+        mMaxLuminanceNits = maxLuminanceNits;
+    }
+
+    inline float getMaxLuminanceNits() { return mMaxLuminanceNits; }
+
+    void draw(SkCanvas* canvas);
+
 protected:
-    Layer(RenderState& renderState, Api api, SkColorFilter* colorFilter, int alpha,
-          SkBlendMode mode);
 
     RenderState& mRenderState;
 
 private:
-    Api mApi;
-
     /**
      * Color filter used to draw this layer. Optional.
      */
-    SkColorFilter* colorFilter;
+    sk_sp<SkColorFilter> mColorFilter;
 
     /**
      * Indicates raster data backing the layer is scaled, requiring filtration.
@@ -116,16 +130,46 @@ private:
     SkBlendMode mode;
 
     /**
-     * Optional texture coordinates transform.
-     */
-    mat4 texTransform;
-
-    /**
      * Optional transform.
      */
-    mat4 transform;
+    SkMatrix transform;
+
+    /**
+     * Optional crop
+     */
+    SkRect mCurrentCropRect;
+
+    /**
+     * Optional transform
+     */
+    uint32_t mWindowTransform;
+
+    /**
+     * An image backing the layer.
+     */
+    sk_sp<SkImage> layerImage;
+
+    /**
+     * layer width.
+     */
+    uint32_t mWidth = 0;
+
+    /**
+     * layer height.
+     */
+    uint32_t mHeight = 0;
+
+    /**
+     * enable blending
+     */
+    bool mBlend = false;
+
+    /**
+     * Max input luminance if the layer is HDR
+     */
+    float mMaxLuminanceNits = -1;
 
 };  // struct Layer
 
-};  // namespace uirenderer
-};  // namespace android
+}  // namespace uirenderer
+}  // namespace android

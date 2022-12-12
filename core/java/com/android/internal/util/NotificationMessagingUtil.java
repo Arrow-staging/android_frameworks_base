@@ -26,9 +26,9 @@ import android.os.Looper;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
-import android.text.TextUtils;
-import android.util.ArrayMap;
+import android.util.SparseArray;
 
+import java.util.Collection;
 import java.util.Objects;
 
 /**
@@ -39,12 +39,24 @@ public class NotificationMessagingUtil {
 
     private static final String DEFAULT_SMS_APP_SETTING = Settings.Secure.SMS_DEFAULT_APPLICATION;
     private final Context mContext;
-    private ArrayMap<Integer, String> mDefaultSmsApp = new ArrayMap<>();
+    private SparseArray<String> mDefaultSmsApp = new SparseArray<>();
 
     public NotificationMessagingUtil(Context context) {
         mContext = context;
         mContext.getContentResolver().registerContentObserver(
                 Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING), false, mSmsContentObserver);
+    }
+
+    public boolean isImportantMessaging(StatusBarNotification sbn, int importance) {
+        if (importance < NotificationManager.IMPORTANCE_LOW) {
+            return false;
+        }
+
+        return hasMessagingStyle(sbn) || (isCategoryMessage(sbn) && isDefaultMessagingApp(sbn));
+    }
+
+    public boolean isMessaging(StatusBarNotification sbn) {
+        return hasMessagingStyle(sbn) || isDefaultMessagingApp(sbn) || isCategoryMessage(sbn);
     }
 
     @SuppressWarnings("deprecation")
@@ -66,28 +78,18 @@ public class NotificationMessagingUtil {
     private final ContentObserver mSmsContentObserver = new ContentObserver(
             new Handler(Looper.getMainLooper())) {
         @Override
-        public void onChange(boolean selfChange, Uri uri, int userId) {
-            if (Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING).equals(uri)) {
+        public void onChange(boolean selfChange, Collection<Uri> uris, int flags, int userId) {
+            if (uris.contains(Settings.Secure.getUriFor(DEFAULT_SMS_APP_SETTING))) {
                 cacheDefaultSmsApp(userId);
             }
         }
     };
 
-    public boolean isImportantMessaging(StatusBarNotification sbn, int importance) {
-        if (importance < NotificationManager.IMPORTANCE_LOW) {
-            return false;
-        }
+    private boolean hasMessagingStyle(StatusBarNotification sbn) {
+        return sbn.getNotification().isStyle(Notification.MessagingStyle.class);
+    }
 
-        Class<? extends Notification.Style> style = sbn.getNotification().getNotificationStyle();
-        if (Notification.MessagingStyle.class.equals(style)) {
-            return true;
-        }
-
-        if (Notification.CATEGORY_MESSAGE.equals(sbn.getNotification().category)
-                && isDefaultMessagingApp(sbn)) {
-            return true;
-        }
-
-        return false;
+    private boolean isCategoryMessage(StatusBarNotification sbn) {
+        return Notification.CATEGORY_MESSAGE.equals(sbn.getNotification().category);
     }
 }

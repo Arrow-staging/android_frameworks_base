@@ -16,6 +16,9 @@
 
 package com.android.server.locksettings.recoverablekeystore;
 
+import android.annotation.Nullable;
+import android.util.Pair;
+
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.nio.ByteBuffer;
@@ -37,7 +40,7 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 
 /**
- * Utility functions for the flow where the RecoveryManager syncs keys with remote storage.
+ * Utility functions for the flow where the RecoveryController syncs keys with remote storage.
  *
  * @hide
  */
@@ -61,8 +64,6 @@ public class KeySyncUtils {
     private static final byte[] THM_KF_HASH_PREFIX = "THM_KF_hash".getBytes(StandardCharsets.UTF_8);
 
     private static final int KEY_CLAIMANT_LENGTH_BYTES = 16;
-    private static final int VAULT_PARAMS_LENGTH_BYTES = 94;
-    private static final int VAULT_HANDLE_LENGTH_BYTES = 17;
 
     /**
      * Encrypts the recovery key using both the lock screen hash and the remote storage's public
@@ -154,15 +155,28 @@ public class KeySyncUtils {
      * @hide
      */
     public static Map<String, byte[]> encryptKeysWithRecoveryKey(
-            SecretKey recoveryKey, Map<String, SecretKey> keys)
+            SecretKey recoveryKey, Map<String, Pair<SecretKey, byte[]>> keys)
             throws NoSuchAlgorithmException, InvalidKeyException {
         HashMap<String, byte[]> encryptedKeys = new HashMap<>();
         for (String alias : keys.keySet()) {
-            SecretKey key = keys.get(alias);
+            SecretKey key = keys.get(alias).first;
+            byte[] metadata = keys.get(alias).second;
+            byte[] header;
+            if (metadata == null) {
+                header = ENCRYPTED_APPLICATION_KEY_HEADER;
+            } else {
+                // The provided metadata, if non-empty, will be bound to the authenticated
+                // encryption process of the key material. As a result, the ciphertext cannot be
+                // decrypted if a wrong metadata is provided during the recovery/decryption process.
+                // Note that Android P devices do not have the API to provide the optional metadata,
+                // so all the keys with non-empty metadata stored on Android Q+ devices cannot be
+                // recovered on Android P devices.
+                header = concat(ENCRYPTED_APPLICATION_KEY_HEADER, metadata);
+            }
             byte[] encryptedKey = SecureBox.encrypt(
                     /*theirPublicKey=*/ null,
                     /*sharedSecret=*/ recoveryKey.getEncoded(),
-                    /*header=*/ ENCRYPTED_APPLICATION_KEY_HEADER,
+                    /*header=*/ header,
                     /*payload=*/ key.getEncoded());
             encryptedKeys.put(alias, encryptedKey);
         }
@@ -259,12 +273,19 @@ public class KeySyncUtils {
      * @throws AEADBadTagException if the message has been tampered with or was encrypted with a
      *     different key.
      */
-    public static byte[] decryptApplicationKey(byte[] recoveryKey, byte[] encryptedApplicationKey)
+    public static byte[] decryptApplicationKey(byte[] recoveryKey, byte[] encryptedApplicationKey,
+            @Nullable byte[] applicationKeyMetadata)
             throws NoSuchAlgorithmException, InvalidKeyException, AEADBadTagException {
+        byte[] header;
+        if (applicationKeyMetadata == null) {
+            header = ENCRYPTED_APPLICATION_KEY_HEADER;
+        } else {
+            header = concat(ENCRYPTED_APPLICATION_KEY_HEADER, applicationKeyMetadata);
+        }
         return SecureBox.decrypt(
                 /*ourPrivateKey=*/ null,
                 /*sharedSecret=*/ recoveryKey,
-                /*header=*/ ENCRYPTED_APPLICATION_KEY_HEADER,
+                /*header=*/ header,
                 /*encryptedPayload=*/ encryptedApplicationKey);
     }
 
@@ -273,12 +294,16 @@ public class KeySyncUtils {
      *
      * @param key The bytes of the key.
      * @return The key.
-     * @throws NoSuchAlgorithmException if the public key algorithm is unavailable.
      * @throws InvalidKeySpecException if the bytes of the key are not a valid key.
      */
-    public static PublicKey deserializePublicKey(byte[] key)
-            throws NoSuchAlgorithmException, InvalidKeySpecException {
-        KeyFactory keyFactory = KeyFactory.getInstance(PUBLIC_KEY_FACTORY_ALGORITHM);
+    public static PublicKey deserializePublicKey(byte[] key) throws InvalidKeySpecException {
+        KeyFactory keyFactory;
+        try {
+            keyFactory = KeyFactory.getInstance(PUBLIC_KEY_FACTORY_ALGORITHM);
+        } catch (NoSuchAlgorithmException e) {
+            // Should not happen
+            throw new RuntimeException(e);
+        }
         X509EncodedKeySpec publicKeySpec = new X509EncodedKeySpec(key);
         return keyFactory.generatePublic(publicKeySpec);
     }
@@ -294,8 +319,12 @@ public class KeySyncUtils {
      */
     public static byte[] packVaultParams(
             PublicKey thmPublicKey, long counterId, int maxAttempts, byte[] vaultHandle) {
-        // TODO: Check if vaultHandle has exactly the length of VAULT_HANDLE_LENGTH_BYTES somewhere
-        return ByteBuffer.allocate(VAULT_PARAMS_LENGTH_BYTES)
+        int vaultParamsLength
+                = 65 // public key
+                + 8 // counterId
+                + 4 // maxAttempts
+                + vaultHandle.length;
+        return ByteBuffer.allocate(vaultParamsLength)
                 .order(ByteOrder.LITTLE_ENDIAN)
                 .put(SecureBox.encodePublicKey(thmPublicKey))
                 .putLong(counterId)

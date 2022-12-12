@@ -16,61 +16,56 @@
 
 package com.android.systemui.statusbar.phone;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-import android.os.Debug;
-import android.support.test.filters.SmallTest;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableLooper;
 
+import androidx.test.filters.SmallTest;
+
 import com.android.systemui.SysuiTestCase;
 import com.android.systemui.doze.DozeHost;
+import com.android.systemui.doze.DozeLog;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 @RunWith(AndroidTestingRunner.class)
 @TestableLooper.RunWithLooper
 @SmallTest
 public class DozeScrimControllerTest extends SysuiTestCase {
 
-    private ScrimController mScrimController;
+    @Mock
+    private DozeParameters mDozeParameters;
+    @Mock
+    private DozeLog mDozeLog;
+    @Mock
+    private StatusBarStateController mStatusBarStateController;
     private DozeScrimController mDozeScrimController;
 
     @Before
     public void setup() {
-        mScrimController = mock(ScrimController.class);
-        // Make sure callbacks will be invoked to complete the lifecycle.
-        doAnswer(invocationOnMock -> {
-            ScrimController.Callback callback = invocationOnMock.getArgument(1);
-            callback.onStart();
-            callback.onDisplayBlanked();
-            callback.onFinished();
-            return null;
-        }).when(mScrimController).transitionTo(any(ScrimState.class),
-                any(ScrimController.Callback.class));
-
-        mDozeScrimController = new DozeScrimController(mScrimController, getContext());
+        MockitoAnnotations.initMocks(this);
+        mDozeScrimController = new DozeScrimController(mDozeParameters, mDozeLog,
+                mStatusBarStateController);
         mDozeScrimController.setDozing(true);
-    }
-
-    @Test
-    public void changesScrimControllerState() {
-        mDozeScrimController.pulse(mock(DozeHost.PulseCallback.class), 0);
-        verify(mScrimController).transitionTo(eq(ScrimState.PULSING),
-                any(ScrimController.Callback.class));
     }
 
     @Test
     public void callsPulseCallback() {
         DozeHost.PulseCallback callback = mock(DozeHost.PulseCallback.class);
         mDozeScrimController.pulse(callback, 0);
+
+        // Manually simulate a scrim lifecycle
+        mDozeScrimController.getScrimCallback().onStart();
+        mDozeScrimController.getScrimCallback().onDisplayBlanked();
+        mDozeScrimController.getScrimCallback().onFinished();
 
         verify(callback).onPulseStarted();
         mDozeScrimController.pulseOutNow();

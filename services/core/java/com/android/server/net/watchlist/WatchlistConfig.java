@@ -16,8 +16,8 @@
 
 package com.android.server.net.watchlist;
 
+import android.annotation.Nullable;
 import android.os.FileUtils;
-import android.util.AtomicFile;
 import android.util.Log;
 import android.util.Slog;
 import android.util.Xml;
@@ -55,9 +55,6 @@ class WatchlistConfig {
     private static final String NETWORK_WATCHLIST_DB_FOR_TEST_PATH =
             "/data/misc/network_watchlist/network_watchlist_for_test.xml";
 
-    // Hash for null / unknown config, a 32 byte array filled with content 0x00
-    private static final byte[] UNKNOWN_CONFIG_HASH = new byte[32];
-
     private static class XmlTags {
         private static final String WATCHLIST_CONFIG = "watchlist-config";
         private static final String SHA256_DOMAIN = "sha256-domain";
@@ -68,11 +65,11 @@ class WatchlistConfig {
     }
 
     private static class CrcShaDigests {
-        final HarmfulDigests crc32Digests;
-        final HarmfulDigests sha256Digests;
+        public final HarmfulCrcs crc32s;
+        public final HarmfulDigests sha256Digests;
 
-        public CrcShaDigests(HarmfulDigests crc32Digests, HarmfulDigests sha256Digests) {
-            this.crc32Digests = crc32Digests;
+        CrcShaDigests(HarmfulCrcs crc32s, HarmfulDigests sha256Digests) {
+            this.crc32s = crc32s;
             this.sha256Digests = sha256Digests;
         }
     }
@@ -107,6 +104,10 @@ class WatchlistConfig {
      * Reload watchlist by reading config file.
      */
     public void reloadConfig() {
+        if (!mXmlFile.exists()) {
+            // No config file
+            return;
+        }
         try (FileInputStream stream = new FileInputStream(mXmlFile)){
             final List<byte[]> crc32DomainList = new ArrayList<>();
             final List<byte[]> sha256DomainList = new ArrayList<>();
@@ -138,9 +139,9 @@ class WatchlistConfig {
                 }
             }
             parser.require(XmlPullParser.END_TAG, null, XmlTags.WATCHLIST_CONFIG);
-            mDomainDigests = new CrcShaDigests(new HarmfulDigests(crc32DomainList),
+            mDomainDigests = new CrcShaDigests(new HarmfulCrcs(crc32DomainList),
                     new HarmfulDigests(sha256DomainList));
-            mIpDigests = new CrcShaDigests(new HarmfulDigests(crc32IpList),
+            mIpDigests = new CrcShaDigests(new HarmfulCrcs(crc32IpList),
                     new HarmfulDigests(sha256IpList));
             Log.i(TAG, "Reload watchlist done");
         } catch (IllegalStateException | NullPointerException | NumberFormatException |
@@ -169,8 +170,8 @@ class WatchlistConfig {
             return false;
         }
         // First it does a quick CRC32 check.
-        final byte[] crc32 = getCrc32(domain);
-        if (!domainDigests.crc32Digests.contains(crc32)) {
+        final int crc32 = getCrc32(domain);
+        if (!domainDigests.crc32s.contains(crc32)) {
             return false;
         }
         // Now we do a slow SHA256 check.
@@ -185,8 +186,8 @@ class WatchlistConfig {
             return false;
         }
         // First it does a quick CRC32 check.
-        final byte[] crc32 = getCrc32(ip);
-        if (!ipDigests.crc32Digests.contains(crc32)) {
+        final int crc32 = getCrc32(ip);
+        if (!ipDigests.crc32s.contains(crc32)) {
             return false;
         }
         // Now we do a slow SHA256 check.
@@ -196,15 +197,11 @@ class WatchlistConfig {
 
 
     /** Get CRC32 of a string
-     *
-     * TODO: Review if we should use CRC32 or other algorithms
      */
-    private byte[] getCrc32(String str) {
+    private int getCrc32(String str) {
         final CRC32 crc = new CRC32();
         crc.update(str.getBytes());
-        final long tmp = crc.getValue();
-        return new byte[]{(byte) (tmp >> 24 & 255), (byte) (tmp >> 16 & 255),
-                (byte) (tmp >> 8 & 255), (byte) (tmp & 255)};
+        return (int) crc.getValue();
     }
 
     /** Get SHA256 of a string */
@@ -224,16 +221,21 @@ class WatchlistConfig {
         return mIsSecureConfig;
     }
 
+    @Nullable
+    /**
+     * Get watchlist config SHA-256 digest.
+     * Return null if watchlist config does not exist.
+     */
     public byte[] getWatchlistConfigHash() {
         if (!mXmlFile.exists()) {
-            return UNKNOWN_CONFIG_HASH;
+            return null;
         }
         try {
             return DigestUtils.getSha256Hash(mXmlFile);
         } catch (IOException | NoSuchAlgorithmException e) {
             Log.e(TAG, "Unable to get watchlist config hash", e);
         }
-        return UNKNOWN_CONFIG_HASH;
+        return null;
     }
 
     /**
@@ -267,18 +269,21 @@ class WatchlistConfig {
     }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-        pw.println("Watchlist config hash: " + HexDump.toHexString(getWatchlistConfigHash()));
+        final byte[] hash = getWatchlistConfigHash();
+        pw.println("Watchlist config hash: " + (hash != null ? HexDump.toHexString(hash) : null));
         pw.println("Domain CRC32 digest list:");
+        // mDomainDigests won't go from non-null to null so it's safe
         if (mDomainDigests != null) {
-            mDomainDigests.crc32Digests.dump(fd, pw, args);
+            mDomainDigests.crc32s.dump(fd, pw, args);
         }
         pw.println("Domain SHA256 digest list:");
         if (mDomainDigests != null) {
             mDomainDigests.sha256Digests.dump(fd, pw, args);
         }
         pw.println("Ip CRC32 digest list:");
+        // mIpDigests won't go from non-null to null so it's safe
         if (mIpDigests != null) {
-            mIpDigests.crc32Digests.dump(fd, pw, args);
+            mIpDigests.crc32s.dump(fd, pw, args);
         }
         pw.println("Ip SHA256 digest list:");
         if (mIpDigests != null) {

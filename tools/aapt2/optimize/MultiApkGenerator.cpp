@@ -20,12 +20,14 @@
 #include <regex>
 #include <string>
 
+#include "androidfw/ConfigDescription.h"
 #include "androidfw/StringPiece.h"
 
 #include "LoadedApk.h"
 #include "ResourceUtils.h"
 #include "ValueVisitor.h"
 #include "configuration/ConfigurationParser.h"
+#include "cmd/Util.h"
 #include "filter/AbiFilter.h"
 #include "filter/Filter.h"
 #include "format/Archive.h"
@@ -43,6 +45,7 @@ using ::aapt::configuration::AndroidSdk;
 using ::aapt::configuration::OutputArtifact;
 using ::aapt::xml::kSchemaAndroid;
 using ::aapt::xml::XmlResource;
+using ::android::ConfigDescription;
 using ::android::StringPiece;
 
 /**
@@ -96,6 +99,10 @@ class ContextWrapper : public IAaptContext {
   void SetSource(const std::string& source) {
     source_diag_ =
         util::make_unique<SourcePathDiagnostics>(Source{source}, context_->GetDiagnostics());
+  }
+
+  const std::set<std::string>& GetSplitNameDependencies() override {
+    return context_->GetSplitNameDependencies();
   }
 
  private:
@@ -265,7 +272,7 @@ bool MultiApkGenerator::UpdateManifest(const OutputArtifact& artifact,
 
   // Make sure the first element is <manifest> with package attribute.
   xml::Element* manifest_el = manifest->root.get();
-  if (manifest_el == nullptr) {
+  if (!manifest_el) {
     return false;
   }
 
@@ -274,21 +281,35 @@ bool MultiApkGenerator::UpdateManifest(const OutputArtifact& artifact,
     return false;
   }
 
-  // Update the versionCode attribute.
-  xml::Attribute* versionCode = manifest_el->FindAttribute(kSchemaAndroid, "versionCode");
-  if (versionCode == nullptr) {
+  // Retrieve the versionCode attribute.
+  auto version_code = manifest_el->FindAttribute(kSchemaAndroid, "versionCode");
+  if (!version_code) {
     diag->Error(DiagMessage(manifest->file.source) << "manifest must have a versionCode attribute");
     return false;
   }
 
-  auto* compiled_version = ValueCast<BinaryPrimitive>(versionCode->compiled_value.get());
-  if (compiled_version == nullptr) {
+  auto version_code_value = ValueCast<BinaryPrimitive>(version_code->compiled_value.get());
+  if (!version_code_value) {
     diag->Error(DiagMessage(manifest->file.source) << "versionCode is invalid");
     return false;
   }
 
-  int new_version = compiled_version->value.data + artifact.version;
-  versionCode->compiled_value = ResourceUtils::TryParseInt(std::to_string(new_version));
+  // Retrieve the versionCodeMajor attribute.
+  auto version_code_major = manifest_el->FindAttribute(kSchemaAndroid, "versionCodeMajor");
+  BinaryPrimitive* version_code_major_value = nullptr;
+  if (version_code_major) {
+    version_code_major_value = ValueCast<BinaryPrimitive>(version_code_major->compiled_value.get());
+    if (!version_code_major_value) {
+      diag->Error(DiagMessage(manifest->file.source) << "versionCodeMajor is invalid");
+      return false;
+    }
+  }
+
+  // Calculate and set the updated version code
+  uint64_t major = (version_code_major_value)
+                  ? ((uint64_t) version_code_major_value->value.data) << 32 : 0;
+  uint64_t new_version = (major | version_code_value->value.data) + artifact.version;
+  SetLongVersionCode(manifest_el, new_version);
 
   // Check to see if the minSdkVersion needs to be updated.
   if (artifact.android_sdk) {
@@ -322,22 +343,56 @@ bool MultiApkGenerator::UpdateManifest(const OutputArtifact& artifact,
       std::unique_ptr<xml::Element> new_screens_el = util::make_unique<xml::Element>();
       new_screens_el->name = "compatible-screens";
       screens_el = new_screens_el.get();
-      manifest_el->InsertChild(0, std::move(new_screens_el));
+      manifest_el->AppendChild(std::move(new_screens_el));
     } else {
       // clear out the old element.
       screens_el->GetChildElements().clear();
     }
 
     for (const auto& density : artifact.screen_densities) {
-      std::unique_ptr<xml::Element> screen_el = util::make_unique<xml::Element>();
-      screen_el->name = "screen";
-      const char* density_str = density.toString().string();
-      screen_el->attributes.push_back(xml::Attribute{kSchemaAndroid, "screenDensity", density_str});
-      screens_el->AppendChild(std::move(screen_el));
+      AddScreens(density, screens_el);
     }
   }
 
   return true;
+}
+
+/**
+ * Adds a screen element with both screenSize and screenDensity set. Since we only know the density
+ * we add it for all screen sizes.
+ *
+ * This requires the resource IDs for the attributes from the framework library. Since these IDs are
+ * a part of the public API (and in public.xml) we hard code the values.
+ *
+ * The excert from the framework is as follows:
+ *    <public type="attr" name="screenSize" id="0x010102ca" />
+ *    <public type="attr" name="screenDensity" id="0x010102cb" />
+ */
+void MultiApkGenerator::AddScreens(const ConfigDescription& config, xml::Element* parent) {
+  // Hard coded integer representation of the supported screen sizes:
+  //  small   = 200
+  //  normal  = 300
+  //  large   = 400
+  //  xlarge  = 500
+  constexpr const uint32_t kScreenSizes[4] = {200, 300, 400, 500,};
+  constexpr const uint32_t kScreenSizeResourceId = 0x010102ca;
+  constexpr const uint32_t kScreenDensityResourceId = 0x010102cb;
+
+  for (uint32_t screen_size : kScreenSizes) {
+    std::unique_ptr<xml::Element> screen = util::make_unique<xml::Element>();
+    screen->name = "screen";
+
+    xml::Attribute* size = screen->FindOrCreateAttribute(kSchemaAndroid, "screenSize");
+    size->compiled_attribute = xml::AaptAttribute(Attribute(), {kScreenSizeResourceId});
+    size->compiled_value = ResourceUtils::MakeInt(screen_size);
+
+    xml::Attribute* density = screen->FindOrCreateAttribute(kSchemaAndroid, "screenDensity");
+    density->compiled_attribute = xml::AaptAttribute(Attribute(), {kScreenDensityResourceId});
+    density->compiled_value = ResourceUtils::MakeInt(config.density);
+
+
+    parent->AppendChild(std::move(screen));
+  }
 }
 
 }  // namespace aapt

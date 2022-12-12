@@ -24,6 +24,7 @@
 #include "compile/Pseudolocalizer.h"
 #include "util/Util.h"
 
+using ::android::ConfigDescription;
 using ::android::StringPiece;
 using ::android::StringPiece16;
 
@@ -32,7 +33,7 @@ namespace aapt {
 // The struct that represents both Span objects and UntranslatableSections.
 struct UnifiedSpan {
   // Only present for Span objects. If not present, this was an UntranslatableSection.
-  Maybe<std::string> tag;
+  std::optional<std::string> tag;
 
   // The UTF-16 index into the string where this span starts.
   uint32_t first_char;
@@ -225,15 +226,16 @@ class Visitor : public ValueVisitor {
       : pool_(pool), method_(method), localizer_(method) {}
 
   void Visit(Plural* plural) override {
+    CloningValueTransformer cloner(pool_);
     std::unique_ptr<Plural> localized = util::make_unique<Plural>();
     for (size_t i = 0; i < plural->values.size(); i++) {
       Visitor sub_visitor(pool_, method_);
       if (plural->values[i]) {
         plural->values[i]->Accept(&sub_visitor);
-        if (sub_visitor.value) {
+        if (sub_visitor.item) {
           localized->values[i] = std::move(sub_visitor.item);
         } else {
-          localized->values[i] = std::unique_ptr<Item>(plural->values[i]->Clone(pool_));
+          localized->values[i] = plural->values[i]->Transform(cloner);
         }
       }
     }

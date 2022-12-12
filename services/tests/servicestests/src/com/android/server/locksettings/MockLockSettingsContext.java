@@ -16,12 +16,20 @@
 
 package com.android.server.locksettings;
 
+import android.app.KeyguardManager;
 import android.app.NotificationManager;
 import android.app.admin.DevicePolicyManager;
 import android.app.trust.TrustManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.hardware.face.FaceManager;
+import android.hardware.fingerprint.FingerprintManager;
+import android.os.Handler;
+import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.storage.StorageManager;
 
@@ -32,16 +40,26 @@ public class MockLockSettingsContext extends ContextWrapper {
     private DevicePolicyManager mDevicePolicyManager;
     private StorageManager mStorageManager;
     private TrustManager mTrustManager;
+    private KeyguardManager mKeyguardManager;
+    private FingerprintManager mFingerprintManager;
+    private FaceManager mFaceManager;
+    private PackageManager mPackageManager;
 
     public MockLockSettingsContext(Context base, UserManager userManager,
             NotificationManager notificationManager, DevicePolicyManager devicePolicyManager,
-            StorageManager storageManager, TrustManager trustManager) {
+            StorageManager storageManager, TrustManager trustManager,
+            KeyguardManager keyguardManager, FingerprintManager fingerprintManager,
+            FaceManager faceManager, PackageManager packageManager) {
         super(base);
         mUserManager = userManager;
         mNotificationManager = notificationManager;
         mDevicePolicyManager = devicePolicyManager;
         mStorageManager = storageManager;
         mTrustManager = trustManager;
+        mKeyguardManager = keyguardManager;
+        mFingerprintManager = fingerprintManager;
+        mFaceManager = faceManager;
+        mPackageManager = packageManager;
     }
 
     @Override
@@ -56,9 +74,20 @@ public class MockLockSettingsContext extends ContextWrapper {
             return mStorageManager;
         } else if (TRUST_SERVICE.equals(name)) {
             return mTrustManager;
+        } else if (KEYGUARD_SERVICE.equals(name)) {
+            return mKeyguardManager;
+        } else if (FINGERPRINT_SERVICE.equals(name)) {
+            return mFingerprintManager;
+        } else if (FACE_SERVICE.equals(name)) {
+            return mFaceManager;
         } else {
             throw new RuntimeException("System service not mocked: " + name);
         }
+    }
+
+    @Override
+    public PackageManager getPackageManager() {
+        return mPackageManager;
     }
 
     @Override
@@ -69,5 +98,12 @@ public class MockLockSettingsContext extends ContextWrapper {
     @Override
     public int checkCallingOrSelfPermission(String permission) {
         return PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    public Intent registerReceiverAsUser(BroadcastReceiver receiver,
+            UserHandle user, IntentFilter filter, String broadcastPermission,
+            Handler scheduler) {
+        return null;
     }
 }

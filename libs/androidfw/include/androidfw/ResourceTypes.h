@@ -20,8 +20,12 @@
 #ifndef _LIBS_UTILS_RESOURCE_TYPES_H
 #define _LIBS_UTILS_RESOURCE_TYPES_H
 
+#include <android-base/expected.h>
+
 #include <androidfw/Asset.h>
+#include <androidfw/Errors.h>
 #include <androidfw/LocaleData.h>
+#include <androidfw/StringPiece.h>
 #include <utils/Errors.h>
 #include <utils/String16.h>
 #include <utils/Vector.h>
@@ -34,12 +38,25 @@
 
 #include <android/configuration.h>
 
+#include <array>
+#include <map>
 #include <memory>
 
 namespace android {
 
-constexpr const static uint32_t kIdmapMagic = 0x504D4449u;
-constexpr const static uint32_t kIdmapCurrentVersion = 0x00000001u;
+constexpr const uint32_t kIdmapMagic = 0x504D4449u;
+constexpr const uint32_t kIdmapCurrentVersion = 0x00000008u;
+
+// This must never change.
+constexpr const uint32_t kFabricatedOverlayMagic = 0x4f525246; // FRRO (big endian)
+
+// The version should only be changed when a backwards-incompatible change must be made to the
+// fabricated overlay file format. Old fabricated overlays must be migrated to the new file format
+// to prevent losing fabricated overlay data.
+constexpr const uint32_t kFabricatedOverlayCurrentVersion = 1;
+
+// Returns whether or not the path represents a fabricated overlay.
+bool IsFabricatedOverlay(const std::string& path);
 
 /**
  * In C++11, char16_t is defined as *at least* 16 bits. We do a lot of
@@ -213,28 +230,31 @@ struct ResChunk_header
 };
 
 enum {
-    RES_NULL_TYPE               = 0x0000,
-    RES_STRING_POOL_TYPE        = 0x0001,
-    RES_TABLE_TYPE              = 0x0002,
-    RES_XML_TYPE                = 0x0003,
+    RES_NULL_TYPE                     = 0x0000,
+    RES_STRING_POOL_TYPE              = 0x0001,
+    RES_TABLE_TYPE                    = 0x0002,
+    RES_XML_TYPE                      = 0x0003,
 
     // Chunk types in RES_XML_TYPE
-    RES_XML_FIRST_CHUNK_TYPE    = 0x0100,
-    RES_XML_START_NAMESPACE_TYPE= 0x0100,
-    RES_XML_END_NAMESPACE_TYPE  = 0x0101,
-    RES_XML_START_ELEMENT_TYPE  = 0x0102,
-    RES_XML_END_ELEMENT_TYPE    = 0x0103,
-    RES_XML_CDATA_TYPE          = 0x0104,
-    RES_XML_LAST_CHUNK_TYPE     = 0x017f,
+    RES_XML_FIRST_CHUNK_TYPE          = 0x0100,
+    RES_XML_START_NAMESPACE_TYPE      = 0x0100,
+    RES_XML_END_NAMESPACE_TYPE        = 0x0101,
+    RES_XML_START_ELEMENT_TYPE        = 0x0102,
+    RES_XML_END_ELEMENT_TYPE          = 0x0103,
+    RES_XML_CDATA_TYPE                = 0x0104,
+    RES_XML_LAST_CHUNK_TYPE           = 0x017f,
     // This contains a uint32_t array mapping strings in the string
     // pool back to resource identifiers.  It is optional.
-    RES_XML_RESOURCE_MAP_TYPE   = 0x0180,
+    RES_XML_RESOURCE_MAP_TYPE         = 0x0180,
 
     // Chunk types in RES_TABLE_TYPE
-    RES_TABLE_PACKAGE_TYPE      = 0x0200,
-    RES_TABLE_TYPE_TYPE         = 0x0201,
-    RES_TABLE_TYPE_SPEC_TYPE    = 0x0202,
-    RES_TABLE_LIBRARY_TYPE      = 0x0203
+    RES_TABLE_PACKAGE_TYPE            = 0x0200,
+    RES_TABLE_TYPE_TYPE               = 0x0201,
+    RES_TABLE_TYPE_SPEC_TYPE          = 0x0202,
+    RES_TABLE_LIBRARY_TYPE            = 0x0203,
+    RES_TABLE_OVERLAYABLE_TYPE        = 0x0204,
+    RES_TABLE_OVERLAYABLE_POLICY_TYPE = 0x0205,
+    RES_TABLE_STAGED_ALIAS_TYPE       = 0x0206,
 };
 
 /**
@@ -490,10 +510,10 @@ class ResStringPool
 public:
     ResStringPool();
     ResStringPool(const void* data, size_t size, bool copyData=false);
-    ~ResStringPool();
+    virtual ~ResStringPool();
 
     void setToEmpty();
-    status_t setTo(const void* data, size_t size, bool copyData=false);
+    status_t setTo(incfs::map_ptr<void> data, size_t size, bool copyData=false);
 
     status_t getError() const;
 
@@ -501,43 +521,49 @@ public:
 
     // Return string entry as UTF16; if the pool is UTF8, the string will
     // be converted before returning.
-    inline const char16_t* stringAt(const ResStringPool_ref& ref, size_t* outLen) const {
-        return stringAt(ref.index, outLen);
+    inline base::expected<StringPiece16, NullOrIOError> stringAt(
+            const ResStringPool_ref& ref) const {
+        return stringAt(ref.index);
     }
-    const char16_t* stringAt(size_t idx, size_t* outLen) const;
+    virtual base::expected<StringPiece16, NullOrIOError> stringAt(size_t idx) const;
 
     // Note: returns null if the string pool is not UTF8.
-    const char* string8At(size_t idx, size_t* outLen) const;
+    virtual base::expected<StringPiece, NullOrIOError> string8At(size_t idx) const;
 
     // Return string whether the pool is UTF8 or UTF16.  Does not allow you
     // to distinguish null.
-    const String8 string8ObjectAt(size_t idx) const;
+    base::expected<String8, IOError> string8ObjectAt(size_t idx) const;
 
-    const ResStringPool_span* styleAt(const ResStringPool_ref& ref) const;
-    const ResStringPool_span* styleAt(size_t idx) const;
+    base::expected<incfs::map_ptr<ResStringPool_span>, NullOrIOError> styleAt(
+        const ResStringPool_ref& ref) const;
+    base::expected<incfs::map_ptr<ResStringPool_span>, NullOrIOError> styleAt(size_t idx) const;
 
-    ssize_t indexOfString(const char16_t* str, size_t strLen) const;
+    base::expected<size_t, NullOrIOError> indexOfString(const char16_t* str, size_t strLen) const;
 
-    size_t size() const;
+    virtual size_t size() const;
     size_t styleCount() const;
     size_t bytes() const;
+    incfs::map_ptr<void> data() const;
 
     bool isSorted() const;
     bool isUTF8() const;
 
 private:
-    status_t                    mError;
-    void*                       mOwnedData;
-    const ResStringPool_header* mHeader;
-    size_t                      mSize;
-    mutable Mutex               mDecodeLock;
-    const uint32_t*             mEntries;
-    const uint32_t*             mEntryStyles;
-    const void*                 mStrings;
-    char16_t mutable**          mCache;
-    uint32_t                    mStringPoolSize;    // number of uint16_t
-    const uint32_t*             mStyles;
-    uint32_t                    mStylePoolSize;    // number of uint32_t
+    status_t                                      mError;
+    void*                                         mOwnedData;
+    incfs::verified_map_ptr<ResStringPool_header> mHeader;
+    size_t                                        mSize;
+    mutable Mutex                                 mDecodeLock;
+    incfs::map_ptr<uint32_t>                      mEntries;
+    incfs::map_ptr<uint32_t>                      mEntryStyles;
+    incfs::map_ptr<void>                          mStrings;
+    char16_t mutable**                            mCache;
+    uint32_t                                      mStringPoolSize;    // number of uint16_t
+    incfs::map_ptr<uint32_t>                      mStyles;
+    uint32_t                                      mStylePoolSize;    // number of uint32_t
+
+    base::expected<StringPiece, NullOrIOError> stringDecodeAt(
+        size_t idx, incfs::map_ptr<uint8_t> str, size_t encLen) const;
 };
 
 /**
@@ -549,8 +575,8 @@ public:
  StringPoolRef() = default;
  StringPoolRef(const ResStringPool* pool, uint32_t index);
 
- const char* string8(size_t* outLen) const;
- const char16_t* string16(size_t* outLen) const;
+ base::expected<StringPiece, NullOrIOError> string8() const;
+ base::expected<StringPiece16, NullOrIOError> string16() const;
 
 private:
  const ResStringPool* mPool = nullptr;
@@ -688,7 +714,7 @@ class ResXMLTree;
 class ResXMLParser
 {
 public:
-    ResXMLParser(const ResXMLTree& tree);
+    explicit ResXMLParser(const ResXMLTree& tree);
 
     enum event_code_t {
         BAD_DOCUMENT = -1,
@@ -777,6 +803,9 @@ public:
     void getPosition(ResXMLPosition* pos) const;
     void setPosition(const ResXMLPosition& pos);
 
+    void setSourceResourceId(const uint32_t resId);
+    uint32_t getSourceResourceId() const;
+
 private:
     friend class ResXMLTree;
     
@@ -786,7 +815,13 @@ private:
     event_code_t                mEventCode;
     const ResXMLTree_node*      mCurNode;
     const void*                 mCurExt;
+    uint32_t                    mSourceResourceId;
 };
+
+static inline bool operator==(const android::ResXMLParser::ResXMLPosition& lhs,
+                              const android::ResXMLParser::ResXMLPosition& rhs) {
+  return lhs.curNode == rhs.curNode;
+}
 
 class DynamicRefTable;
 
@@ -796,7 +831,12 @@ class DynamicRefTable;
 class ResXMLTree : public ResXMLParser
 {
 public:
-    ResXMLTree(const DynamicRefTable* dynamicRefTable);
+    /**
+     * Creates a ResXMLTree with the specified DynamicRefTable for run-time package id translation.
+     * The tree stores a clone of the specified DynamicRefTable, so any changes to the original
+     * DynamicRefTable will not affect this tree after instantiation.
+     **/
+    explicit ResXMLTree(std::shared_ptr<const DynamicRefTable> dynamicRefTable);
     ResXMLTree();
     ~ResXMLTree();
 
@@ -811,7 +851,7 @@ private:
 
     status_t validateNode(const ResXMLTree_node* node) const;
 
-    const DynamicRefTable* const mDynamicRefTable;
+    std::shared_ptr<const DynamicRefTable> mDynamicRefTable;
 
     status_t                    mError;
     void*                       mOwnedData;
@@ -1347,9 +1387,10 @@ struct ResTable_typeSpec
         // Additional flag indicating an entry is public.
         SPEC_PUBLIC = 0x40000000u,
 
-        // Additional flag indicating an entry is overlayable at runtime.
-        // Added in Android-P.
-        SPEC_OVERLAYABLE = 0x80000000u,
+        // Additional flag indicating the resource id for this resource may change in a future
+        // build. If this flag is set, the SPEC_PUBLIC flag is also set since the resource must be
+        // public to be exposed as an API to other applications.
+        SPEC_STAGED_API = 0x20000000u,
     };
 };
 
@@ -1462,7 +1503,7 @@ struct ResTable_entry
         // If set, this is a weak resource and may be overriden by strong
         // resources of the same name/type. This is only useful during
         // linking with other resource tables.
-        FLAG_WEAK = 0x0004
+        FLAG_WEAK = 0x0004,
     };
     uint16_t flags;
     
@@ -1599,29 +1640,111 @@ struct ResTable_lib_entry
     uint16_t packageName[128];
 };
 
-struct alignas(uint32_t) Idmap_header {
-  // Always 0x504D4449 ('IDMP')
-  uint32_t magic;
+/**
+ * A map that allows rewriting staged (non-finalized) resource ids to their finalized counterparts.
+ */
+struct ResTable_staged_alias_header
+{
+    struct ResChunk_header header;
 
-  uint32_t version;
+    // The number of ResTable_staged_alias_entry that follow this header.
+    uint32_t count;
+};
 
-  uint32_t target_crc32;
-  uint32_t overlay_crc32;
+/**
+ * Maps the staged (non-finalized) resource id to its finalized resource id.
+ */
+struct ResTable_staged_alias_entry
+{
+  // The compile-time staged resource id to rewrite.
+  uint32_t stagedResId;
 
-  uint8_t target_path[256];
-  uint8_t overlay_path[256];
+  // The compile-time finalized resource id to which the staged resource id should be rewritten.
+  uint32_t finalizedResId;
+};
 
-  uint16_t target_package_id;
-  uint16_t type_count;
-} __attribute__((packed));
+/**
+ * Specifies the set of resources that are explicitly allowed to be overlaid by RROs.
+ */
+struct ResTable_overlayable_header
+{
+  struct ResChunk_header header;
 
-struct alignas(uint32_t) IdmapEntry_header {
-  uint16_t target_type_id;
-  uint16_t overlay_type_id;
-  uint16_t entry_count;
-  uint16_t entry_id_offset;
-  uint32_t entries[0];
-} __attribute__((packed));
+  // The name of the overlayable set of resources that overlays target.
+  uint16_t name[256];
+
+ // The component responsible for enabling and disabling overlays targeting this chunk.
+  uint16_t actor[256];
+};
+
+/**
+ * Holds a list of resource ids that are protected from being overlaid by a set of policies. If
+ * the overlay fulfils at least one of the policies, then the overlay can overlay the list of
+ * resources.
+ */
+struct ResTable_overlayable_policy_header
+{
+  /**
+   * Flags for a bitmask for all possible overlayable policy options.
+   *
+   * Any changes to this set should also update aidl/android/os/OverlayablePolicy.aidl
+   */
+  enum PolicyFlags : uint32_t {
+    // Base
+    NONE = 0x00000000,
+
+    // Any overlay can overlay these resources.
+    PUBLIC = 0x00000001,
+
+    // The overlay must reside of the system partition or must have existed on the system partition
+    // before an upgrade to overlay these resources.
+    SYSTEM_PARTITION = 0x00000002,
+
+    // The overlay must reside of the vendor partition or must have existed on the vendor partition
+    // before an upgrade to overlay these resources.
+    VENDOR_PARTITION = 0x00000004,
+
+    // The overlay must reside of the product partition or must have existed on the product
+    // partition before an upgrade to overlay these resources.
+    PRODUCT_PARTITION = 0x00000008,
+
+    // The overlay must be signed with the same signature as the package containing the target
+    // resource
+    SIGNATURE = 0x00000010,
+
+    // The overlay must reside of the odm partition or must have existed on the odm
+    // partition before an upgrade to overlay these resources.
+    ODM_PARTITION = 0x00000020,
+
+    // The overlay must reside of the oem partition or must have existed on the oem
+    // partition before an upgrade to overlay these resources.
+    OEM_PARTITION = 0x00000040,
+
+    // The overlay must be signed with the same signature as the actor declared for the target
+    // resource
+    ACTOR_SIGNATURE = 0x00000080,
+
+    // The overlay must be signed with the same signature as the reference package declared
+    // in the SystemConfig
+    CONFIG_SIGNATURE = 0x00000100,
+  };
+
+  using PolicyBitmask = uint32_t;
+
+  struct ResChunk_header header;
+
+  PolicyFlags policy_flags;
+
+  // The number of ResTable_ref that follow this header.
+  uint32_t entry_count;
+};
+
+inline ResTable_overlayable_policy_header::PolicyFlags& operator |=(
+    ResTable_overlayable_policy_header::PolicyFlags& first,
+    ResTable_overlayable_policy_header::PolicyFlags second) {
+  first = static_cast<ResTable_overlayable_policy_header::PolicyFlags>(first | second);
+  return first;
+}
 
 class AssetManager2;
 
@@ -1639,6 +1762,7 @@ class DynamicRefTable
 public:
     DynamicRefTable();
     DynamicRefTable(uint8_t packageId, bool appAsLib);
+    virtual ~DynamicRefTable() = default;
 
     // Loads an unmapped reference table from the package.
     status_t load(const ResTable_lib_header* const header);
@@ -1652,9 +1776,14 @@ public:
 
     void addMapping(uint8_t buildPackageId, uint8_t runtimePackageId);
 
+    void addAlias(uint32_t stagedId, uint32_t finalizedId);
+
+    // Returns whether or not the value must be looked up.
+    bool requiresLookup(const Res_value* value) const;
+
     // Performs the actual conversion of build-time resource ID to run-time
     // resource ID.
-    status_t lookupResourceId(uint32_t* resId) const;
+    virtual status_t lookupResourceId(uint32_t* resId) const;
     status_t lookupResourceValue(Res_value* value) const;
 
     inline const KeyedVector<String16, uint8_t>& entries() const {
@@ -1666,9 +1795,20 @@ private:
     uint8_t                         mLookupTable[256];
     KeyedVector<String16, uint8_t>  mEntries;
     bool                            mAppAsLib;
+    std::map<uint32_t, uint32_t>    mAliasId;
 };
 
 bool U16StringToInt(const char16_t* s, size_t len, Res_value* outValue);
+
+template<typename TChar, typename E>
+static const TChar* UnpackOptionalString(base::expected<BasicStringPiece<TChar>, E>&& result,
+                                         size_t* outLen) {
+  if (result.has_value()) {
+    *outLen = result->size();
+    return result->data();
+  }
+  return NULL;
+}
 
 /**
  * Convenience class for accessing data in a ResTable resource.
@@ -1698,19 +1838,31 @@ public:
 
     struct resource_name
     {
-        const char16_t* package;
+        const char16_t* package = NULL;
         size_t packageLen;
-        const char16_t* type;
-        const char* type8;
+        const char16_t* type = NULL;
+        const char* type8 = NULL;
         size_t typeLen;
-        const char16_t* name;
-        const char* name8;
+        const char16_t* name = NULL;
+        const char* name8 = NULL;
         size_t nameLen;
     };
 
     bool getResourceName(uint32_t resID, bool allowUtf8, resource_name* outName) const;
 
     bool getResourceFlags(uint32_t resID, uint32_t* outFlags) const;
+
+    /**
+     * Returns whether or not the package for the given resource has been dynamically assigned.
+     * If the resource can't be found, returns 'false'.
+     */
+    bool isResourceDynamic(uint32_t resID) const;
+
+    /**
+     * Returns whether or not the given package has been dynamically assigned.
+     * If the package can't be found, returns 'false'.
+     */
+    bool isPackageDynamic(uint8_t packageID) const;
 
     /**
      * Retrieve the value of a resource.  If the resource is found, returns a
@@ -1780,7 +1932,7 @@ public:
 
     class Theme {
     public:
-        Theme(const ResTable& table);
+        explicit Theme(const ResTable& table);
         ~Theme();
 
         inline const ResTable& getResTable() const { return mTable; }
@@ -1967,7 +2119,7 @@ public:
     // Return value: on success: NO_ERROR; caller is responsible for free-ing
     // outData (using free(3)). On failure, any status_t value other than
     // NO_ERROR; the caller should not free outData.
-    status_t createIdmap(const ResTable& overlay,
+    status_t createIdmap(const ResTable& targetResTable,
             uint32_t targetCrc, uint32_t overlayCrc,
             const char* targetPath, const char* overlayPath,
             void** outData, size_t* outSize) const;
@@ -2021,6 +2173,7 @@ private:
             bool appAsLib, const int32_t cookie, bool copyData, bool isSystemAsset=false);
 
     ssize_t getResourcePackageIndex(uint32_t resID) const;
+    ssize_t getResourcePackageIndexFromPackage(uint8_t packageID) const;
 
     status_t getEntry(
         const PackageGroup* packageGroup, int typeIndex, int entryIndex,

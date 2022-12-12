@@ -21,36 +21,60 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.OnSharedPreferenceChangeListener;
 
+import com.android.systemui.settings.UserContextProvider;
+
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Map;
+import java.util.Set;
 
+/**
+ * A helper class to store simple preferences for SystemUI. Its main use case is things such as
+ * feature education, e.g. "has the user seen this tooltip".
+ *
+ * As of this writing, feature education settings are *intentionally exempted* from backup and
+ * restore because there is not a great way to know which subset of features the user _should_ see
+ * again if, for instance, they are coming from multiple OSes back or switching OEMs.
+ *
+ * NOTE: Clients of this class should take care to pass in the correct user context when querying
+ * settings, otherwise you will always read/write for user 0 which is almost never what you want.
+ * See {@link UserContextProvider} for a simple way to get the current context
+ */
 public final class Prefs {
     private Prefs() {} // no instantation
 
     @Retention(RetentionPolicy.SOURCE)
     @StringDef({
-        Key.OVERVIEW_LAST_STACK_TASK_ACTIVE_TIME,
-        Key.DEBUG_MODE_ENABLED,
-        Key.HOTSPOT_TILE_LAST_USED,
-        Key.COLOR_INVERSION_TILE_LAST_USED,
-        Key.DND_TILE_VISIBLE,
-        Key.DND_TILE_COMBINED_ICON,
-        Key.DND_CONFIRMED_PRIORITY_INTRODUCTION,
-        Key.DND_CONFIRMED_SILENCE_INTRODUCTION,
-        Key.DND_FAVORITE_BUCKET_INDEX,
-        Key.DND_NONE_SELECTED,
-        Key.DND_FAVORITE_ZEN,
-        Key.QS_HOTSPOT_ADDED,
-        Key.QS_DATA_SAVER_ADDED,
-        Key.QS_DATA_SAVER_DIALOG_SHOWN,
-        Key.QS_INVERT_COLORS_ADDED,
-        Key.QS_WORK_ADDED,
-        Key.QS_NIGHTDISPLAY_ADDED,
-        Key.SEEN_MULTI_USER,
-        Key.NUM_APPS_LAUNCHED,
-        Key.HAS_SEEN_RECENTS_ONBOARDING,
+            Key.OVERVIEW_LAST_STACK_TASK_ACTIVE_TIME,
+            Key.DEBUG_MODE_ENABLED,
+            Key.HOTSPOT_TILE_LAST_USED,
+            Key.COLOR_INVERSION_TILE_LAST_USED,
+            Key.DND_TILE_VISIBLE,
+            Key.DND_TILE_COMBINED_ICON,
+            Key.DND_CONFIRMED_PRIORITY_INTRODUCTION,
+            Key.DND_CONFIRMED_SILENCE_INTRODUCTION,
+            Key.DND_FAVORITE_BUCKET_INDEX,
+            Key.DND_NONE_SELECTED,
+            Key.DND_FAVORITE_ZEN,
+            Key.QS_HOTSPOT_ADDED,
+            Key.QS_DATA_SAVER_ADDED,
+            Key.QS_DATA_SAVER_DIALOG_SHOWN,
+            Key.QS_INVERT_COLORS_ADDED,
+            Key.QS_WORK_ADDED,
+            Key.QS_NIGHTDISPLAY_ADDED,
+            Key.QS_LONG_PRESS_TOOLTIP_SHOWN_COUNT,
+            Key.SEEN_RINGER_GUIDANCE_COUNT,
+            Key.QS_HAS_TURNED_OFF_MOBILE_DATA,
+            Key.TOUCHED_RINGER_TOGGLE,
+            Key.HAS_SEEN_ODI_CAPTIONS_TOOLTIP,
+            Key.HAS_SEEN_REVERSE_BOTTOM_SHEET,
+            Key.CONTROLS_STRUCTURE_SWIPE_TOOLTIP_COUNT,
+            Key.HAS_SEEN_ACCESSIBILITY_FLOATING_MENU_DOCK_TOOLTIP,
+            Key.ACCESSIBILITY_FLOATING_MENU_POSITION,
+            Key.HAS_CLICKED_NUDGE_TO_SETUP_DREAM,
+            Key.HAS_DISMISSED_NUDGE_TO_SETUP_DREAM
     })
+    // TODO: annotate these with their types so {@link PrefsCommandLine} can know how to set them
     public @interface Key {
         @Deprecated
         String OVERVIEW_LAST_STACK_TASK_ACTIVE_TIME = "OverviewLastStackTaskActiveTime";
@@ -76,9 +100,23 @@ public final class Prefs {
         String QS_WORK_ADDED = "QsWorkAdded";
         @Deprecated
         String QS_NIGHTDISPLAY_ADDED = "QsNightDisplayAdded";
-        String SEEN_MULTI_USER = "HasSeenMultiUser";
-        String NUM_APPS_LAUNCHED = "NumAppsLaunched";
-        String HAS_SEEN_RECENTS_ONBOARDING = "HasSeenRecentsOnboarding";
+        /**
+         * Used for tracking how many times the user has seen the long press tooltip in the Quick
+         * Settings panel.
+         */
+        String QS_LONG_PRESS_TOOLTIP_SHOWN_COUNT = "QsLongPressTooltipShownCount";
+        String SEEN_RINGER_GUIDANCE_COUNT = "RingerGuidanceCount";
+        String QS_TILE_SPECS_REVEALED = "QsTileSpecsRevealed";
+        String QS_HAS_TURNED_OFF_MOBILE_DATA = "QsHasTurnedOffMobileData";
+        String TOUCHED_RINGER_TOGGLE = "TouchedRingerToggle";
+        String HAS_SEEN_ODI_CAPTIONS_TOOLTIP = "HasSeenODICaptionsTooltip";
+        String HAS_SEEN_REVERSE_BOTTOM_SHEET = "HasSeenReverseBottomSheet";
+        String CONTROLS_STRUCTURE_SWIPE_TOOLTIP_COUNT = "ControlsStructureSwipeTooltipCount";
+        String HAS_SEEN_ACCESSIBILITY_FLOATING_MENU_DOCK_TOOLTIP =
+                "HasSeenAccessibilityFloatingMenuDockTooltip";
+        String ACCESSIBILITY_FLOATING_MENU_POSITION = "AccessibilityFloatingMenuPosition";
+        String HAS_CLICKED_NUDGE_TO_SETUP_DREAM = "HasClickedNudgeToSetupDream";
+        String HAS_DISMISSED_NUDGE_TO_SETUP_DREAM = "HasDismissedNudgeToSetupDream";
     }
 
     public static boolean getBoolean(Context context, @Key String key, boolean defaultValue) {
@@ -113,6 +151,15 @@ public final class Prefs {
         get(context).edit().putString(key, value).apply();
     }
 
+    public static void putStringSet(Context context, @Key String key, Set<String> value) {
+        get(context).edit().putStringSet(key, value).apply();
+    }
+
+    public static Set<String> getStringSet(
+            Context context, @Key String key, Set<String> defaultValue) {
+        return get(context).getStringSet(key, defaultValue);
+    }
+
     public static Map<String, ?> getAll(Context context) {
         return get(context).getAll();
     }
@@ -131,7 +178,7 @@ public final class Prefs {
         get(context).unregisterOnSharedPreferenceChangeListener(listener);
     }
 
-    private static SharedPreferences get(Context context) {
+    public static SharedPreferences get(Context context) {
         return context.getSharedPreferences(context.getPackageName(), Context.MODE_PRIVATE);
     }
 }

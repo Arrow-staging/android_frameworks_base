@@ -17,23 +17,21 @@ package com.android.systemui.tuner;
 import android.app.AlertDialog.Builder;
 import android.app.Dialog;
 import android.app.DialogFragment;
-import android.app.Fragment;
 import android.content.Context;
 import android.content.DialogInterface.OnClickListener;
 import android.os.Bundle;
-import android.support.v14.preference.PreferenceFragment;
-import android.support.v7.preference.Preference;
-import android.support.v7.preference.PreferenceScreen;
 import android.util.AttributeSet;
-import android.util.Log;
 import android.view.View;
 import android.widget.Toolbar;
 
-import com.android.settingslib.Utils;
-import com.android.systemui.fragments.FragmentHostManager;
-import com.android.systemui.R;
+import androidx.preference.Preference;
+import androidx.preference.PreferenceScreen;
 
-import libcore.util.Objects;
+import com.android.settingslib.Utils;
+import com.android.systemui.R;
+import com.android.systemui.fragments.FragmentHostManager;
+
+import java.util.Objects;
 
 public class RadioListPreference extends CustomListPreference {
 
@@ -124,7 +122,7 @@ public class RadioListPreference extends CustomListPreference {
                 SelectablePreference pref = new SelectablePreference(context);
                 getPreferenceScreen().addPreference(pref);
                 pref.setTitle(entry);
-                pref.setChecked(Objects.equal(current, values[i]));
+                pref.setChecked(Objects.equals(current, values[i]));
                 pref.setKey(String.valueOf(i));
             }
         }

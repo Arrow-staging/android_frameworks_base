@@ -34,9 +34,8 @@ AssertionResult ReadFileFromZipToString(const std::string& zip_path, const std::
                               << "': " << ::ErrorCodeString(result);
   }
 
-  ::ZipString name(file.c_str());
   ::ZipEntry entry;
-  result = ::FindEntry(handle, name, &entry);
+  result = ::FindEntry(handle, file.c_str(), &entry);
   if (result != 0) {
     ::CloseArchive(handle);
     return AssertionFailure() << "Could not find file '" << file << "' in zip '" << zip_path
@@ -74,11 +73,15 @@ AssertionResult IsStringEqual(const ResTable& table, uint32_t resource_id,
     return AssertionFailure() << "table has no string pool for block " << block;
   }
 
-  const String8 actual_str = pool->string8ObjectAt(val.data);
-  if (String8(expected_str) != actual_str) {
-    return AssertionFailure() << actual_str.string();
+  auto actual_str = pool->string8ObjectAt(val.data);
+  if (!actual_str.has_value()) {
+    return AssertionFailure() << "could not find string entry";
   }
-  return AssertionSuccess() << actual_str.string();
+
+  if (String8(expected_str) != *actual_str) {
+    return AssertionFailure() << actual_str->string();
+  }
+  return AssertionSuccess() << actual_str->string();
 }
 
 }  // namespace android

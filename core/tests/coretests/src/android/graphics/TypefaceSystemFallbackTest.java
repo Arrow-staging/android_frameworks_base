@@ -21,26 +21,37 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.Context;
 import android.content.res.AssetManager;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.graphics.fonts.FontCustomizationParser;
+import android.graphics.fonts.FontFamily;
+import android.graphics.fonts.SystemFonts;
+import android.text.FontConfig;
 import android.util.ArrayMap;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.xmlpull.v1.XmlPullParserException;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 
 @SmallTest
 @RunWith(AndroidJUnit4.class)
@@ -57,6 +68,9 @@ public class TypefaceSystemFallbackTest {
     };
     private static final String TEST_FONTS_XML;
     private static final String TEST_FONT_DIR;
+    private static final String TEST_OEM_XML;
+    private static final String TEST_OEM_DIR;
+    private static final String TEST_UPDATABLE_FONT_DIR;
 
     private static final float GLYPH_1EM_WIDTH;
     private static final float GLYPH_2EM_WIDTH;
@@ -68,8 +82,15 @@ public class TypefaceSystemFallbackTest {
         if (!cacheDir.isDirectory()) {
             cacheDir.mkdirs();
         }
-        TEST_FONT_DIR = cacheDir.getAbsolutePath() + "/";
+        TEST_FONT_DIR = cacheDir.getAbsolutePath() + "/fonts/";
         TEST_FONTS_XML = new File(cacheDir, "fonts.xml").getAbsolutePath();
+        TEST_OEM_DIR = cacheDir.getAbsolutePath() + "/oem_fonts/";
+        TEST_OEM_XML = new File(cacheDir, "fonts_customization.xml").getAbsolutePath();
+        TEST_UPDATABLE_FONT_DIR = cacheDir.getAbsolutePath() + "/updatable_fonts/";
+
+        new File(TEST_FONT_DIR).mkdirs();
+        new File(TEST_OEM_DIR).mkdirs();
+        new File(TEST_UPDATABLE_FONT_DIR).mkdirs();
 
         final AssetManager am =
                 InstrumentationRegistry.getInstrumentation().getContext().getAssets();
@@ -88,12 +109,11 @@ public class TypefaceSystemFallbackTest {
                 InstrumentationRegistry.getInstrumentation().getContext().getAssets();
         for (final String fontFile : TEST_FONT_FILES) {
             final String sourceInAsset = "fonts/" + fontFile;
-            final File outInCache = new File(TEST_FONT_DIR, fontFile);
-            try (InputStream is = am.open(sourceInAsset)) {
-                Files.copy(is, outInCache.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+            copyAssetToFile(sourceInAsset, new File(TEST_FONT_DIR, fontFile));
+            copyAssetToFile(sourceInAsset, new File(TEST_OEM_DIR, fontFile));
+        }
+        for (final File fontFile : new File(TEST_UPDATABLE_FONT_DIR).listFiles()) {
+            fontFile.delete();
         }
     }
 
@@ -102,28 +122,97 @@ public class TypefaceSystemFallbackTest {
         for (final String fontFile : TEST_FONT_FILES) {
             final File outInCache = new File(TEST_FONT_DIR, fontFile);
             outInCache.delete();
+            final File outOemInCache = new File(TEST_OEM_DIR, fontFile);
+            outOemInCache.delete();
+        }
+        for (final File fontFile : new File(TEST_UPDATABLE_FONT_DIR).listFiles()) {
+            fontFile.delete();
         }
     }
 
-    private static void buildSystemFallback(String xml,
-            ArrayMap<String, Typeface> fontMap, ArrayMap<String, FontFamily[]> fallbackMap) {
-        try (FileOutputStream fos = new FileOutputStream(TEST_FONTS_XML)) {
-            fos.write(xml.getBytes(Charset.forName("UTF-8")));
+    private static void copyAssetToFile(String sourceInAsset, File out) {
+        final AssetManager am =
+                InstrumentationRegistry.getInstrumentation().getContext().getAssets();
+        try (InputStream is = am.open(sourceInAsset)) {
+            Files.copy(is, out.toPath(), StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        Typeface.buildSystemFallback(TEST_FONTS_XML, TEST_FONT_DIR, fontMap, fallbackMap);
+    }
+
+    private static void buildSystemFallback(
+            @NonNull String xml,
+            @Nullable String oemXml,
+            @NonNull ArrayMap<String, Typeface> outFontMap,
+            @NonNull ArrayMap<String, FontFamily[]> outFallbackMap) {
+        try (FileOutputStream fos = new FileOutputStream(TEST_FONTS_XML)) {
+            fos.write(xml.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        String oemXmlPath;
+        if (oemXml != null) {
+            try (FileOutputStream fos = new FileOutputStream(TEST_OEM_XML)) {
+                fos.write(oemXml.getBytes(StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            oemXmlPath = TEST_OEM_XML;
+        } else {
+            oemXmlPath = null;
+        }
+
+        Map<String, File> updatableFontMap = new HashMap<>();
+        for (File file : new File(TEST_UPDATABLE_FONT_DIR).listFiles()) {
+            updatableFontMap.put(file.getName(), file);
+        }
+
+        FontConfig fontConfig;
+        try {
+            fontConfig = FontListParser.parse(
+                    TEST_FONTS_XML, TEST_FONT_DIR, oemXmlPath, TEST_OEM_DIR, updatableFontMap, 0,
+                    0);
+        } catch (IOException | XmlPullParserException e) {
+            throw new RuntimeException(e);
+        }
+
+        Map<String, FontFamily[]> fallbackMap = SystemFonts.buildSystemFallback(fontConfig);
+        Map<String, Typeface> typefaceMap = SystemFonts.buildSystemTypefaces(
+                fontConfig, fallbackMap);
+
+        outFontMap.clear();
+        outFontMap.putAll(typefaceMap);
+        outFallbackMap.clear();
+        outFallbackMap.putAll(fallbackMap);
+    }
+
+    private static FontCustomizationParser.Result readFontCustomization(String oemXml) {
+        try (InputStream is = new ByteArrayInputStream(oemXml.getBytes(StandardCharsets.UTF_8))) {
+            return FontCustomizationParser.parse(is, TEST_OEM_DIR, null);
+        } catch (IOException | XmlPullParserException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
     public void testBuildSystemFallback() {
-        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
-        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+        FontConfig fontConfig;
+        try {
+            fontConfig = FontListParser.parse(
+                    SYSTEM_FONTS_XML, SYSTEM_FONT_DIR, null, TEST_OEM_DIR, null, 0, 0);
+        } catch (IOException | XmlPullParserException e) {
+            throw new RuntimeException(e);
+        }
+        assertFalse(fontConfig.getAliases().isEmpty());
+        assertFalse(fontConfig.getFontFamilies().isEmpty());
 
-        Typeface.buildSystemFallback(SYSTEM_FONTS_XML, SYSTEM_FONT_DIR, fontMap, fallbackMap);
-
-        assertFalse(fontMap.isEmpty());
+        Map<String, FontFamily[]> fallbackMap = SystemFonts.buildSystemFallback(fontConfig);
         assertFalse(fallbackMap.isEmpty());
+
+        Map<String, Typeface> typefaceMap = SystemFonts.buildSystemTypefaces(
+                fontConfig, fallbackMap);
+        assertFalse(typefaceMap.isEmpty());
     }
 
     @Test
@@ -144,7 +233,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         assertEquals(1, fontMap.size());
         assertTrue(fontMap.containsKey("sans-serif"));
@@ -172,7 +261,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -218,7 +307,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -263,7 +352,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -313,7 +402,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -359,7 +448,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -398,7 +487,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -437,7 +526,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -478,14 +567,14 @@ public class TypefaceSystemFallbackTest {
                 + "  <family lang='de'>"
                 + "    <font weight='400' style='normal'>a3em.ttf</font>"
                 + "  </family>"
-                + "  <family lang='it fr'>"
+                + "  <family lang='it,fr'>"
                 + "    <font weight='400' style='normal'>b3em.ttf</font>"
                 + "  </family>"
                 + "</familyset>";
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
         paint.setTypeface(fontMap.get("sans-serif"));
@@ -527,7 +616,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -566,7 +655,7 @@ public class TypefaceSystemFallbackTest {
         final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
         final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
 
-        buildSystemFallback(xml, fontMap, fallbackMap);
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
 
         final Paint paint = new Paint();
 
@@ -585,4 +674,209 @@ public class TypefaceSystemFallbackTest {
         assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
     }
 
+    @Test
+    public void testBuildSystemFallback__Customization_new_named_family() {
+        final String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<familyset>"
+                + "  <family name='sans-serif'>"
+                + "    <font weight='400' style='normal'>a3em.ttf</font>"
+                + "  </family>"
+                + "</familyset>";
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family' name='google-sans'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "</fonts-modification>";
+        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
+        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+
+        buildSystemFallback(xml, oemXml, fontMap, fallbackMap);
+
+        final Paint paint = new Paint();
+
+        Typeface testTypeface = fontMap.get("sans-serif");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+
+        testTypeface = fontMap.get("google-sans");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+    }
+
+    @Test
+    public void testBuildSystemFallback__Customization_new_named_family_override() {
+        final String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<familyset>"
+                + "  <family name='sans-serif'>"
+                + "    <font weight='400' style='normal'>a3em.ttf</font>"
+                + "  </family>"
+                + "</familyset>";
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family' name='sans-serif'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "</fonts-modification>";
+        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
+        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+
+        buildSystemFallback(xml, oemXml, fontMap, fallbackMap);
+
+        final Paint paint = new Paint();
+
+        Typeface testTypeface = fontMap.get("sans-serif");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+    }
+
+    @Test
+    public void testBuildSystemFallback__Customization_additional_alias() {
+        final String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<familyset>"
+                + "  <family name='sans-serif'>"
+                + "    <font weight='400' style='normal'>a3em.ttf</font>"
+                + "  </family>"
+                + "</familyset>";
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family' name='google-sans'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "    <font weight='700' style='normal'>c3em.ttf</font>"
+                + "  </family>"
+                + "  <alias name='another-google-sans' to='google-sans' />"
+                + "  <alias name='google-sans-bold' to='google-sans' weight='700' />"
+                + "</fonts-modification>";
+        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
+        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+
+        buildSystemFallback(xml, oemXml, fontMap, fallbackMap);
+
+        final Paint paint = new Paint();
+
+        Typeface testTypeface = fontMap.get("sans-serif");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+
+        testTypeface = fontMap.get("google-sans");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+
+        testTypeface = fontMap.get("another-google-sans");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+
+        testTypeface = fontMap.get("google-sans-bold");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("c"), 0.0f);
+    }
+
+    @Test
+    public void testBuildSystemFallback__Customization_additional_alias_conflict_with_new_name() {
+        final String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<familyset>"
+                + "  <family name='named-family'>"
+                + "    <font weight='400' style='normal'>a3em.ttf</font>"
+                + "  </family>"
+                + "  <alias name='named-alias' to='named-family' />"
+                + "</familyset>";
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family' name='named-alias'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "</fonts-modification>";
+        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
+        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+
+        buildSystemFallback(xml, oemXml, fontMap, fallbackMap);
+
+        final Paint paint = new Paint();
+
+        Typeface testTypeface = fontMap.get("named-family");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+
+        testTypeface = fontMap.get("named-alias");
+        assertNotNull(testTypeface);
+        paint.setTypeface(testTypeface);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_3EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_1EM_WIDTH, paint.measureText("c"), 0.0f);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testBuildSystemFallback__Customization_new_named_family_no_name_exception() {
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "</fonts-modification>";
+        readFontCustomization(oemXml);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testBuildSystemFallback__Customization_new_named_family_dup_name_exception() {
+        final String oemXml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<fonts-modification version='1'>"
+                + "  <family customizationType='new-named-family' name='google-sans'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "  <family customizationType='new-named-family' name='google-sans'>"
+                + "    <font weight='400' style='normal'>b3em.ttf</font>"
+                + "  </family>"
+                + "</fonts-modification>";
+        readFontCustomization(oemXml);
+    }
+
+
+    @Test
+    public void testBuildSystemFallback_UpdatableFont() {
+        final String xml = "<?xml version='1.0' encoding='UTF-8'?>"
+                + "<familyset>"
+                + "  <family name='test'>"
+                + "    <font weight='400' style='normal'>a3em.ttf</font>"
+                + "  </family>"
+                + "</familyset>";
+        final ArrayMap<String, Typeface> fontMap = new ArrayMap<>();
+        final ArrayMap<String, FontFamily[]> fallbackMap = new ArrayMap<>();
+
+        // Install all2em.ttf as a3em.ttf
+        copyAssetToFile("fonts/all2em.ttf", new File(TEST_UPDATABLE_FONT_DIR, "a3em.ttf"));
+        buildSystemFallback(xml, null, fontMap, fallbackMap);
+
+        final Paint paint = new Paint();
+
+        final Typeface sansSerifTypeface = fontMap.get("test");
+        assertNotNull(sansSerifTypeface);
+        paint.setTypeface(sansSerifTypeface);
+        assertEquals(GLYPH_2EM_WIDTH, paint.measureText("a"), 0.0f);
+        assertEquals(GLYPH_2EM_WIDTH, paint.measureText("b"), 0.0f);
+        assertEquals(GLYPH_2EM_WIDTH, paint.measureText("c"), 0.0f);
+    }
 }

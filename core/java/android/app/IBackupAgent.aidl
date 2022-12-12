@@ -16,6 +16,7 @@
 
 package android.app;
 
+import android.app.backup.IBackupCallback;
 import android.app.backup.IBackupManager;
 import android.os.ParcelFileDescriptor;
  
@@ -41,21 +42,16 @@ oneway interface IBackupAgent {
      * @param newState Read-write file, empty when onBackup() is called,
      *        where the new state blob is to be recorded.
      *
-     * @param quota Quota reported by the transport for this backup operation (in bytes).
+     * @param quotaBytes Quota reported by the transport for this backup operation (in bytes).
      *
-     * @param token Opaque token identifying this transaction.  This must
-     *        be echoed back to the backup service binder once the new
-     *        data has been written to the data and newState files.
-     *
-     * @param callbackBinder Binder on which to indicate operation completion,
-     *        passed here as a convenience to the agent.
+     * @param callbackBinder Binder on which to indicate operation completion.
      *
      * @param transportFlags Flags with additional information about the transport.
      */
     void doBackup(in ParcelFileDescriptor oldState,
             in ParcelFileDescriptor data,
             in ParcelFileDescriptor newState,
-            long quotaBytes, int token, IBackupManager callbackBinder, int transportFlags);
+            long quotaBytes, IBackupCallback callbackBinder, int transportFlags);
 
     /**
      * Restore an entire data snapshot to the application.
@@ -84,6 +80,19 @@ oneway interface IBackupAgent {
             long appVersionCode, in ParcelFileDescriptor newState,
             int token, IBackupManager callbackBinder);
 
+     /**
+     * Restore an entire data snapshot to the application and pass the list of excluded keys to the
+     * backup agent.
+     *
+     * @param excludedKeys List of keys to be excluded from the restore. It will be passed to the
+     *        backup agent to make it aware of what data has been removed (in case it has any
+     *        application-level implications) as well as the data that should be removed by the
+     *        agent itself.
+     */
+    void doRestoreWithExcludedKeys(in ParcelFileDescriptor data,
+            long appVersionCode, in ParcelFileDescriptor newState,
+            int token, IBackupManager callbackBinder, in List<String> excludedKeys);
+
     /**
      * Perform a "full" backup to the given file descriptor.  The output file is presumed
      * to be a socket or other non-seekable, write-only data sink.  When this method is
@@ -93,7 +102,7 @@ oneway interface IBackupAgent {
      *        The data must be formatted correctly for the resulting archive to be
      *        legitimate, so that will be tightly controlled by the available API.
      *
-     * @param quota Quota reported by the transport for this backup operation (in bytes).
+     * @param quotaBytes Quota reported by the transport for this backup operation (in bytes).
      *
      * @param token Opaque token identifying this transaction.  This must
      *        be echoed back to the backup service binder once the agent is
@@ -132,8 +141,9 @@ oneway interface IBackupAgent {
      *                        Could be less than total backup size if backup process was interrupted
      *                        before finish of processing all backup data.
      * @param quotaBytes Current amount of backup data that is allowed for the app.
+     * @param callbackBinder Binder on which to indicate operation completion.
      */
-    void doQuotaExceeded(long backupDataBytes, long quotaBytes);
+    void doQuotaExceeded(long backupDataBytes, long quotaBytes, IBackupCallback callbackBinder);
 
     /**
      * Restore a single "file" to the application.  The file was typically obtained from

@@ -21,14 +21,17 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
+import android.view.View;
 import android.widget.ImageView;
 
-import com.android.systemui.Interpolators;
-import com.android.systemui.statusbar.phone.NotificationPanelView;
+import com.android.systemui.R;
+import com.android.systemui.animation.Interpolators;
+import com.android.systemui.statusbar.notification.stack.StackStateAnimator;
 
 import java.util.function.Consumer;
 
 public class NotificationDozeHelper {
+    private static final int DOZE_ANIMATOR_TAG = R.id.doze_intensity_tag;
     private final ColorMatrix mGrayscaleColorMatrix = new ColorMatrix();
 
     public void fadeGrayscale(final ImageView target, final boolean dark, long delay) {
@@ -60,13 +63,14 @@ public class NotificationDozeHelper {
         }
     }
 
+    // TODO: this should be using StatusBarStateController#getDozeAmount
     public void startIntensityAnimation(ValueAnimator.AnimatorUpdateListener updateListener,
             boolean dark, long delay, Animator.AnimatorListener listener) {
         float startIntensity = dark ? 0f : 1f;
         float endIntensity = dark ? 1f : 0f;
         ValueAnimator animator = ValueAnimator.ofFloat(startIntensity, endIntensity);
         animator.addUpdateListener(updateListener);
-        animator.setDuration(NotificationPanelView.DOZE_ANIMATION_DURATION);
+        animator.setDuration(StackStateAnimator.ANIMATION_DURATION_WAKEUP);
         animator.setInterpolator(Interpolators.LINEAR_OUT_SLOW_IN);
         animator.setStartDelay(delay);
         if (listener != null) {
@@ -75,13 +79,29 @@ public class NotificationDozeHelper {
         animator.start();
     }
 
-    public void setIntensityDark(Consumer<Float> listener, boolean dark,
-            boolean animate, long delay) {
+    public void setDozing(Consumer<Float> listener, boolean dozing,
+            boolean animate, long delay, View view) {
         if (animate) {
-            startIntensityAnimation(a -> listener.accept((Float) a.getAnimatedValue()), dark, delay,
-                    null /* listener */);
+            startIntensityAnimation(a -> listener.accept((Float) a.getAnimatedValue()), dozing,
+                    delay,
+                    new AnimatorListenerAdapter() {
+
+                        @Override
+                        public void onAnimationEnd(Animator animation) {
+                            view.setTag(DOZE_ANIMATOR_TAG, null);
+                        }
+
+                        @Override
+                        public void onAnimationStart(Animator animation) {
+                            view.setTag(DOZE_ANIMATOR_TAG, animation);
+                        }
+                    } /* listener */);
         } else {
-            listener.accept(dark ? 1f : 0f);
+            Animator animator = (Animator) view.getTag(DOZE_ANIMATOR_TAG);
+            if (animator != null) {
+                animator.cancel();
+            }
+            listener.accept(dozing ? 1f : 0f);
         }
     }
 

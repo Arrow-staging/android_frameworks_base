@@ -19,23 +19,26 @@
 #include <algorithm>
 
 #include "Source.h"
-#include "java/AnnotationProcessor.h"
 #include "java/ClassDefinition.h"
+#include "java/JavaClassGenerator.h"
 #include "text/Unicode.h"
-#include "util/Maybe.h"
 #include "xml/XmlDom.h"
 
-using ::android::StringPiece;
 using ::aapt::text::IsJavaIdentifier;
 
 namespace aapt {
 
-static Maybe<StringPiece> ExtractJavaIdentifier(IDiagnostics* diag, const Source& source,
-                                                const std::string& value) {
-  StringPiece result = value;
+static std::optional<std::string> ExtractJavaIdentifier(IDiagnostics* diag, const Source& source,
+                                                        const std::string& value) {
+  std::string result = value;
   size_t pos = value.rfind('.');
   if (pos != std::string::npos) {
     result = result.substr(pos + 1);
+  }
+
+  // Normalize only the java identifier, leave the original value unchanged.
+  if (result.find('-') != std::string::npos) {
+    result = JavaClassGenerator::TransformToFieldName(result);
   }
 
   if (result.empty()) {
@@ -58,7 +61,7 @@ static bool WriteSymbol(const Source& source, IDiagnostics* diag, xml::Element* 
     return false;
   }
 
-  Maybe<StringPiece> result =
+  std::optional<std::string> result =
       ExtractJavaIdentifier(diag, source.WithLine(el->line_number), attr->value);
   if (!result) {
     return false;

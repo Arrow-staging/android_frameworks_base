@@ -22,7 +22,8 @@
     <application>
         <uses-library android:name="android.test.runner" />
         <activity android:label="LowpanTestDummyLabel"
-                  android:name="LowpanTestDummyName">
+                  android:name="LowpanTestDummyName"
+                  android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -30,7 +31,7 @@
         </activity>
     </application>
 
-    <instrumentation android:name="android.support.test.runner.AndroidJUnitRunner"
+    <instrumentation android:name="androidx.test.runner.AndroidJUnitRunner"
         android:targetPackage="android.net.lowpan.test"
         android:label="Frameworks LoWPAN API Tests">
     </instrumentation>

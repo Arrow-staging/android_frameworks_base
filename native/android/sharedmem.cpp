@@ -16,6 +16,9 @@
 
 #include <jni.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <android/sharedmem.h>
 #include <android/sharedmem_jni.h>
 #include <cutils/ashmem.h>
@@ -23,7 +26,6 @@
 #include <utils/Errors.h>
 
 #include <mutex>
-#include <unistd.h>
 
 static struct {
     jclass clazz;
@@ -71,7 +73,7 @@ int ASharedMemory_dupFromJava(JNIEnv* env, jobject javaSharedMemory) {
     }
     int fd = env->CallIntMethod(javaSharedMemory, sSharedMemory.getFd);
     if (fd != -1) {
-        fd = dup(fd);
+        fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
     }
     return fd;
 }

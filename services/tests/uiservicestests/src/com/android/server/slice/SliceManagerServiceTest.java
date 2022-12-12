@@ -15,9 +15,13 @@
 package com.android.server.slice;
 
 import static android.content.ContentProvider.maybeAddUserId;
+import static android.content.pm.PackageManager.PERMISSION_DENIED;
 import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 
+import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -28,15 +32,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.app.AppOpsManager;
-import android.app.slice.ISliceListener;
 import android.app.slice.SliceSpec;
-import android.content.pm.PackageManagerInternal;
+import android.app.usage.UsageStatsManagerInternal;
 import android.net.Uri;
+import android.os.Binder;
+import android.os.IBinder;
+import android.os.Process;
 import android.os.RemoteException;
-import android.support.test.filters.SmallTest;
 import android.testing.AndroidTestingRunner;
+import android.testing.TestableContext;
 import android.testing.TestableLooper;
 import android.testing.TestableLooper.RunWithLooper;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.server.LocalServices;
 import com.android.server.UiServiceTestCase;
@@ -52,84 +60,96 @@ import org.junit.runner.RunWith;
 public class SliceManagerServiceTest extends UiServiceTestCase {
 
     private static final String AUTH = "com.android.services.uitests";
-    private static final Uri TEST_URI = maybeAddUserId(Uri.parse("content://" + AUTH + "/path"), 0);
+    private static final Uri TEST_URI = Uri.parse("content://" + AUTH + "/path");
 
     private static final SliceSpec[] EMPTY_SPECS = new SliceSpec[]{
     };
 
     private SliceManagerService mService;
     private PinnedSliceState mCreatedSliceState;
+    private IBinder mToken = new Binder();
+    private TestableContext mContextSpy;
 
     @Before
-    public void setup() {
-        LocalServices.addService(PackageManagerInternal.class, mock(PackageManagerInternal.class));
+    public void setUp() {
+        LocalServices.addService(UsageStatsManagerInternal.class,
+                mock(UsageStatsManagerInternal.class));
         mContext.addMockSystemService(AppOpsManager.class, mock(AppOpsManager.class));
-        mContext.getTestablePermissions().setPermission(TEST_URI, PERMISSION_GRANTED);
 
-        mService = spy(new SliceManagerService(mContext, TestableLooper.get(this).getLooper()));
+        mContextSpy = spy(mContext);
+        mService = spy(new SliceManagerService(mContextSpy, TestableLooper.get(this).getLooper()));
         mCreatedSliceState = mock(PinnedSliceState.class);
-        doReturn(mCreatedSliceState).when(mService).createPinnedSlice(eq(TEST_URI));
+        doReturn(mCreatedSliceState).when(mService).createPinnedSlice(eq(TEST_URI), anyString());
     }
 
     @After
     public void teardown() {
-        LocalServices.removeServiceForTest(PackageManagerInternal.class);
-    }
-
-    @Test
-    public void testAddListenerCreatesPinned() throws RemoteException {
-        mService.addSliceListener(TEST_URI, "pkg", mock(ISliceListener.class), EMPTY_SPECS);
-        verify(mService, times(1)).createPinnedSlice(eq(TEST_URI));
-    }
-
-    @Test
-    public void testAddListenerCreatesOnePinned() throws RemoteException {
-        mService.addSliceListener(TEST_URI, "pkg", mock(ISliceListener.class), EMPTY_SPECS);
-        mService.addSliceListener(TEST_URI, "pkg", mock(ISliceListener.class), EMPTY_SPECS);
-        verify(mService, times(1)).createPinnedSlice(eq(TEST_URI));
-    }
-
-    @Test
-    public void testRemoveListenerDestroysPinned() throws RemoteException {
-        ISliceListener listener = mock(ISliceListener.class);
-        mService.addSliceListener(TEST_URI, "pkg", listener, EMPTY_SPECS);
-
-        when(mCreatedSliceState.removeSliceListener(eq(listener))).thenReturn(false);
-        mService.removeSliceListener(TEST_URI, "pkg", listener);
-        verify(mCreatedSliceState, never()).destroy();
-
-        when(mCreatedSliceState.removeSliceListener(eq(listener))).thenReturn(true);
-        mService.removeSliceListener(TEST_URI, "pkg", listener);
-        verify(mCreatedSliceState).destroy();
-    }
-
-    @Test(expected = IllegalStateException.class)
-    public void testUnrecognizedThrows() throws RemoteException {
-        mService.removeSliceListener(TEST_URI, "pkg", mock(ISliceListener.class));
+        LocalServices.removeServiceForTest(UsageStatsManagerInternal.class);
     }
 
     @Test
     public void testAddPinCreatesPinned() throws RemoteException {
+        grantSlicePermission();
         doReturn("pkg").when(mService).getDefaultHome(anyInt());
 
-        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS);
-        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS);
-        verify(mService, times(1)).createPinnedSlice(eq(TEST_URI));
+        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS, mToken);
+        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS, mToken);
+        verify(mService, times(1)).createPinnedSlice(eq(maybeAddUserId(TEST_URI, 0)), anyString());
     }
 
     @Test
     public void testRemovePinDestroysPinned() throws RemoteException {
+        grantSlicePermission();
         doReturn("pkg").when(mService).getDefaultHome(anyInt());
 
-        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS);
+        mService.pinSlice("pkg", TEST_URI, EMPTY_SPECS, mToken);
 
-        when(mCreatedSliceState.unpin(eq("pkg"))).thenReturn(false);
-        mService.unpinSlice("pkg", TEST_URI);
+        when(mCreatedSliceState.unpin(eq("pkg"), eq(mToken))).thenReturn(false);
+        mService.unpinSlice("pkg", TEST_URI, mToken);
         verify(mCreatedSliceState, never()).destroy();
-
-        when(mCreatedSliceState.unpin(eq("pkg"))).thenReturn(true);
-        mService.unpinSlice("pkg", TEST_URI);
-        verify(mCreatedSliceState).destroy();
     }
 
+    @Test
+    public void testCheckAutoGrantPermissions() throws RemoteException {
+        String[] testPerms = new String[] {
+                "perm1",
+                "perm2",
+        };
+        when(mContextSpy.checkUriPermission(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(PERMISSION_DENIED);
+        when(mContextSpy.checkPermission("perm1", Process.myPid(), Process.myUid()))
+                .thenReturn(PERMISSION_DENIED);
+        when(mContextSpy.checkPermission("perm2", Process.myPid(), Process.myUid()))
+                .thenReturn(PERMISSION_GRANTED);
+        mService.checkSlicePermission(TEST_URI, mContext.getPackageName(),
+                mContext.getPackageName(), Process.myPid(),
+                Process.myUid(), testPerms);
+
+        verify(mContextSpy).checkPermission(eq("perm1"), eq(Process.myPid()), eq(Process.myUid()));
+        verify(mContextSpy).checkPermission(eq("perm2"), eq(Process.myPid()), eq(Process.myUid()));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void testNoPinThrow() throws Exception {
+        grantSlicePermission();
+        mService.getPinnedSpecs(TEST_URI, "pkg");
+    }
+
+    @Test
+    public void testGetPinnedSpecs() throws Exception {
+        grantSlicePermission();
+        SliceSpec[] specs = new SliceSpec[] {
+            new SliceSpec("Something", 1) };
+        mService.pinSlice("pkg", TEST_URI, specs, mToken);
+
+        when(mCreatedSliceState.getSpecs()).thenReturn(specs);
+        assertEquals(specs, mService.getPinnedSpecs(TEST_URI, "pkg"));
+    }
+
+    private void grantSlicePermission() {
+        doReturn(PERMISSION_GRANTED).when(mService).checkSlicePermission(
+                eq(TEST_URI), anyString(), anyString(), anyInt(), anyInt(), any());
+        doReturn(PERMISSION_GRANTED).when(mService).checkAccess(
+                anyString(), eq(TEST_URI), anyInt(), anyInt());
+    }
 }

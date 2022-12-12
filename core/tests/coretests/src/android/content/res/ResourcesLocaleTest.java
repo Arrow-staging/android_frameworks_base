@@ -13,14 +13,16 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
+
 package android.content.res;
 
 import android.os.FileUtils;
 import android.os.LocaleList;
-import android.support.test.filters.SmallTest;
+import android.platform.test.annotations.Presubmit;
 import android.test.AndroidTestCase;
 import android.util.DisplayMetrics;
-import android.view.Display;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.frameworks.coretests.R;
 
@@ -29,6 +31,7 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Locale;
 
+@Presubmit
 public class ResourcesLocaleTest extends AndroidTestCase {
 
     private String extractApkAndGetPath(int id) throws Exception {

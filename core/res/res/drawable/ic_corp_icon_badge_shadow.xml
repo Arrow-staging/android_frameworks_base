@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <!--
 Copyright (C) 2016 The Android Open Source Project
 
@@ -14,16 +15,56 @@ Copyright (C) 2016 The Android Open Source Project
     limitations under the License.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-        android:width="64.0dp"
-        android:height="64.0dp"
-        android:viewportWidth="64.0"
-        android:viewportHeight="64.0">
-    <path
-        android:fillColor="#FF000000"
-        android:pathData="M49.1,50.1m-13.9,0.0a13.9,13.9 0.0,1.0 1.0,27.8 0.0a13.9,13.9 0.0,1.0 1.0,-27.8 0.0"
-        android:fillAlpha="0.2"/>
-    <path
-        android:fillColor="#FF000000"
-        android:pathData="M49.1,49.4m-13.9,0.0a13.9,13.9 0.0,1.0 1.0,27.8 0.0a13.9,13.9 0.0,1.0 1.0,-27.8 0.0"
-        android:fillAlpha="0.2"/>
+        android:width="64dp"
+        android:height="64dp"
+        android:viewportWidth="64"
+        android:viewportHeight="64">
+    <group
+        android:scaleX=".24"
+        android:scaleY=".24"
+        android:translateX="38"
+        android:translateY="39.25">
+        <path
+            android:fillColor="#000000"
+            android:fillAlpha="0.06"
+            android:strokeAlpha="0.06"
+            android:strokeWidth="1"
+            android:pathData="@string/config_icon_mask" />
+    </group>
+    <group
+        android:scaleX=".24"
+        android:scaleY=".24"
+        android:translateX="38"
+        android:translateY="39.75">
+        <path
+            android:fillColor="#000000"
+            android:fillAlpha="0.06"
+            android:strokeAlpha="0.06"
+            android:strokeWidth="1"
+            android:pathData="@string/config_icon_mask" />
+    </group>
+    <group
+        android:scaleX=".24"
+        android:scaleY=".24"
+        android:translateX="38"
+        android:translateY="38.75">
+        <path
+            android:fillColor="#000000"
+            android:fillAlpha="0.06"
+            android:strokeAlpha="0.06"
+            android:strokeWidth="1"
+            android:pathData="@string/config_icon_mask" />
+    </group>
+    <group
+        android:scaleX=".24"
+        android:scaleY=".24"
+        android:translateX="38"
+        android:translateY="38.25">
+        <path
+            android:fillColor="#000000"
+            android:fillAlpha="0.06"
+            android:strokeAlpha="0.06"
+            android:strokeWidth="1"
+            android:pathData="@string/config_icon_mask" />
+    </group>
 </vector>

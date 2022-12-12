@@ -17,7 +17,10 @@
 package com.android.server.devicepolicy;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import android.annotation.Nullable;
+import android.app.AppOpsManager;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -29,19 +32,22 @@ import android.content.res.Resources;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.UserHandle;
-import android.os.UserManagerInternal;
-import android.support.annotation.NonNull;
 import android.test.mock.MockContext;
 import android.util.ArrayMap;
+import android.util.DisplayMetrics;
 import android.util.ExceptionUtils;
 
+import androidx.annotation.NonNull;
+
 import com.android.internal.util.FunctionalUtils;
+import com.android.server.pm.UserManagerInternal;
 
 import org.junit.Assert;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 /**
  * Context used throughout DPMS tests.
@@ -56,6 +62,12 @@ public class DpmMockContext extends MockContext {
      * UID corresponding to {@link #CALLER_USER_HANDLE}.
      */
     public static final int CALLER_UID = UserHandle.getUid(CALLER_USER_HANDLE, 20123);
+
+    /**
+     * UID corresponding to {@link #CALLER_USER_HANDLE}.
+     */
+    public static final int CALLER_MANAGED_PROVISIONING_UID = UserHandle.getUid(CALLER_USER_HANDLE,
+            20125);
 
     /**
      * UID used when a caller is on the system user.
@@ -80,6 +92,10 @@ public class DpmMockContext extends MockContext {
     public static final String ANOTHER_PACKAGE_NAME = "com.another.package.name";
     public static final int ANOTHER_UID = UserHandle.getUid(UserHandle.USER_SYSTEM, 18434);
 
+    public static final String DELEGATE_PACKAGE_NAME = "com.delegate.package.name";
+    public static final int DELEGATE_CERT_INSTALLER_UID = UserHandle.getUid(UserHandle.USER_SYSTEM,
+            18437);
+
     private final MockSystemServices mMockSystemServices;
 
     public static class MockBinder {
@@ -100,7 +116,7 @@ public class DpmMockContext extends MockContext {
         }
 
         public void withCleanCallingIdentity(@NonNull FunctionalUtils.ThrowingRunnable action) {
-            long callingIdentity = clearCallingIdentity();
+            final long callingIdentity = clearCallingIdentity();
             Throwable throwableToPropagate = null;
             try {
                 action.runOrThrow();
@@ -161,6 +177,11 @@ public class DpmMockContext extends MockContext {
         binder = new MockBinder();
         resources = mock(Resources.class);
         spiedContext = mock(Context.class);
+
+        // Set up density for notification building
+        DisplayMetrics displayMetrics = mock(DisplayMetrics.class);
+        displayMetrics.density = 2.25f;
+        when(resources.getDisplayMetrics()).thenReturn(displayMetrics);
     }
 
     @Override
@@ -202,6 +223,22 @@ public class DpmMockContext extends MockContext {
                 return mMockSystemServices.wifiManager;
             case Context.ACCOUNT_SERVICE:
                 return mMockSystemServices.accountManager;
+            case Context.TELEPHONY_SERVICE:
+                return mMockSystemServices.telephonyManager;
+            case Context.CONNECTIVITY_SERVICE:
+                return mMockSystemServices.connectivityManager;
+            case Context.APP_OPS_SERVICE:
+                return mMockSystemServices.appOpsManager;
+            case Context.CROSS_PROFILE_APPS_SERVICE:
+                return mMockSystemServices.crossProfileApps;
+            case Context.VPN_MANAGEMENT_SERVICE:
+                return mMockSystemServices.vpnManager;
+            case Context.DEVICE_POLICY_SERVICE:
+                return mMockSystemServices.devicePolicyManager;
+            case Context.LOCATION_SERVICE:
+                return mMockSystemServices.locationManager;
+            case Context.ROLE_SERVICE:
+                return mMockSystemServices.roleManager;
         }
         throw new UnsupportedOperationException();
     }
@@ -239,6 +276,11 @@ public class DpmMockContext extends MockContext {
     }
 
     @Override
+    public int checkPermission(String permission, int pid, int uid) {
+        return checkPermission(permission);
+    }
+
+    @Override
     public void sendBroadcast(Intent intent) {
         spiedContext.sendBroadcast(intent);
     }
@@ -251,6 +293,18 @@ public class DpmMockContext extends MockContext {
     @Override
     public void sendBroadcastMultiplePermissions(Intent intent, String[] receiverPermissions) {
         spiedContext.sendBroadcastMultiplePermissions(intent, receiverPermissions);
+    }
+
+    @Override
+    public void sendBroadcastMultiplePermissions(Intent intent, String[] receiverPermissions,
+            Bundle options) {
+        spiedContext.sendBroadcastMultiplePermissions(intent, receiverPermissions, options);
+    }
+
+    @Override
+    public void sendBroadcastAsUserMultiplePermissions(Intent intent, UserHandle user,
+            String[] receiverPermissions) {
+        spiedContext.sendBroadcastAsUserMultiplePermissions(intent, user, receiverPermissions);
     }
 
     @Override
@@ -307,6 +361,12 @@ public class DpmMockContext extends MockContext {
     }
 
     @Override
+    public void sendBroadcastAsUser(Intent intent,
+            UserHandle user, @Nullable String receiverPermission, @Nullable Bundle options) {
+        spiedContext.sendBroadcastAsUser(intent, user, receiverPermission, options);
+    }
+
+    @Override
     public void sendBroadcastAsUser(Intent intent, UserHandle user, String receiverPermission) {
         spiedContext.sendBroadcastAsUser(intent, user, receiverPermission);
     }
@@ -321,17 +381,17 @@ public class DpmMockContext extends MockContext {
     public void sendOrderedBroadcastAsUser(Intent intent, UserHandle user,
             String receiverPermission, BroadcastReceiver resultReceiver, Handler scheduler,
             int initialCode, String initialData, Bundle initialExtras) {
-        spiedContext.sendOrderedBroadcastAsUser(intent, user, receiverPermission, resultReceiver,
+        sendOrderedBroadcastAsUser(
+                intent, user, receiverPermission, AppOpsManager.OP_NONE, resultReceiver,
                 scheduler, initialCode, initialData, initialExtras);
-        resultReceiver.onReceive(spiedContext, intent);
     }
 
     @Override
     public void sendOrderedBroadcastAsUser(Intent intent, UserHandle user,
             String receiverPermission, int appOp, BroadcastReceiver resultReceiver,
             Handler scheduler, int initialCode, String initialData, Bundle initialExtras) {
-        spiedContext.sendOrderedBroadcastAsUser(intent, user, receiverPermission, appOp,
-                resultReceiver,
+        sendOrderedBroadcastAsUser(
+                intent, user, receiverPermission, appOp, null, resultReceiver,
                 scheduler, initialCode, initialData, initialExtras);
     }
 
@@ -341,6 +401,7 @@ public class DpmMockContext extends MockContext {
             Handler scheduler, int initialCode, String initialData, Bundle initialExtras) {
         spiedContext.sendOrderedBroadcastAsUser(intent, user, receiverPermission, appOp, options,
                 resultReceiver, scheduler, initialCode, initialData, initialExtras);
+        resultReceiver.onReceive(spiedContext, intent);
     }
 
     @Override
@@ -385,6 +446,12 @@ public class DpmMockContext extends MockContext {
     }
 
     @Override
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter, int flags) {
+        mMockSystemServices.registerReceiver(receiver, filter, null);
+        return spiedContext.registerReceiver(receiver, filter, flags);
+    }
+
+    @Override
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
             String broadcastPermission, Handler scheduler) {
         mMockSystemServices.registerReceiver(receiver, filter, scheduler);
@@ -412,6 +479,15 @@ public class DpmMockContext extends MockContext {
     }
 
     @Override
+    public Context createContextAsUser(UserHandle user, int flags) {
+        try {
+            return mMockSystemServices.createPackageContextAsUser(packageName, flags, user);
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Override
     public ContentResolver getContentResolver() {
         return mMockSystemServices.contentResolver;
     }
@@ -420,4 +496,40 @@ public class DpmMockContext extends MockContext {
     public int getUserId() {
         return UserHandle.getUserId(binder.getCallingUid());
     }
+
+    @Override
+    public Executor getMainExecutor() {
+        return mMockSystemServices.executor;
+    }
+
+    @Override
+    public int checkCallingPermission(String permission) {
+        return checkPermission(permission);
+    }
+
+    @Override
+    public int checkCallingOrSelfPermission(String permission) {
+        return checkPermission(permission);
+    }
+
+    @Override
+    public void startActivityAsUser(Intent intent, UserHandle userHandle) {
+        spiedContext.startActivityAsUser(intent, userHandle);
+    }
+
+    private int checkPermission(String permission) {
+        if (UserHandle.isSameApp(binder.getCallingUid(), SYSTEM_UID)) {
+            return PackageManager.PERMISSION_GRANTED; // Assume system has all permissions.
+        }
+        List<String> permissions = binder.callingPermissions.get(binder.getCallingUid());
+        if (permissions == null) {
+            permissions = callerPermissions;
+        }
+        if (permissions.contains(permission)) {
+            return PackageManager.PERMISSION_GRANTED;
+        } else {
+            return PackageManager.PERMISSION_DENIED;
+        }
+    }
+
 }

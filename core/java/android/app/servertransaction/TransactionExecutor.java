@@ -24,6 +24,11 @@ import static android.app.servertransaction.ActivityLifecycleItem.ON_RESUME;
 import static android.app.servertransaction.ActivityLifecycleItem.ON_START;
 import static android.app.servertransaction.ActivityLifecycleItem.ON_STOP;
 import static android.app.servertransaction.ActivityLifecycleItem.UNDEFINED;
+import static android.app.servertransaction.TransactionExecutorHelper.getShortActivityName;
+import static android.app.servertransaction.TransactionExecutorHelper.getStateName;
+import static android.app.servertransaction.TransactionExecutorHelper.lastCallbackRequestingState;
+import static android.app.servertransaction.TransactionExecutorHelper.tId;
+import static android.app.servertransaction.TransactionExecutorHelper.transactionToString;
 
 import android.app.ActivityThread.ActivityClientRecord;
 import android.app.ClientTransactionHandler;
@@ -33,9 +38,8 @@ import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Class that manages transaction execution in the correct order.
@@ -48,11 +52,7 @@ public class TransactionExecutor {
 
     private ClientTransactionHandler mTransactionHandler;
     private PendingTransactionActions mPendingActions = new PendingTransactionActions();
-
-    // Temp holder for lifecycle path.
-    // No direct transition between two states should take more than one complete cycle of 6 states.
-    @ActivityLifecycleItem.LifecycleState
-    private IntArray mLifecycleSequence = new IntArray(6);
+    private TransactionExecutorHelper mHelper = new TransactionExecutorHelper();
 
     /** Initialize an instance with transaction handler, that will execute all requested actions. */
     public TransactionExecutor(ClientTransactionHandler clientTransactionHandler) {
@@ -67,35 +67,69 @@ public class TransactionExecutor {
      * either remain in the initial state, or last state needed by a callback.
      */
     public void execute(ClientTransaction transaction) {
+        if (DEBUG_RESOLVER) Slog.d(TAG, tId(transaction) + "Start resolving transaction");
+
         final IBinder token = transaction.getActivityToken();
-        log("Start resolving transaction for client: " + mTransactionHandler + ", token: " + token);
+        if (token != null) {
+            final Map<IBinder, ClientTransactionItem> activitiesToBeDestroyed =
+                    mTransactionHandler.getActivitiesToBeDestroyed();
+            final ClientTransactionItem destroyItem = activitiesToBeDestroyed.get(token);
+            if (destroyItem != null) {
+                if (transaction.getLifecycleStateRequest() == destroyItem) {
+                    // It is going to execute the transaction that will destroy activity with the
+                    // token, so the corresponding to-be-destroyed record can be removed.
+                    activitiesToBeDestroyed.remove(token);
+                }
+                if (mTransactionHandler.getActivityClient(token) == null) {
+                    // The activity has not been created but has been requested to destroy, so all
+                    // transactions for the token are just like being cancelled.
+                    Slog.w(TAG, tId(transaction) + "Skip pre-destroyed transaction:\n"
+                            + transactionToString(transaction, mTransactionHandler));
+                    return;
+                }
+            }
+        }
+
+        if (DEBUG_RESOLVER) Slog.d(TAG, transactionToString(transaction, mTransactionHandler));
 
         executeCallbacks(transaction);
 
         executeLifecycleState(transaction);
         mPendingActions.clear();
-        log("End resolving transaction");
+        if (DEBUG_RESOLVER) Slog.d(TAG, tId(transaction) + "End resolving transaction");
     }
 
     /** Cycle through all states requested by callbacks and execute them at proper times. */
     @VisibleForTesting
     public void executeCallbacks(ClientTransaction transaction) {
         final List<ClientTransactionItem> callbacks = transaction.getCallbacks();
-        if (callbacks == null) {
+        if (callbacks == null || callbacks.isEmpty()) {
             // No callbacks to execute, return early.
             return;
         }
-        log("Resolving callbacks");
+        if (DEBUG_RESOLVER) Slog.d(TAG, tId(transaction) + "Resolving callbacks in transaction");
 
         final IBinder token = transaction.getActivityToken();
         ActivityClientRecord r = mTransactionHandler.getActivityClient(token);
+
+        // In case when post-execution state of the last callback matches the final state requested
+        // for the activity in this transaction, we won't do the last transition here and do it when
+        // moving to final state instead (because it may contain additional parameters from server).
+        final ActivityLifecycleItem finalStateRequest = transaction.getLifecycleStateRequest();
+        final int finalState = finalStateRequest != null ? finalStateRequest.getTargetState()
+                : UNDEFINED;
+        // Index of the last callback that requests some post-execution state.
+        final int lastCallbackRequestingState = lastCallbackRequestingState(transaction);
+
         final int size = callbacks.size();
         for (int i = 0; i < size; ++i) {
             final ClientTransactionItem item = callbacks.get(i);
-            log("Resolving callback: " + item);
-            final int preExecutionState = item.getPreExecutionState();
-            if (preExecutionState != UNDEFINED) {
-                cycleToPath(r, preExecutionState);
+            if (DEBUG_RESOLVER) Slog.d(TAG, tId(transaction) + "Resolving callback: " + item);
+            final int postExecutionState = item.getPostExecutionState();
+            final int closestPreExecutionState = mHelper.getClosestPreExecutionState(r,
+                    item.getPostExecutionState());
+            if (closestPreExecutionState != UNDEFINED) {
+                cycleToPath(r, closestPreExecutionState, transaction);
             }
 
             item.execute(mTransactionHandler, token, mPendingActions);
@@ -105,9 +139,11 @@ public class TransactionExecutor {
                 r = mTransactionHandler.getActivityClient(token);
             }
 
-            final int postExecutionState = item.getPostExecutionState();
-            if (postExecutionState != UNDEFINED) {
-                cycleToPath(r, postExecutionState);
+            if (postExecutionState != UNDEFINED && r != null) {
+                // Skip the very last transition and perform it by explicit state request instead.
+                final boolean shouldExcludeLastTransition =
+                        i == lastCallbackRequestingState && finalState == postExecutionState;
+                cycleToPath(r, postExecutionState, shouldExcludeLastTransition, transaction);
             }
         }
     }
@@ -119,28 +155,22 @@ public class TransactionExecutor {
             // No lifecycle request, return early.
             return;
         }
-        log("Resolving lifecycle state: " + lifecycleItem);
 
         final IBinder token = transaction.getActivityToken();
         final ActivityClientRecord r = mTransactionHandler.getActivityClient(token);
+        if (DEBUG_RESOLVER) {
+            Slog.d(TAG, tId(transaction) + "Resolving lifecycle state: "
+                    + lifecycleItem + " for activity: "
+                    + getShortActivityName(token, mTransactionHandler));
+        }
 
-        // TODO(b/71506345): Remove once root cause is found.
         if (r == null) {
-            final StringWriter stringWriter = new StringWriter();
-            final PrintWriter pw = new PrintWriter(stringWriter);
-            final String prefix = "  ";
-
-            pw.println("Lifecycle transaction does not have valid ActivityClientRecord.");
-            pw.println("Transaction:");
-            transaction.dump(pw, prefix);
-            pw.println("Executor:");
-            dump(pw, prefix);
-
-            Slog.wtf(TAG, stringWriter.toString());
+            // Ignore requests for non-existent client records for now.
+            return;
         }
 
         // Cycle to the state right before the final requested state.
-        cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */);
+        cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */, transaction);
 
         // Execute the final transition with proper parameters.
         lifecycleItem.execute(mTransactionHandler, token, mPendingActions);
@@ -149,8 +179,8 @@ public class TransactionExecutor {
 
     /** Transition the client between states. */
     @VisibleForTesting
-    public void cycleToPath(ActivityClientRecord r, int finish) {
-        cycleToPath(r, finish, false /* excludeLastState */);
+    public void cycleToPath(ActivityClientRecord r, int finish, ClientTransaction transaction) {
+        cycleToPath(r, finish, false /* excludeLastState */, transaction);
     }
 
     /**
@@ -158,115 +188,65 @@ public class TransactionExecutor {
      * sequence. This is used when resolving lifecycle state request, when the last transition must
      * be performed with some specific parameters.
      */
-    private void cycleToPath(ActivityClientRecord r, int finish,
-            boolean excludeLastState) {
+    private void cycleToPath(ActivityClientRecord r, int finish, boolean excludeLastState,
+            ClientTransaction transaction) {
         final int start = r.getLifecycleState();
-        log("Cycle from: " + start + " to: " + finish + " excludeLastState:" + excludeLastState);
-        initLifecyclePath(start, finish, excludeLastState);
-        performLifecycleSequence(r);
+        if (DEBUG_RESOLVER) {
+            Slog.d(TAG, tId(transaction) + "Cycle activity: "
+                    + getShortActivityName(r.token, mTransactionHandler)
+                    + " from: " + getStateName(start) + " to: " + getStateName(finish)
+                    + " excludeLastState: " + excludeLastState);
+        }
+        final IntArray path = mHelper.getLifecyclePath(start, finish, excludeLastState);
+        performLifecycleSequence(r, path, transaction);
     }
 
     /** Transition the client through previously initialized state sequence. */
-    private void performLifecycleSequence(ActivityClientRecord r) {
-        final int size = mLifecycleSequence.size();
+    private void performLifecycleSequence(ActivityClientRecord r, IntArray path,
+            ClientTransaction transaction) {
+        final int size = path.size();
         for (int i = 0, state; i < size; i++) {
-            state = mLifecycleSequence.get(i);
-            log("Transitioning to state: " + state);
+            state = path.get(i);
+            if (DEBUG_RESOLVER) {
+                Slog.d(TAG, tId(transaction) + "Transitioning activity: "
+                        + getShortActivityName(r.token, mTransactionHandler)
+                        + " to state: " + getStateName(state));
+            }
             switch (state) {
                 case ON_CREATE:
-                    mTransactionHandler.handleLaunchActivity(r, mPendingActions);
+                    mTransactionHandler.handleLaunchActivity(r, mPendingActions,
+                            null /* customIntent */);
                     break;
                 case ON_START:
-                    mTransactionHandler.handleStartActivity(r, mPendingActions);
+                    mTransactionHandler.handleStartActivity(r, mPendingActions,
+                            null /* activityOptions */);
                     break;
                 case ON_RESUME:
-                    mTransactionHandler.handleResumeActivity(r.token, false /* clearHide */,
+                    mTransactionHandler.handleResumeActivity(r, false /* finalStateRequest */,
                             r.isForward, "LIFECYCLER_RESUME_ACTIVITY");
                     break;
                 case ON_PAUSE:
-                    mTransactionHandler.handlePauseActivity(r.token, false /* finished */,
+                    mTransactionHandler.handlePauseActivity(r, false /* finished */,
                             false /* userLeaving */, 0 /* configChanges */,
-                            true /* dontReport */, mPendingActions);
+                            false /* autoEnteringPip */, mPendingActions,
+                            "LIFECYCLER_PAUSE_ACTIVITY");
                     break;
                 case ON_STOP:
-                    mTransactionHandler.handleStopActivity(r.token, false /* show */,
-                            0 /* configChanges */, mPendingActions);
+                    mTransactionHandler.handleStopActivity(r, 0 /* configChanges */,
+                            mPendingActions, false /* finalStateRequest */,
+                            "LIFECYCLER_STOP_ACTIVITY");
                     break;
                 case ON_DESTROY:
-                    mTransactionHandler.handleDestroyActivity(r.token, false /* finishing */,
+                    mTransactionHandler.handleDestroyActivity(r, false /* finishing */,
                             0 /* configChanges */, false /* getNonConfigInstance */,
-                            "performLifecycleSequence. cycling to:"
-                                    + mLifecycleSequence.get(size - 1));
+                            "performLifecycleSequence. cycling to:" + path.get(size - 1));
                     break;
                 case ON_RESTART:
-                    mTransactionHandler.performRestartActivity(r.token, false /* start */);
+                    mTransactionHandler.performRestartActivity(r, false /* start */);
                     break;
                 default:
                     throw new IllegalArgumentException("Unexpected lifecycle state: " + state);
             }
         }
-    }
-
-    /**
-     * Calculate the path through main lifecycle states for an activity and fill
-     * @link #mLifecycleSequence} with values starting with the state that follows the initial
-     * state.
-     */
-    public void initLifecyclePath(int start, int finish, boolean excludeLastState) {
-        mLifecycleSequence.clear();
-        if (finish >= start) {
-            // just go there
-            for (int i = start + 1; i <= finish; i++) {
-                mLifecycleSequence.add(i);
-            }
-        } else { // finish < start, can't just cycle down
-            if (start == ON_PAUSE && finish == ON_RESUME) {
-                // Special case when we can just directly go to resumed state.
-                mLifecycleSequence.add(ON_RESUME);
-            } else if (start <= ON_STOP && finish >= ON_START) {
-                // Restart and go to required state.
-
-                // Go to stopped state first.
-                for (int i = start + 1; i <= ON_STOP; i++) {
-                    mLifecycleSequence.add(i);
-                }
-                // Restart
-                mLifecycleSequence.add(ON_RESTART);
-                // Go to required state
-                for (int i = ON_START; i <= finish; i++) {
-                    mLifecycleSequence.add(i);
-                }
-            } else {
-                // Relaunch and go to required state
-
-                // Go to destroyed state first.
-                for (int i = start + 1; i <= ON_DESTROY; i++) {
-                    mLifecycleSequence.add(i);
-                }
-                // Go to required state
-                for (int i = ON_CREATE; i <= finish; i++) {
-                    mLifecycleSequence.add(i);
-                }
-            }
-        }
-
-        // Remove last transition in case we want to perform it with some specific params.
-        if (excludeLastState && mLifecycleSequence.size() != 0) {
-            mLifecycleSequence.remove(mLifecycleSequence.size() - 1);
-        }
-    }
-
-    @VisibleForTesting
-    public int[] getLifecycleSequence() {
-        return mLifecycleSequence.toArray();
-    }
-
-    private static void log(String message) {
-        if (DEBUG_RESOLVER) Slog.d(TAG, message);
-    }
-
-    private void dump(PrintWriter pw, String prefix) {
-        pw.println(prefix + "mTransactionHandler:");
-        mTransactionHandler.dump(pw, prefix + "  ");
     }
 }

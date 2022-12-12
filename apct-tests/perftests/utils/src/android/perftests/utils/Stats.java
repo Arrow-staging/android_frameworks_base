@@ -16,6 +16,8 @@
 
 package android.perftests.utils;
 
+import android.annotation.IntRange;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -23,23 +25,25 @@ import java.util.List;
 public class Stats {
     private long mMedian, mMin, mMax;
     private double mMean, mStandardDeviation;
+    private final List<Long> mValues;
 
     /* Calculate stats in constructor. */
     public Stats(List<Long> values) {
-        // make a copy since we're modifying it
-        values = new ArrayList<>(values);
         final int size = values.size();
         if (size < 2) {
             throw new IllegalArgumentException("At least two results are necessary.");
         }
 
-        Collections.sort(values);
+        // Make a copy since we're modifying it.
+        mValues = values = new ArrayList<>(values);
 
-        mMedian = size % 2 == 0 ? (values.get(size / 2) + values.get(size / 2 - 1)) / 2 :
-                values.get(size / 2);
+        Collections.sort(values);
 
         mMin = values.get(0);
         mMax = values.get(values.size() - 1);
+
+        mMedian = size % 2 == 0 ? (values.get(size / 2) + values.get(size / 2 - 1)) / 2 :
+                values.get(size / 2);
 
         for (int i = 0; i < size; ++i) {
             long result = values.get(i);
@@ -52,6 +56,10 @@ public class Stats {
             mStandardDeviation += tmp * tmp;
         }
         mStandardDeviation = Math.sqrt(mStandardDeviation / (double) (size - 1));
+    }
+
+    public int getSize() {
+        return mValues.size();
     }
 
     public double getMean() {
@@ -72,5 +80,18 @@ public class Stats {
 
     public double getStandardDeviation() {
         return mStandardDeviation;
+    }
+
+    public long getPercentile(@IntRange(from = 0, to = 100) int percentile) {
+        return getPercentile(mValues, percentile);
+    }
+
+    private static long getPercentile(List<Long> values, int percentile) {
+        if (percentile < 0 || percentile > 100) {
+            throw new IllegalArgumentException(
+                    "invalid percentile " + percentile + ", should be 0-100");
+        }
+        int idx = (values.size() - 1) * percentile / 100;
+        return values.get(idx);
     }
 }

@@ -19,6 +19,7 @@ package android.media;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.media.AudioManager.OnAudioFocusChangeListener;
 import android.os.Bundle;
 import android.os.Handler;
@@ -79,9 +80,9 @@ import android.os.Looper;
  * <p>An {@code AudioFocusRequest} instance always contains one of the four types of requests
  * explained above. It is passed when building an {@code AudioFocusRequest} instance with its
  * builder in the {@link Builder} constructor
- * {@link AudioFocusRequest.Builder#AudioFocusRequest.Builder(int)}, or
+ * {@link AudioFocusRequest.Builder#Builder(int)}, or
  * with {@link AudioFocusRequest.Builder#setFocusGain(int)} after copying an existing instance with
- * {@link AudioFocusRequest.Builder#AudioFocusRequest.Builder(AudioFocusRequest)}.
+ * {@link AudioFocusRequest.Builder#Builder(AudioFocusRequest)}.
  *
  * <h3>Qualifying your focus request</h3>
  * <h4>Use case requiring a focus request</h4>
@@ -224,9 +225,9 @@ public final class AudioFocusRequest {
     /** @hide */
     public static final String KEY_ACCESSIBILITY_FORCE_FOCUS_DUCKING = "a11y_force_ducking";
 
-    private final OnAudioFocusChangeListener mFocusListener; // may be null
-    private final Handler mListenerHandler;                  // may be null
-    private final AudioAttributes mAttr;                     // never null
+    private final @Nullable OnAudioFocusChangeListener mFocusListener;
+    private final @Nullable Handler mListenerHandler;
+    private final @NonNull AudioAttributes mAttr;
     private final int mFocusGain;
     private final int mFlags;
 
@@ -262,6 +263,7 @@ public final class AudioFocusRequest {
      * Returns the focus change listener set for this {@code AudioFocusRequest}.
      * @return null if no {@link AudioManager.OnAudioFocusChangeListener} was set.
      */
+    @TestApi
     public @Nullable OnAudioFocusChangeListener getOnAudioFocusChangeListener() {
         return mFocusListener;
     }
@@ -412,7 +414,9 @@ public final class AudioFocusRequest {
          *   with {@link AudioManager#abandonAudioFocusRequest(AudioFocusRequest)}.
          *   Note that only focus changes (gains and losses) affecting the focus owner are reported,
          *   not gains and losses of other focus requesters in the system.<br>
-         *   Notifications are delivered on the main {@link Looper}.
+         *   Notifications are delivered on the {@link Looper} associated with the one of
+         *   the creation of the {@link AudioManager} used to request focus
+         *   (see {@link AudioManager#requestAudioFocus(AudioFocusRequest)}).
          * @param listener the listener receiving the focus change notifications.
          * @return this {@code Builder} instance.
          * @throws NullPointerException thrown when a null focus listener is used.

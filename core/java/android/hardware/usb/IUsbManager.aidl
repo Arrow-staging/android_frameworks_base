@@ -18,12 +18,14 @@ package android.hardware.usb;
 
 import android.app.PendingIntent;
 import android.content.ComponentName;
+import android.hardware.usb.IUsbOperationInternal;
 import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbPort;
+import android.hardware.usb.ParcelableUsbPort;
 import android.hardware.usb.UsbPortStatus;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.os.UserHandle;
 
 /** @hide */
 interface IUsbManager
@@ -53,6 +55,26 @@ interface IUsbManager
      * (or clears it if the package name is null)
      */
     void setAccessoryPackage(in UsbAccessory accessory, String packageName, int userId);
+
+    /* Adds packages to the set of "denied and don't ask again" launch preferences for a device */
+    void addDevicePackagesToPreferenceDenied(in UsbDevice device, in String[] packageNames, in UserHandle user);
+
+    /* Adds packages to the set of "denied and don't ask again" launch preferences for an accessory */
+    void addAccessoryPackagesToPreferenceDenied(in UsbAccessory accessory, in String[] packageNames, in UserHandle user);
+
+    /* Removes packages from the set of "denied and don't ask again" launch preferences for a device */
+    void removeDevicePackagesFromPreferenceDenied(in UsbDevice device, in String[] packageNames, in UserHandle user);
+
+    /* Removes packages from the set of "denied and don't ask again" launch preferences for an accessory */
+    void removeAccessoryPackagesFromPreferenceDenied(in UsbAccessory device, in String[] packageNames, in UserHandle user);
+
+    /* Sets the persistent permission granted state for USB device
+     */
+    void setDevicePersistentPermission(in UsbDevice device, int uid, in UserHandle user, boolean shouldBeGranted);
+
+    /* Sets the persistent permission granted state for USB accessory
+     */
+    void setAccessoryPersistentPermission(in UsbAccessory accessory, int uid, in UserHandle user, boolean shouldBeGranted);
 
     /* Returns true if the caller has permission to access the device. */
     boolean hasDevicePermission(in UsbDevice device, String packageName);
@@ -97,6 +119,12 @@ interface IUsbManager
     /* Gets the current USB functions. */
     long getCurrentFunctions();
 
+    /* Gets the current USB Speed. */
+    int getCurrentUsbSpeed();
+
+    /* Gets the Gadget Hal Version. */
+    int getGadgetHalVersion();
+
     /* Sets the screen unlocked USB function(s), which will be set automatically
      * when the screen is unlocked.
      */
@@ -105,19 +133,29 @@ interface IUsbManager
     /* Gets the current screen unlocked functions. */
     long getScreenUnlockedFunctions();
 
-    /* Allow USB debugging from the attached host. If alwaysAllow is true, add the
-     * the public key to list of host keys that the user has approved.
+    /* Resets the USB gadget. */
+    void resetUsbGadget();
+
+    /* Resets the USB port. */
+    void resetUsbPort(in String portId, int operationId, in IUsbOperationInternal callback);
+
+    /* Set USB data on or off */
+    boolean enableUsbData(in String portId, boolean enable, int operationId, in IUsbOperationInternal callback);
+
+    /* Enable USB data when disabled due to docking event  */
+    void enableUsbDataWhileDocked(in String portId, int operationId, in IUsbOperationInternal callback);
+
+    /* Gets the USB Hal Version. */
+    int getUsbHalVersion();
+
+    /* Get the functionfs control handle for the given function. Usb
+     * descriptors will already be written, and the handle will be
+     * ready to use.
      */
-    void allowUsbDebugging(boolean alwaysAllow, String publicKey);
-
-    /* Deny USB debugging from the attached host */
-    void denyUsbDebugging();
-
-    /* Clear public keys installed for secure USB debugging */
-    void clearUsbDebuggingKeys();
+    ParcelFileDescriptor getControlFd(long function);
 
     /* Gets the list of USB ports. */
-    UsbPort[] getPorts();
+    List<ParcelableUsbPort> getPorts();
 
     /* Gets the status of the specified USB port. */
     UsbPortStatus getPortStatus(in String portId);
@@ -125,6 +163,14 @@ interface IUsbManager
     /* Sets the port's current role. */
     void setPortRoles(in String portId, int powerRole, int dataRole);
 
-   /* Sets USB device connection handler. */
-   void setUsbDeviceConnectionHandler(in ComponentName usbDeviceConnectionHandler);
+    /* Limit power transfer in & out of the port within the allowed limit by the USB
+     * specification.
+     */
+    void enableLimitPowerTransfer(in String portId, boolean limit, int operationId, in IUsbOperationInternal callback);
+
+    /* Enable/disable contaminant detection */
+    void enableContaminantDetection(in String portId, boolean enable);
+
+    /* Sets USB device connection handler. */
+    void setUsbDeviceConnectionHandler(in ComponentName usbDeviceConnectionHandler);
 }

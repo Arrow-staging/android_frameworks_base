@@ -16,9 +16,11 @@
 
 package com.android.internal.widget;
 
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.view.View;
 
+import java.util.ArrayList;
 import java.util.Objects;
 
 /**
@@ -31,10 +33,10 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
      **/
     String IMAGE_MIME_TYPE_PREFIX = "image/";
 
-    static MessagingMessage createMessage(MessagingLayout layout,
-            Notification.MessagingStyle.Message m) {
-        if (hasImage(m)) {
-            return MessagingImageMessage.createMessage(layout, m);
+    static MessagingMessage createMessage(IMessagingLayout layout,
+            Notification.MessagingStyle.Message m, ImageResolver resolver) {
+        if (hasImage(m) && !ActivityManager.isLowRamDeviceStatic()) {
+            return MessagingImageMessage.createMessage(layout, m, resolver);
         } else {
             return MessagingTextMessage.createMessage(layout, m);
         }
@@ -72,7 +74,14 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
         if (!Objects.equals(message.getSender(), ownMessage.getSender())) {
             return false;
         }
-        if (!Objects.equals(message.getTimestamp(), ownMessage.getTimestamp())) {
+        boolean hasRemoteInputHistoryChanged = message.isRemoteInputHistory()
+                != ownMessage.isRemoteInputHistory();
+        // When the remote input history has changed, we want to regard messages equal even when
+        // the timestamp changes. The main reason is that the message that the system inserts
+        // will have a different time set than the one that the app will update us with and we
+        // still want to reuse that message.
+        if (!hasRemoteInputHistoryChanged
+                && !Objects.equals(message.getTimestamp(), ownMessage.getTimestamp())) {
             return false;
         }
         if (!Objects.equals(message.getDataMimeType(), ownMessage.getDataMimeType())) {
@@ -88,8 +97,8 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
         return sameAs(message.getMessage());
     }
 
-    default void removeMessage() {
-        getGroup().removeMessage(this);
+    default void removeMessage(ArrayList<MessagingLinearLayout.MessagingChild> toRecycle) {
+        getGroup().removeMessage(this, toRecycle);
     }
 
     default void setMessagingGroup(MessagingGroup group) {
@@ -116,8 +125,7 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
     @Override
     default void hideAnimated() {
         setIsHidingAnimated(true);
-        getGroup().performRemoveAnimation(getState().getHostView(),
-                () -> setIsHidingAnimated(false));
+        getGroup().performRemoveAnimation(getView(), () -> setIsHidingAnimated(false));
     }
 
     default boolean hasOverlappingRendering() {
@@ -125,7 +133,7 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
     }
 
     default void recycle() {
-        getState().reset();
+        getState().recycle();
     }
 
     default View getView() {
@@ -137,4 +145,6 @@ public interface MessagingMessage extends MessagingLinearLayout.MessagingChild {
     MessagingMessageState getState();
 
     void setVisibility(int visibility);
+
+    int getVisibility();
 }

@@ -16,9 +16,18 @@
 
 package com.android.server.statusbar;
 
-import android.graphics.Rect;
+import android.annotation.Nullable;
+import android.app.ITransientNotificationCallback;
+import android.hardware.fingerprint.IUdfpsHbmListener;
 import android.os.Bundle;
+import android.os.IBinder;
+import android.view.InsetsState.InternalInsetsType;
+import android.view.InsetsVisibilities;
+import android.view.WindowInsetsController.Appearance;
+import android.view.WindowInsetsController.Behavior;
 
+import com.android.internal.statusbar.LetterboxDetails;
+import com.android.internal.view.AppearanceRegion;
 import com.android.server.notification.NotificationDelegate;
 
 public interface StatusBarManagerInternal {
@@ -34,6 +43,9 @@ public interface StatusBarManagerInternal {
 
     void hideRecentApps(boolean triggeredFromAltTab, boolean triggeredFromHomeKey);
 
+    /** Collapses the notification shade. */
+    void collapsePanels();
+
     void dismissKeyboardShortcutsMenu();
     void toggleKeyboardShortcutsMenu(int deviceId);
 
@@ -44,44 +56,51 @@ public interface StatusBarManagerInternal {
      */
     void showPictureInPictureMenu();
 
-    void setWindowState(int window, int state);
+    void setWindowState(int displayId, int window, int state);
 
     /**
      * Notifies the status bar that an app transition is pending to delay applying some flags with
      * visual impact until {@link #appTransitionReady} is called.
+     *
+     * @param displayId the ID of the display which has this event.
      */
-    void appTransitionPending();
+    void appTransitionPending(int displayId);
 
     /**
      * Notifies the status bar that a pending app transition has been cancelled.
+     *
+     * @param displayId the ID of the display which has this event.
      */
-    void appTransitionCancelled();
+    void appTransitionCancelled(int displayId);
 
     /**
      * Notifies the status bar that an app transition is now being executed.
      *
+     * @param displayId the ID of the display which has this event.
      * @param statusBarAnimationsStartTime the desired start time for all visual animations in the
      *        status bar caused by this app transition in uptime millis
      * @param statusBarAnimationsDuration the duration for all visual animations in the status
      *        bar caused by this app transition in millis
      */
-    void appTransitionStarting(long statusBarAnimationsStartTime, long statusBarAnimationsDuration);
+    void appTransitionStarting(int displayId, long statusBarAnimationsStartTime,
+            long statusBarAnimationsDuration);
 
     void startAssist(Bundle args);
     void onCameraLaunchGestureDetected(int source);
-    void topAppWindowChanged(boolean menuVisible);
-    void setSystemUiVisibility(int vis, int fullscreenStackVis, int dockedStackVis, int mask,
-            Rect fullscreenBounds, Rect dockedBounds, String cause);
+    void setDisableFlags(int displayId, int flags, String cause);
     void toggleSplitScreen();
-    void appTransitionFinished();
+    void appTransitionFinished(int displayId);
+
+    /**
+     * Notifies the status bar that a Emergency Action launch gesture has been detected.
+     *
+     * TODO (b/169175022) Update method name and docs when feature name is locked.
+     */
+    void onEmergencyActionLaunchGestureDetected();
 
     void toggleRecentApps();
 
     void setCurrentUser(int newUserId);
-
-    boolean isGlobalActionsDisabled();
-    void setGlobalActionsListener(GlobalActionsListener listener);
-    void showGlobalActions();
 
     /**
      * Set whether the top app currently hides the statusbar.
@@ -99,22 +118,58 @@ public interface StatusBarManagerInternal {
      */
     void onProposedRotationChanged(int rotation, boolean isValid);
 
-    public interface GlobalActionsListener {
-        /**
-         * Called when sysui starts and connects its status bar, or when the status bar binder
-         * dies indicating sysui is no longer alive.
-         */
-        void onStatusBarConnectedChanged(boolean connected);
+    /**
+     * Notifies System UI that the display is ready to show system decorations.
+     *
+     * @param displayId display ID
+     */
+    void onDisplayReady(int displayId);
 
-        /**
-         * Callback from sysui to notify system that global actions has been successfully shown.
-         */
-        void onGlobalActionsShown();
+    /**
+     * Notifies System UI whether the recents animation is running.
+     */
+    void onRecentsAnimationStateChanged(boolean running);
 
-        /**
-         * Callback from sysui to notify system that the user has dismissed global actions and
-         * it no longer needs to be displayed (even if sysui dies).
-         */
-        void onGlobalActionsDismissed();
-    }
+    /** @see com.android.internal.statusbar.IStatusBar#onSystemBarAttributesChanged */
+    void onSystemBarAttributesChanged(int displayId, @Appearance int appearance,
+            AppearanceRegion[] appearanceRegions, boolean navbarColorManagedByIme,
+            @Behavior int behavior, InsetsVisibilities requestedVisibilities, String packageName,
+            LetterboxDetails[] letterboxDetails);
+
+    /** @see com.android.internal.statusbar.IStatusBar#showTransient */
+    void showTransient(int displayId, @InternalInsetsType int[] types,
+            boolean isGestureOnSystemBar);
+
+    /** @see com.android.internal.statusbar.IStatusBar#abortTransient */
+    void abortTransient(int displayId, @InternalInsetsType int[] types);
+
+    /**
+     * @see com.android.internal.statusbar.IStatusBar#showToast(String, IBinder, CharSequence,
+     * IBinder, int, ITransientNotificationCallback, int)
+     */
+    void showToast(int uid, String packageName, IBinder token, CharSequence text,
+            IBinder windowToken, int duration,
+            @Nullable ITransientNotificationCallback textCallback, int displayId);
+
+    /** @see com.android.internal.statusbar.IStatusBar#hideToast(String, IBinder)  */
+    void hideToast(String packageName, IBinder token);
+
+    /**
+     * @see com.android.internal.statusbar.IStatusBar#requestWindowMagnificationConnection(boolean
+     * request)
+     */
+    boolean requestWindowMagnificationConnection(boolean request);
+
+    /**
+     * @see com.android.internal.statusbar.IStatusBar#setNavigationBarLumaSamplingEnabled(int,
+     * boolean)
+     */
+    void setNavigationBarLumaSamplingEnabled(int displayId, boolean enable);
+
+    /**
+     * Sets the system-wide listener for UDFPS HBM status changes.
+     *
+     * @see com.android.internal.statusbar.IStatusBar#setUdfpsHbmListener(IUdfpsHbmListener)
+     */
+    void setUdfpsHbmListener(IUdfpsHbmListener listener);
 }

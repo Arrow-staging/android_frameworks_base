@@ -23,6 +23,7 @@ using ::aapt::test::ValueEq;
 using ::testing::Eq;
 using ::testing::IsNull;
 using ::testing::NotNull;
+using ::testing::Pointee;
 using ::testing::SizeIs;
 
 namespace aapt {
@@ -81,7 +82,7 @@ TEST_F(XmlCompatVersionerTest, NoRulesOnlyStripsAndCopies) {
           app:foo="16dp"
           foo="bar"/>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   XmlCompatVersioner::Rules rules;
@@ -120,7 +121,7 @@ TEST_F(XmlCompatVersionerTest, SingleRule) {
           app:foo="16dp"
           foo="bar"/>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   XmlCompatVersioner::Rules rules;
@@ -180,7 +181,7 @@ TEST_F(XmlCompatVersionerTest, ChainedRule) {
       <View xmlns:android="http://schemas.android.com/apk/res/android"
           android:paddingHorizontal="24dp" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   XmlCompatVersioner::Rules rules;
@@ -255,7 +256,7 @@ TEST_F(XmlCompatVersionerTest, DegradeRuleOverridesExistingAttribute) {
           android:paddingLeft="16dp"
           android:paddingRight="16dp"/>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   Item* padding_horizontal_value =
@@ -287,13 +288,13 @@ TEST_F(XmlCompatVersionerTest, DegradeRuleOverridesExistingAttribute) {
   ASSERT_THAT(attr, NotNull());
   ASSERT_THAT(attr->compiled_value, NotNull());
   ASSERT_TRUE(attr->compiled_attribute);
-  ASSERT_THAT(*attr->compiled_value, ValueEq(padding_horizontal_value));
+  ASSERT_THAT(attr->compiled_value, Pointee(ValueEq(padding_horizontal_value)));
 
   attr = el->FindAttribute(xml::kSchemaAndroid, "paddingRight");
   ASSERT_THAT(attr, NotNull());
   ASSERT_THAT(attr->compiled_value, NotNull());
   ASSERT_TRUE(attr->compiled_attribute);
-  ASSERT_THAT(*attr->compiled_value, ValueEq(padding_horizontal_value));
+  ASSERT_THAT(attr->compiled_value, Pointee(ValueEq(padding_horizontal_value)));
 
   EXPECT_THAT(versioned_docs[1]->file.config.sdkVersion, Eq(SDK_LOLLIPOP_MR1));
   el = versioned_docs[1]->root.get();
@@ -302,21 +303,20 @@ TEST_F(XmlCompatVersionerTest, DegradeRuleOverridesExistingAttribute) {
 
   attr = el->FindAttribute(xml::kSchemaAndroid, "paddingHorizontal");
   ASSERT_THAT(attr, NotNull());
-  ASSERT_THAT(attr->compiled_value, NotNull());
   ASSERT_TRUE(attr->compiled_attribute);
-  ASSERT_THAT(*attr->compiled_value, ValueEq(padding_horizontal_value));
+  ASSERT_THAT(attr->compiled_value, Pointee(ValueEq(padding_horizontal_value)));
 
   attr = el->FindAttribute(xml::kSchemaAndroid, "paddingLeft");
   ASSERT_THAT(attr, NotNull());
   ASSERT_THAT(attr->compiled_value, NotNull());
   ASSERT_TRUE(attr->compiled_attribute);
-  ASSERT_THAT(*attr->compiled_value, ValueEq(padding_horizontal_value));
+  ASSERT_THAT(attr->compiled_value, Pointee(ValueEq(padding_horizontal_value)));
 
   attr = el->FindAttribute(xml::kSchemaAndroid, "paddingRight");
   ASSERT_THAT(attr, NotNull());
   ASSERT_THAT(attr->compiled_value, NotNull());
   ASSERT_TRUE(attr->compiled_attribute);
-  ASSERT_THAT(*attr->compiled_value, ValueEq(padding_horizontal_value));
+  ASSERT_THAT(attr->compiled_value, Pointee(ValueEq(padding_horizontal_value)));
 }
 
 }  // namespace aapt

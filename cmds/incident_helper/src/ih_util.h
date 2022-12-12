@@ -109,7 +109,7 @@ double toDouble(const std::string& s);
 class Reader
 {
 public:
-    Reader(const int fd);
+    explicit Reader(const int fd);
     ~Reader();
 
     bool readLine(std::string* line);
@@ -117,6 +117,7 @@ public:
 
 private:
     FILE* mFile;
+    char* mBuffer;
     std::string mStatus;
 };
 
@@ -150,9 +151,9 @@ public:
     // Return false if the given name can't be found.
     bool insertField(ProtoOutputStream* proto, const std::string& name, const std::string& value);
 private:
-    map<std::string, uint64_t> mFields;
-    map<std::string, map<std::string, int>> mEnums;
-    map<std::string, int> mEnumValuesByName;
+    std::map<std::string, uint64_t> mFields;
+    std::map<std::string, std::map<std::string, int>> mEnums;
+    std::map<std::string, int> mEnumValuesByName;
 };
 
 /**
@@ -162,7 +163,7 @@ private:
 class Message
 {
 public:
-    Message(Table* table);
+    explicit Message(Table* table);
     ~Message();
 
     // Reconstructs the typical proto message by adding its message fields.
@@ -187,15 +188,15 @@ public:
     bool insertField(ProtoOutputStream* proto, const std::string& name, const std::string& value);
 
     // Starts a new message field proto session.
-    void startSession(ProtoOutputStream* proto, const string& name);
+    void startSession(ProtoOutputStream* proto, const std::string& name);
 
     // Ends the previous message field proto session.
     void endSession(ProtoOutputStream* proto);
 private:
     Table* mTable;
     std::string mPreviousField;
-    stack<long long> mTokens;
-    map<std::string, Message*> mSubMessages;
+    std::stack<uint64_t> mTokens;
+    std::map<std::string, Message*> mSubMessages;
 };
 
 #endif  // INCIDENT_HELPER_UTIL_H

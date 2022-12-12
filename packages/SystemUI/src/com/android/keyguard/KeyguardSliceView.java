@@ -16,76 +16,86 @@
 
 package com.android.keyguard;
 
+import android.animation.LayoutTransition;
+import android.animation.ObjectAnimator;
+import android.animation.PropertyValuesHolder;
+import android.annotation.ColorInt;
+import android.annotation.StyleRes;
 import android.app.PendingIntent;
-import android.arch.lifecycle.LiveData;
-import android.arch.lifecycle.Observer;
 import android.content.Context;
+import android.content.res.Resources;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.InsetDrawable;
+import android.graphics.text.LineBreaker;
 import android.net.Uri;
-import android.provider.Settings;
-import android.text.Layout;
+import android.os.Trace;
 import android.text.TextUtils;
 import android.text.TextUtils.TruncateAt;
 import android.util.AttributeSet;
-import android.util.Log;
+import android.view.Gravity;
 import android.view.View;
-import android.widget.Button;
+import android.view.animation.Animation;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import androidx.slice.SliceItem;
+import androidx.slice.core.SliceQuery;
+import androidx.slice.widget.RowContent;
+import androidx.slice.widget.SliceContent;
+
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.graphics.ColorUtils;
 import com.android.settingslib.Utils;
-import com.android.systemui.Dependency;
 import com.android.systemui.R;
-import com.android.systemui.keyguard.KeyguardSliceProvider;
-import com.android.systemui.tuner.TunerService;
+import com.android.systemui.animation.Interpolators;
+import com.android.systemui.util.wakelock.KeepAwakeAnimationListener;
 
+import java.io.PrintWriter;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
-import java.util.function.Consumer;
-
-import androidx.app.slice.Slice;
-import androidx.app.slice.SliceItem;
-import androidx.app.slice.core.SliceQuery;
-import androidx.app.slice.widget.ListContent;
-import androidx.app.slice.widget.RowContent;
-import androidx.app.slice.widget.SliceLiveData;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * View visible under the clock on the lock screen and AoD.
  */
-public class KeyguardSliceView extends LinearLayout implements View.OnClickListener,
-        Observer<Slice>, TunerService.Tunable {
+public class KeyguardSliceView extends LinearLayout {
 
     private static final String TAG = "KeyguardSliceView";
-    private final HashMap<View, PendingIntent> mClickActions;
-    private Uri mKeyguardSliceUri;
-    private TextView mTitle;
-    private LinearLayout mRow;
+    public static final int DEFAULT_ANIM_DURATION = 550;
+
+    private final LayoutTransition mLayoutTransition;
+    @VisibleForTesting
+    TextView mTitle;
+    private Row mRow;
     private int mTextColor;
     private float mDarkAmount = 0;
 
-    private LiveData<Slice> mLiveData;
     private int mIconSize;
-    private Consumer<Boolean> mListener;
+    private int mIconSizeWithHeader;
+    /**
+     * Runnable called whenever the view contents change.
+     */
+    private Runnable mContentChangeListener;
     private boolean mHasHeader;
-
-    public KeyguardSliceView(Context context) {
-        this(context, null, 0);
-    }
+    private View.OnClickListener mOnClickListener;
 
     public KeyguardSliceView(Context context, AttributeSet attrs) {
-        this(context, attrs, 0);
-    }
+        super(context, attrs);
 
-    public KeyguardSliceView(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
-
-        TunerService tunerService = Dependency.get(TunerService.class);
-        tunerService.addTunable(this, Settings.Secure.KEYGUARD_SLICE_URI);
-
-        mClickActions = new HashMap<>();
+        Resources resources = context.getResources();
+        mLayoutTransition = new LayoutTransition();
+        mLayoutTransition.setStagger(LayoutTransition.CHANGE_APPEARING, DEFAULT_ANIM_DURATION / 2);
+        mLayoutTransition.setDuration(LayoutTransition.APPEARING, DEFAULT_ANIM_DURATION);
+        mLayoutTransition.setDuration(LayoutTransition.DISAPPEARING, DEFAULT_ANIM_DURATION / 2);
+        mLayoutTransition.disableTransitionType(LayoutTransition.CHANGE_APPEARING);
+        mLayoutTransition.disableTransitionType(LayoutTransition.CHANGE_DISAPPEARING);
+        mLayoutTransition.setInterpolator(LayoutTransition.APPEARING,
+                Interpolators.FAST_OUT_SLOW_IN);
+        mLayoutTransition.setInterpolator(LayoutTransition.DISAPPEARING, Interpolators.ALPHA_OUT);
+        mLayoutTransition.setAnimateParentHierarchy(false);
     }
 
     @Override
@@ -93,152 +103,127 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
         super.onFinishInflate();
         mTitle = findViewById(R.id.title);
         mRow = findViewById(R.id.row);
-        mTextColor = Utils.getColorAttr(mContext, R.attr.wallpaperTextColor);
+        mTextColor = Utils.getColorAttrDefaultColor(mContext, R.attr.wallpaperTextColor);
         mIconSize = (int) mContext.getResources().getDimension(R.dimen.widget_icon_size);
+        mIconSizeWithHeader = (int) mContext.getResources().getDimension(R.dimen.header_icon_size);
+        mTitle.setBreakStrategy(LineBreaker.BREAK_STRATEGY_BALANCED);
     }
 
     @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-
-        // Make sure we always have the most current slice
-        mLiveData.observeForever(this);
+    public void onVisibilityAggregated(boolean isVisible) {
+        super.onVisibilityAggregated(isVisible);
+        setLayoutTransition(isVisible ? mLayoutTransition : null);
     }
 
-    @Override
-    protected void onDetachedFromWindow() {
-        super.onDetachedFromWindow();
-
-        mLiveData.removeObserver(this);
+    /**
+     * Returns whether the current visible slice has a title/header.
+     */
+    public boolean hasHeader() {
+        return mHasHeader;
     }
 
-    private void showSlice(Slice slice) {
+    void hideSlice() {
+        mTitle.setVisibility(GONE);
+        mRow.setVisibility(GONE);
+        mHasHeader = false;
+        if (mContentChangeListener != null) {
+            mContentChangeListener.run();
+        }
+    }
 
-        ListContent lc = new ListContent(slice);
-        mHasHeader = lc.hasHeader();
-        List<SliceItem> subItems = lc.getRowItems();
+    Map<View, PendingIntent> showSlice(RowContent header, List<SliceContent> subItems) {
+        Trace.beginSection("KeyguardSliceView#showSlice");
+        mHasHeader = header != null;
+        Map<View, PendingIntent> clickActions = new HashMap<>();
+
         if (!mHasHeader) {
             mTitle.setVisibility(GONE);
         } else {
             mTitle.setVisibility(VISIBLE);
-            // If there's a header it'll be the first subitem
-            RowContent header = new RowContent(subItems.get(0), true /* showStartItem */);
+
             SliceItem mainTitle = header.getTitleItem();
             CharSequence title = mainTitle != null ? mainTitle.getText() : null;
             mTitle.setText(title);
-
-            // Check if we're already ellipsizing the text.
-            // We're going to figure out the best possible line break if not.
-            Layout layout = mTitle.getLayout();
-            if (layout != null){
-                final int lineCount = layout.getLineCount();
-                if (lineCount > 0) {
-                    if (layout.getEllipsisCount(lineCount - 1) == 0) {
-                        mTitle.setText(findBestLineBreak(title));
-                    }
-                }
+            if (header.getPrimaryAction() != null
+                    && header.getPrimaryAction().getAction() != null) {
+                clickActions.put(mTitle, header.getPrimaryAction().getAction());
             }
         }
 
-        mClickActions.clear();
         final int subItemsCount = subItems.size();
         final int blendedColor = getTextColor();
         final int startIndex = mHasHeader ? 1 : 0; // First item is header; skip it
+        mRow.setVisibility(subItemsCount > 0 ? VISIBLE : GONE);
+        LinearLayout.LayoutParams layoutParams = (LayoutParams) mRow.getLayoutParams();
+        layoutParams.gravity = Gravity.START;
+        mRow.setLayoutParams(layoutParams);
+
         for (int i = startIndex; i < subItemsCount; i++) {
-            SliceItem item = subItems.get(i);
-            RowContent rc = new RowContent(item, true /* showStartItem */);
+            RowContent rc = (RowContent) subItems.get(i);
+            SliceItem item = rc.getSliceItem();
             final Uri itemTag = item.getSlice().getUri();
             // Try to reuse the view if already exists in the layout
-            KeyguardSliceButton button = mRow.findViewWithTag(itemTag);
+            KeyguardSliceTextView button = mRow.findViewWithTag(itemTag);
             if (button == null) {
-                button = new KeyguardSliceButton(mContext);
+                button = new KeyguardSliceTextView(mContext);
                 button.setTextColor(blendedColor);
                 button.setTag(itemTag);
-            } else {
-                mRow.removeView(button);
+                final int viewIndex = i - (mHasHeader ? 1 : 0);
+                mRow.addView(button, viewIndex);
             }
-            mRow.addView(button);
 
             PendingIntent pendingIntent = null;
-            if (rc.getContentIntent() != null) {
-                pendingIntent = rc.getContentIntent().getAction();
+            if (rc.getPrimaryAction() != null) {
+                pendingIntent = rc.getPrimaryAction().getAction();
             }
-            mClickActions.put(button, pendingIntent);
+            clickActions.put(button, pendingIntent);
 
-            button.setText(rc.getTitleItem().getText());
+            final SliceItem titleItem = rc.getTitleItem();
+            button.setText(titleItem == null ? null : titleItem.getText());
+            button.setContentDescription(rc.getContentDescription());
 
             Drawable iconDrawable = null;
             SliceItem icon = SliceQuery.find(item.getSlice(),
                     android.app.slice.SliceItem.FORMAT_IMAGE);
             if (icon != null) {
+                final int iconSize = mHasHeader ? mIconSizeWithHeader : mIconSize;
                 iconDrawable = icon.getIcon().loadDrawable(mContext);
-                final int width = (int) (iconDrawable.getIntrinsicWidth()
-                        / (float) iconDrawable.getIntrinsicHeight() * mIconSize);
-                iconDrawable.setBounds(0, 0, Math.max(width, 1), mIconSize);
+                if (iconDrawable != null) {
+                    if (iconDrawable instanceof InsetDrawable) {
+                        // System icons (DnD) use insets which are fine for centered slice content
+                        // but will cause a slight indent for left/right-aligned slice views
+                        iconDrawable = ((InsetDrawable) iconDrawable).getDrawable();
+                    }
+                    final int width = (int) (iconDrawable.getIntrinsicWidth()
+                            / (float) iconDrawable.getIntrinsicHeight() * iconSize);
+                    iconDrawable.setBounds(0, 0, Math.max(width, 1), iconSize);
+                }
             }
             button.setCompoundDrawablesRelative(iconDrawable, null, null, null);
-            button.setOnClickListener(this);
+            button.setOnClickListener(mOnClickListener);
+            button.setClickable(pendingIntent != null);
         }
 
         // Removing old views
         for (int i = 0; i < mRow.getChildCount(); i++) {
             View child = mRow.getChildAt(i);
-            if (!mClickActions.containsKey(child)) {
+            if (!clickActions.containsKey(child)) {
                 mRow.removeView(child);
                 i--;
             }
         }
 
-        final int visibility = mHasHeader || subItemsCount > 0 ? VISIBLE : GONE;
-        if (visibility != getVisibility()) {
-            setVisibility(visibility);
+        if (mContentChangeListener != null) {
+            mContentChangeListener.run();
         }
+        Trace.endSection();
 
-        mListener.accept(mHasHeader);
+        return clickActions;
     }
 
-    /**
-     * Breaks a string in 2 lines where both have similar character count
-     * but first line is always longer.
-     *
-     * @param charSequence Original text.
-     * @return Optimal string.
-     */
-    private CharSequence findBestLineBreak(CharSequence charSequence) {
-        if (TextUtils.isEmpty(charSequence)) {
-            return charSequence;
-        }
-
-        String source = charSequence.toString();
-        // Ignore if there is only 1 word,
-        // or if line breaks were manually set.
-        if (source.contains("\n") || !source.contains(" ")) {
-            return source;
-        }
-
-        final String[] words = source.split(" ");
-        final StringBuilder optimalString = new StringBuilder(source.length());
-        int current = 0;
-        while (optimalString.length() < source.length() - optimalString.length()) {
-            optimalString.append(words[current]);
-            if (current < words.length - 1) {
-                optimalString.append(" ");
-            }
-            current++;
-        }
-        optimalString.append("\n");
-        for (int i = current; i < words.length; i++) {
-            optimalString.append(words[i]);
-            if (current < words.length - 1) {
-                optimalString.append(" ");
-            }
-        }
-
-        return optimalString.toString();
-    }
-
-    public void setDark(float darkAmount) {
+    public void setDarkAmount(float darkAmount) {
         mDarkAmount = darkAmount;
+        mRow.setDarkAmount(darkAmount);
         updateTextColors();
     }
 
@@ -248,85 +233,248 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
         int childCount = mRow.getChildCount();
         for (int i = 0; i < childCount; i++) {
             View v = mRow.getChildAt(i);
-            if (v instanceof Button) {
-                ((Button) v).setTextColor(blendedColor);
+            if (v instanceof TextView) {
+                ((TextView) v).setTextColor(blendedColor);
             }
         }
-    }
-
-    @Override
-    public void onClick(View v) {
-        final PendingIntent action = mClickActions.get(v);
-        if (action != null) {
-            try {
-                action.send();
-            } catch (PendingIntent.CanceledException e) {
-                Log.i(TAG, "Pending intent cancelled, nothing to launch", e);
-            }
-        }
-    }
-
-    public void setListener(Consumer<Boolean> listener) {
-        mListener = listener;
-    }
-
-    public boolean hasHeader() {
-        return mHasHeader;
     }
 
     /**
-     * LiveData observer lifecycle.
-     * @param slice the new slice content.
+     * Runnable that gets invoked every time the title or the row visibility changes.
+     * @param contentChangeListener The listener.
      */
-    @Override
-    public void onChanged(Slice slice) {
-        showSlice(slice);
+    public void setContentChangeListener(Runnable contentChangeListener) {
+        mContentChangeListener = contentChangeListener;
     }
 
-    @Override
-    public void onTuningChanged(String key, String newValue) {
-        setupUri(newValue);
-    }
-
-    public void setupUri(String uriString) {
-        if (uriString == null) {
-            uriString = KeyguardSliceProvider.KEYGUARD_SLICE_URI;
-        }
-
-        boolean wasObserving = false;
-        if (mLiveData != null && mLiveData.hasActiveObservers()) {
-            wasObserving = true;
-            mLiveData.removeObserver(this);
-        }
-
-        mKeyguardSliceUri = Uri.parse(uriString);
-        mLiveData = SliceLiveData.fromUri(mContext, mKeyguardSliceUri);
-
-        if (wasObserving) {
-            mLiveData.observeForever(this);
-        }
-    }
-
-    public int getTextColor() {
+    @VisibleForTesting
+    int getTextColor() {
         return ColorUtils.blendARGB(mTextColor, Color.WHITE, mDarkAmount);
+    }
+
+    @VisibleForTesting
+    void setTextColor(@ColorInt int textColor) {
+        mTextColor = textColor;
+        updateTextColors();
+    }
+
+    void onDensityOrFontScaleChanged() {
+        mIconSize = mContext.getResources().getDimensionPixelSize(R.dimen.widget_icon_size);
+        mIconSizeWithHeader = (int) mContext.getResources().getDimension(R.dimen.header_icon_size);
+
+        for (int i = 0; i < mRow.getChildCount(); i++) {
+            View child = mRow.getChildAt(i);
+            if (child instanceof KeyguardSliceTextView) {
+                ((KeyguardSliceTextView) child).onDensityOrFontScaleChanged();
+            }
+        }
+    }
+
+    void onOverlayChanged() {
+        for (int i = 0; i < mRow.getChildCount(); i++) {
+            View child = mRow.getChildAt(i);
+            if (child instanceof KeyguardSliceTextView) {
+                ((KeyguardSliceTextView) child).onOverlayChanged();
+            }
+        }
+    }
+    public void dump(PrintWriter pw, String[] args) {
+        pw.println("KeyguardSliceView:");
+        pw.println("  mTitle: " + (mTitle == null ? "null" : mTitle.getVisibility() == VISIBLE));
+        pw.println("  mRow: " + (mRow == null ? "null" : mRow.getVisibility() == VISIBLE));
+        pw.println("  mTextColor: " + Integer.toHexString(mTextColor));
+        pw.println("  mDarkAmount: " + mDarkAmount);
+        pw.println("  mHasHeader: " + mHasHeader);
+    }
+
+    @Override
+    public void setOnClickListener(View.OnClickListener onClickListener) {
+        mOnClickListener = onClickListener;
+        mTitle.setOnClickListener(onClickListener);
+    }
+
+    public static class Row extends LinearLayout {
+        private Set<KeyguardSliceTextView> mKeyguardSliceTextViewSet = new HashSet();
+
+        /**
+         * This view is visible in AOD, which means that the device will sleep if we
+         * don't hold a wake lock. We want to enter doze only after all views have reached
+         * their desired positions.
+         */
+        private final Animation.AnimationListener mKeepAwakeListener;
+        private LayoutTransition mLayoutTransition;
+        private float mDarkAmount;
+
+        public Row(Context context) {
+            this(context, null);
+        }
+
+        public Row(Context context, AttributeSet attrs) {
+            this(context, attrs, 0);
+        }
+
+        public Row(Context context, AttributeSet attrs, int defStyleAttr) {
+            this(context, attrs, defStyleAttr, 0);
+        }
+
+        public Row(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+            super(context, attrs, defStyleAttr, defStyleRes);
+            mKeepAwakeListener = new KeepAwakeAnimationListener(mContext);
+        }
+
+        @Override
+        protected void onFinishInflate() {
+            mLayoutTransition = new LayoutTransition();
+            mLayoutTransition.setDuration(DEFAULT_ANIM_DURATION);
+
+            PropertyValuesHolder left = PropertyValuesHolder.ofInt("left", 0, 1);
+            PropertyValuesHolder right = PropertyValuesHolder.ofInt("right", 0, 1);
+            ObjectAnimator changeAnimator = ObjectAnimator.ofPropertyValuesHolder((Object) null,
+                    left, right);
+            mLayoutTransition.setAnimator(LayoutTransition.CHANGE_APPEARING, changeAnimator);
+            mLayoutTransition.setAnimator(LayoutTransition.CHANGE_DISAPPEARING, changeAnimator);
+            mLayoutTransition.setInterpolator(LayoutTransition.CHANGE_APPEARING,
+                    Interpolators.ACCELERATE_DECELERATE);
+            mLayoutTransition.setInterpolator(LayoutTransition.CHANGE_DISAPPEARING,
+                    Interpolators.ACCELERATE_DECELERATE);
+            mLayoutTransition.setStartDelay(LayoutTransition.CHANGE_APPEARING,
+                    DEFAULT_ANIM_DURATION);
+            mLayoutTransition.setStartDelay(LayoutTransition.CHANGE_DISAPPEARING,
+                    DEFAULT_ANIM_DURATION);
+
+            ObjectAnimator appearAnimator = ObjectAnimator.ofFloat(null, "alpha", 0f, 1f);
+            mLayoutTransition.setAnimator(LayoutTransition.APPEARING, appearAnimator);
+            mLayoutTransition.setInterpolator(LayoutTransition.APPEARING, Interpolators.ALPHA_IN);
+
+            ObjectAnimator disappearAnimator = ObjectAnimator.ofFloat(null, "alpha", 1f, 0f);
+            mLayoutTransition.setInterpolator(LayoutTransition.DISAPPEARING,
+                    Interpolators.ALPHA_OUT);
+            mLayoutTransition.setDuration(LayoutTransition.DISAPPEARING, DEFAULT_ANIM_DURATION / 4);
+            mLayoutTransition.setAnimator(LayoutTransition.DISAPPEARING, disappearAnimator);
+
+            mLayoutTransition.setAnimateParentHierarchy(false);
+        }
+
+        @Override
+        public void onVisibilityAggregated(boolean isVisible) {
+            super.onVisibilityAggregated(isVisible);
+            setLayoutTransition(isVisible ? mLayoutTransition : null);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int width = MeasureSpec.getSize(widthMeasureSpec);
+            int childCount = getChildCount();
+
+            for (int i = 0; i < childCount; i++) {
+                View child = getChildAt(i);
+                if (child instanceof KeyguardSliceTextView) {
+                    ((KeyguardSliceTextView) child).setMaxWidth(Integer.MAX_VALUE);
+                }
+            }
+
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
+
+        /**
+         * Set the amount (ratio) that the device has transitioned to doze.
+         *
+         * @param darkAmount Amount of transition to doze: 1f for doze and 0f for awake.
+         */
+        public void setDarkAmount(float darkAmount) {
+            boolean isDozing = darkAmount != 0;
+            boolean wasDozing = mDarkAmount != 0;
+            if (isDozing == wasDozing) {
+                return;
+            }
+            mDarkAmount = darkAmount;
+            setLayoutAnimationListener(isDozing ? null : mKeepAwakeListener);
+        }
+
+        @Override
+        public boolean hasOverlappingRendering() {
+            return false;
+        }
+
+        @Override
+        public void addView(View view, int index) {
+            super.addView(view, index);
+
+            if (view instanceof KeyguardSliceTextView) {
+                mKeyguardSliceTextViewSet.add((KeyguardSliceTextView) view);
+            }
+        }
+
+        @Override
+        public void removeView(View view) {
+            super.removeView(view);
+            if (view instanceof KeyguardSliceTextView) {
+                mKeyguardSliceTextViewSet.remove((KeyguardSliceTextView) view);
+            }
+        }
     }
 
     /**
      * Representation of an item that appears under the clock on main keyguard message.
      */
-    private class KeyguardSliceButton extends Button {
+    @VisibleForTesting
+    static class KeyguardSliceTextView extends TextView {
 
-        public KeyguardSliceButton(Context context) {
-            super(context, null /* attrs */, 0 /* styleAttr */,
-                    com.android.keyguard.R.style.TextAppearance_Keyguard_Secondary);
-            int horizontalPadding = (int) context.getResources()
-                    .getDimension(R.dimen.widget_horizontal_padding);
-            setPadding(horizontalPadding / 2, 0, horizontalPadding / 2, 0);
-            setCompoundDrawablePadding((int) context.getResources()
-                    .getDimension(R.dimen.widget_icon_padding));
-            setMaxWidth(KeyguardSliceView.this.getWidth() / 2);
-            setMaxLines(1);
+        @StyleRes
+        private static int sStyleId = R.style.TextAppearance_Keyguard_Secondary;
+
+        KeyguardSliceTextView(Context context) {
+            super(context, null /* attrs */, 0 /* styleAttr */, sStyleId);
+            onDensityOrFontScaleChanged();
             setEllipsize(TruncateAt.END);
+        }
+
+        public void onDensityOrFontScaleChanged() {
+            updatePadding();
+        }
+
+        public void onOverlayChanged() {
+            setTextAppearance(sStyleId);
+        }
+
+        @Override
+        public void setText(CharSequence text, BufferType type) {
+            super.setText(text, type);
+            updatePadding();
+        }
+
+        private void updatePadding() {
+            boolean hasText = !TextUtils.isEmpty(getText());
+            int padding = (int) getContext().getResources()
+                    .getDimension(R.dimen.widget_horizontal_padding) / 2;
+            // orientation is vertical, so add padding to top & bottom
+            setPadding(0, padding, 0, hasText ? padding : 0);
+
+            setCompoundDrawablePadding((int) mContext.getResources()
+                    .getDimension(R.dimen.widget_icon_padding));
+        }
+
+        @Override
+        public void setTextColor(int color) {
+            super.setTextColor(color);
+            updateDrawableColors();
+        }
+
+        @Override
+        public void setCompoundDrawablesRelative(Drawable start, Drawable top, Drawable end,
+                Drawable bottom) {
+            super.setCompoundDrawablesRelative(start, top, end, bottom);
+            updateDrawableColors();
+            updatePadding();
+        }
+
+        private void updateDrawableColors() {
+            final int color = getCurrentTextColor();
+            for (Drawable drawable : getCompoundDrawables()) {
+                if (drawable != null) {
+                    drawable.setTint(color);
+                }
+            }
         }
     }
 }

@@ -20,14 +20,22 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.os.Bundle;
-import android.support.v14.preference.PreferenceDialogFragment;
-import android.support.v7.preference.DialogPreference;
 import android.util.AttributeSet;
 import android.view.View;
 
+import androidx.preference.DialogPreference;
+import androidx.preference.PreferenceDialogFragment;
+
+/**
+ * Framework version is deprecated, use the compat version instead.
+ *
+ * @deprecated
+ */
+@Deprecated
 public class CustomDialogPreference extends DialogPreference {
 
     private CustomPreferenceDialogFragment mFragment;
+    private DialogInterface.OnShowListener mOnShowListener;
 
     public CustomDialogPreference(Context context, AttributeSet attrs, int defStyleAttr,
             int defStyleRes) {
@@ -54,6 +62,10 @@ public class CustomDialogPreference extends DialogPreference {
         return mFragment != null ? mFragment.getDialog() : null;
     }
 
+    public void setOnShowListener(DialogInterface.OnShowListener listner) {
+        mOnShowListener = listner;
+    }
+
     protected void onPrepareDialogBuilder(AlertDialog.Builder builder,
             DialogInterface.OnClickListener listener) {
     }
@@ -69,6 +81,10 @@ public class CustomDialogPreference extends DialogPreference {
 
     private void setFragment(CustomPreferenceDialogFragment fragment) {
         mFragment = fragment;
+    }
+
+    private DialogInterface.OnShowListener getOnShowListener() {
+        return mOnShowListener;
     }
 
     public static class CustomPreferenceDialogFragment extends PreferenceDialogFragment {
@@ -101,6 +117,13 @@ public class CustomDialogPreference extends DialogPreference {
         protected void onBindDialogView(View view) {
             super.onBindDialogView(view);
             getCustomizablePreference().onBindDialogView(view);
+        }
+
+        @Override
+        public Dialog onCreateDialog(Bundle savedInstanceState) {
+            final Dialog dialog = super.onCreateDialog(savedInstanceState);
+            dialog.setOnShowListener(getCustomizablePreference().getOnShowListener());
+            return dialog;
         }
 
         @Override

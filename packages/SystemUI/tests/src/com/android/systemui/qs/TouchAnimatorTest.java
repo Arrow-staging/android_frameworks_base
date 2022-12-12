@@ -14,17 +14,20 @@
 
 package com.android.systemui.qs;
 
-import android.support.test.runner.AndroidJUnit4;
+import static junit.framework.Assert.assertEquals;
+
 import android.test.suitebuilder.annotation.SmallTest;
 import android.view.View;
-import com.android.systemui.qs.TouchAnimator.Listener;
-import com.android.systemui.SysuiTestCase;
-import org.junit.Before;
-import org.junit.runner.RunWith;
-import org.junit.Test;
-import org.mockito.Mockito;
 
-import static junit.framework.Assert.assertEquals;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.android.systemui.SysuiTestCase;
+import com.android.systemui.qs.TouchAnimator.Listener;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mockito;
 
 @SmallTest
 @RunWith(AndroidJUnit4.class)
@@ -50,6 +53,28 @@ public class TouchAnimatorTest extends SysuiTestCase {
 
         animator.setPosition(.5f);
         assertEquals(25f, mTestView.getX());
+
+        animator.setPosition(1);
+        assertEquals(50f, mTestView.getX());
+    }
+
+    @Test
+    public void testSetValueFloat_threeValues() {
+        TouchAnimator animator = new TouchAnimator.Builder()
+                .addFloat(mTestView, "x", 0, 20, 50)
+                .build();
+
+        animator.setPosition(0);
+        assertEquals(0f, mTestView.getX());
+
+        animator.setPosition(.25f);
+        assertEquals(10f, mTestView.getX());
+
+        animator.setPosition(.5f);
+        assertEquals(20f, mTestView.getX());
+
+        animator.setPosition(.75f);
+        assertEquals(35f, mTestView.getX());
 
         animator.setPosition(1);
         assertEquals(50f, mTestView.getX());

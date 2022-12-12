@@ -39,7 +39,7 @@ using namespace android;
 class _ZipEntryRO {
 public:
     ZipEntry entry;
-    ZipString name;
+    std::string_view name;
     void *cookie;
 
     _ZipEntryRO() : cookie(NULL) {}
@@ -96,9 +96,9 @@ ZipEntryRO ZipFileRO::findEntryByName(const char* entryName) const
 {
     _ZipEntryRO* data = new _ZipEntryRO;
 
-    data->name = ZipString(entryName);
+    data->name = entryName;
 
-    const int32_t error = FindEntry(mHandle, data->name, &(data->entry));
+    const int32_t error = FindEntry(mHandle, entryName, &(data->entry));
     if (error) {
         delete data;
         return NULL;
@@ -149,11 +149,8 @@ bool ZipFileRO::startIteration(void** cookie) {
 bool ZipFileRO::startIteration(void** cookie, const char* prefix, const char* suffix)
 {
     _ZipEntryRO* ze = new _ZipEntryRO;
-    ZipString pe(prefix ? prefix : "");
-    ZipString se(suffix ? suffix : "");
     int32_t error = StartIteration(mHandle, &(ze->cookie),
-                                   prefix ? &pe : NULL,
-                                   suffix ? &se : NULL);
+                                   prefix ? prefix : "", suffix ? suffix : "");
     if (error) {
         ALOGW("Could not start iteration over %s: %s", mFileName != NULL ? mFileName : "<null>",
                 ErrorCodeString(error));
@@ -197,14 +194,14 @@ int ZipFileRO::getEntryFileName(ZipEntryRO entry, char* buffer, size_t bufLen)
     const
 {
     const _ZipEntryRO* zipEntry = reinterpret_cast<_ZipEntryRO*>(entry);
-    const uint16_t requiredSize = zipEntry->name.name_length + 1;
+    const uint16_t requiredSize = zipEntry->name.length() + 1;
 
     if (bufLen < requiredSize) {
         ALOGW("Buffer too short, requires %d bytes for entry name", requiredSize);
         return requiredSize;
     }
 
-    memcpy(buffer, zipEntry->name.name, requiredSize - 1);
+    memcpy(buffer, zipEntry->name.data(), requiredSize - 1);
     buffer[requiredSize - 1] = '\0';
 
     return 0;
@@ -233,6 +230,29 @@ FileMap* ZipFileRO::createEntryFileMap(ZipEntryRO entry) const
     }
 
     return newMap;
+}
+
+/*
+ * Create a new incfs::IncFsFileMap object that spans the data in "entry".
+ */
+std::optional<incfs::IncFsFileMap> ZipFileRO::createEntryIncFsFileMap(ZipEntryRO entry) const
+{
+    const _ZipEntryRO *zipEntry = reinterpret_cast<_ZipEntryRO*>(entry);
+    const ZipEntry& ze = zipEntry->entry;
+    int fd = GetFileDescriptor(mHandle);
+    size_t actualLen = 0;
+
+    if (ze.method == kCompressStored) {
+        actualLen = ze.uncompressed_length;
+    } else {
+        actualLen = ze.compressed_length;
+    }
+
+    incfs::IncFsFileMap newMap;
+    if (!newMap.Create(fd, ze.offset, actualLen, mFileName)) {
+        return std::nullopt;
+    }
+    return std::move(newMap);
 }
 
 /*

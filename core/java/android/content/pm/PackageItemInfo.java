@@ -16,21 +16,28 @@
 
 package android.content.pm;
 
+import static android.text.TextUtils.SAFE_STRING_FLAG_FIRST_LINE;
+import static android.text.TextUtils.SAFE_STRING_FLAG_SINGLE_LINE;
+import static android.text.TextUtils.SAFE_STRING_FLAG_TRIM;
+import static android.text.TextUtils.makeSafeForPresentation;
+
+import android.annotation.FloatRange;
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
+import android.app.ActivityThread;
 import android.content.res.XmlResourceParser;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.UserHandle;
-import android.text.Html;
-import android.text.TextPaint;
 import android.text.TextUtils;
 import android.util.Printer;
 import android.util.proto.ProtoOutputStream;
 
+
 import java.text.Collator;
 import java.util.Comparator;
+import java.util.Objects;
 
 /**
  * Base class containing information common to all package items held by
@@ -42,7 +49,74 @@ import java.util.Comparator;
  * in the implementation of Parcelable in subclasses.
  */
 public class PackageItemInfo {
-    private static final float MAX_LABEL_SIZE_PX = 500f;
+
+    /**
+     * The maximum length of a safe label, in characters
+     *
+     * TODO(b/157997155): It may make sense to expose this publicly so that apps can check for the
+     *  value and truncate the strings/use a different label, without having to hardcode and make
+     *  assumptions about the value.
+     * @hide
+     */
+    public static final int MAX_SAFE_LABEL_LENGTH = 1000;
+
+    /** @hide */
+    public static final float DEFAULT_MAX_LABEL_SIZE_PX = 1000f;
+
+    /**
+     * Remove {@link Character#isWhitespace(int) whitespace} and non-breaking spaces from the edges
+     * of the label.
+     *
+     * @see #loadSafeLabel(PackageManager, float, int)
+     *
+     * @deprecated Use {@link TextUtils#SAFE_STRING_FLAG_TRIM} instead
+     * @hide
+     * @removed
+     */
+    @Deprecated
+    @SystemApi
+    public static final int SAFE_LABEL_FLAG_TRIM = SAFE_STRING_FLAG_TRIM;
+
+    /**
+     * Force entire string into single line of text (no newlines). Cannot be set at the same time as
+     * {@link #SAFE_LABEL_FLAG_FIRST_LINE}.
+     *
+     * @see #loadSafeLabel(PackageManager, float, int)
+     *
+     * @deprecated Use {@link TextUtils#SAFE_STRING_FLAG_SINGLE_LINE} instead
+     * @hide
+     * @removed
+     */
+    @Deprecated
+    @SystemApi
+    public static final int SAFE_LABEL_FLAG_SINGLE_LINE = SAFE_STRING_FLAG_SINGLE_LINE;
+
+    /**
+     * Return only first line of text (truncate at first newline). Cannot be set at the same time as
+     * {@link #SAFE_LABEL_FLAG_SINGLE_LINE}.
+     *
+     * @see #loadSafeLabel(PackageManager, float, int)
+     *
+     * @deprecated Use {@link TextUtils#SAFE_STRING_FLAG_FIRST_LINE} instead
+     * @hide
+     * @removed
+     */
+    @Deprecated
+    @SystemApi
+    public static final int SAFE_LABEL_FLAG_FIRST_LINE = SAFE_STRING_FLAG_FIRST_LINE;
+
+    private static volatile boolean sForceSafeLabels = false;
+
+    /**
+     * Always use {@link #loadSafeLabel safe labels} when calling {@link #loadLabel}.
+     *
+     * @hide
+     */
+    @SystemApi
+    public static void forceSafeLabels() {
+        sForceSafeLabels = true;
+    }
+
     /**
      * Public name of this item. From the "android:name" attribute.
      */
@@ -94,7 +168,7 @@ public class PackageItemInfo {
     public Bundle metaData;
 
     /**
-     * If different of UserHandle.USER_NULL, The icon of this item will be the one of that user.
+     * If different of UserHandle.USER_NULL, The icon of this item will represent that user.
      * @hide
      */
     public int showUserIcon;
@@ -128,7 +202,19 @@ public class PackageItemInfo {
      * @return Returns a CharSequence containing the item's label.  If the
      * item does not have a label, its name is returned.
      */
-    public CharSequence loadLabel(PackageManager pm) {
+    public @NonNull CharSequence loadLabel(@NonNull PackageManager pm) {
+        if (sForceSafeLabels && !Objects.equals(packageName, ActivityThread.currentPackageName())) {
+            return loadSafeLabel(pm, DEFAULT_MAX_LABEL_SIZE_PX, SAFE_STRING_FLAG_TRIM
+                    | SAFE_STRING_FLAG_FIRST_LINE);
+        } else {
+            // Trims the label string to the MAX_SAFE_LABEL_LENGTH. This is to prevent that the
+            // system is overwhelmed by an enormous string returned by the application.
+            return TextUtils.trimToSize(loadUnsafeLabel(pm), MAX_SAFE_LABEL_LENGTH);
+        }
+    }
+
+    /** {@hide} */
+    public CharSequence loadUnsafeLabel(PackageManager pm) {
         if (nonLocalizedLabel != null) {
             return nonLocalizedLabel;
         }
@@ -145,59 +231,30 @@ public class PackageItemInfo {
     }
 
     /**
-     * Same as {@link #loadLabel(PackageManager)} with the addition that
-     * the returned label is safe for being presented in the UI since it
-     * will not contain new lines and the length will be limited to a
-     * reasonable amount. This prevents a malicious party to influence UI
-     * layout via the app label misleading the user into performing a
-     * detrimental for them action. If the label is too long it will be
-     * truncated and ellipsized at the end.
-     *
-     * @param pm A PackageManager from which the label can be loaded; usually
-     * the PackageManager from which you originally retrieved this item
-     * @return Returns a CharSequence containing the item's label. If the
-     * item does not have a label, its name is returned.
-     *
      * @hide
+     * @deprecated use loadSafeLabel(PackageManager, float, int) instead
      */
     @SystemApi
+    @Deprecated
     public @NonNull CharSequence loadSafeLabel(@NonNull PackageManager pm) {
-        // loadLabel() always returns non-null
-        String label = loadLabel(pm).toString();
-        // strip HTML tags to avoid <br> and other tags overwriting original message
-        String labelStr = Html.fromHtml(label).toString();
+        return loadSafeLabel(pm, DEFAULT_MAX_LABEL_SIZE_PX, SAFE_STRING_FLAG_TRIM
+                | SAFE_STRING_FLAG_FIRST_LINE);
+    }
 
-        // If the label contains new line characters it may push the UI
-        // down to hide a part of it. Labels shouldn't have new line
-        // characters, so just truncate at the first time one is seen.
-        final int labelLength = labelStr.length();
-        int offset = 0;
-        while (offset < labelLength) {
-            final int codePoint = labelStr.codePointAt(offset);
-            final int type = Character.getType(codePoint);
-            if (type == Character.LINE_SEPARATOR
-                    || type == Character.CONTROL
-                    || type == Character.PARAGRAPH_SEPARATOR) {
-                labelStr = labelStr.substring(0, offset);
-                break;
-            }
-            // replace all non-break space to " " in order to be trimmed
-            if (type == Character.SPACE_SEPARATOR) {
-                labelStr = labelStr.substring(0, offset) + " " + labelStr.substring(offset +
-                        Character.charCount(codePoint));
-            }
-            offset += Character.charCount(codePoint);
-        }
+    /**
+     * Calls {@link TextUtils#makeSafeForPresentation} for the label of this item.
+     *
+     * <p>For parameters see {@link TextUtils#makeSafeForPresentation}.
+     *
+     * @hide
+    */
+    @SystemApi
+    public @NonNull CharSequence loadSafeLabel(@NonNull PackageManager pm,
+            @FloatRange(from = 0) float ellipsizeDip, @TextUtils.SafeStringFlags int flags) {
+        Objects.requireNonNull(pm);
 
-        labelStr = labelStr.trim();
-        if (labelStr.isEmpty()) {
-            return packageName;
-        }
-        TextPaint paint = new TextPaint();
-        paint.setTextSize(42);
-
-        return TextUtils.ellipsize(labelStr, paint, MAX_LABEL_SIZE_PX,
-                TextUtils.TruncateAt.END);
+        return makeSafeForPresentation(loadUnsafeLabel(pm).toString(), MAX_SAFE_LABEL_LENGTH,
+                ellipsizeDip, flags);
     }
 
     /**
@@ -376,8 +433,8 @@ public class PackageItemInfo {
     }
 
     public void writeToParcel(Parcel dest, int parcelableFlags) {
-        dest.writeString(name);
-        dest.writeString(packageName);
+        dest.writeString8(name);
+        dest.writeString8(packageName);
         dest.writeInt(labelRes);
         TextUtils.writeToParcel(nonLocalizedLabel, dest, parcelableFlags);
         dest.writeInt(icon);
@@ -390,24 +447,24 @@ public class PackageItemInfo {
     /**
      * @hide
      */
-    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+    public void dumpDebug(ProtoOutputStream proto, long fieldId, int dumpFlags) {
         long token = proto.start(fieldId);
         if (name != null) {
             proto.write(PackageItemInfoProto.NAME, name);
         }
         proto.write(PackageItemInfoProto.PACKAGE_NAME, packageName);
-        if (labelRes != 0 || nonLocalizedLabel != null || icon != 0 || banner != 0) {
-            proto.write(PackageItemInfoProto.LABEL_RES, labelRes);
+        proto.write(PackageItemInfoProto.LABEL_RES, labelRes);
+        if (nonLocalizedLabel != null) {
             proto.write(PackageItemInfoProto.NON_LOCALIZED_LABEL, nonLocalizedLabel.toString());
-            proto.write(PackageItemInfoProto.ICON, icon);
-            proto.write(PackageItemInfoProto.BANNER, banner);
         }
+        proto.write(PackageItemInfoProto.ICON, icon);
+        proto.write(PackageItemInfoProto.BANNER, banner);
         proto.end(token);
     }
 
     protected PackageItemInfo(Parcel source) {
-        name = source.readString();
-        packageName = source.readString();
+        name = source.readString8();
+        packageName = source.readString8();
         labelRes = source.readInt();
         nonLocalizedLabel
                 = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(source);

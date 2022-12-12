@@ -26,8 +26,7 @@ import android.os.Parcelable;
 import android.util.Slog;
 import android.view.autofill.AutofillValue;
 
-import com.android.internal.util.Preconditions;
-
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,7 +36,7 @@ import java.util.regex.Pattern;
  * <p>For example, to remove spaces from groups of 4-digits in a credit card:
  *
  * <pre class="prettyprint">
- * new TextValueSanitizer(Pattern.compile("^(\\d{4})\\s?(\\d{4})\\s?(\\d{4})\\s?(\\d{4})$",
+ * new TextValueSanitizer(Pattern.compile("^(\\d{4})\\s?(\\d{4})\\s?(\\d{4})\\s?(\\d{4})$"),
  *     "$1$2$3$4")
  * </pre>
  */
@@ -57,8 +56,8 @@ public final class TextValueSanitizer extends InternalSanitizer implements
      * group substitution ({@code $1} for 1st group match, {@code $2} for 2nd, etc).
      */
     public TextValueSanitizer(@NonNull Pattern regex, @NonNull String subst) {
-        mRegex = Preconditions.checkNotNull(regex);
-        mSubst = Preconditions.checkNotNull(subst);
+        mRegex = Objects.requireNonNull(regex);
+        mSubst = Objects.requireNonNull(subst);
     }
 
     /** @hide */
@@ -116,11 +115,11 @@ public final class TextValueSanitizer extends InternalSanitizer implements
         parcel.writeString(mSubst);
     }
 
-    public static final Parcelable.Creator<TextValueSanitizer> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<TextValueSanitizer> CREATOR =
             new Parcelable.Creator<TextValueSanitizer>() {
         @Override
         public TextValueSanitizer createFromParcel(Parcel parcel) {
-            return new TextValueSanitizer((Pattern) parcel.readSerializable(), parcel.readString());
+            return new TextValueSanitizer((Pattern) parcel.readSerializable(java.util.regex.Pattern.class.getClassLoader(), java.util.regex.Pattern.class), parcel.readString());
         }
 
         @Override

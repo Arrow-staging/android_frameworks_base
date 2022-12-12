@@ -28,6 +28,7 @@ import android.widget.RemoteViews;
 import com.android.internal.util.Preconditions;
 
 import java.util.ArrayList;
+import java.util.Objects;
 
 /**
  * Defines actions to be applied to a {@link RemoteViews template presentation}.
@@ -82,6 +83,9 @@ public final class BatchUpdates implements Parcelable {
          * {@link #transformChild(int, Transformation) transformations} are applied to the children
          * views.
          *
+         * <p>Theme does not work with RemoteViews layout. Avoid hardcoded text color
+         * or background color: Autofill on different platforms may have different themes.
+         *
          * @param updates a {@link RemoteViews} with the updated actions to be applied in the
          * underlying presentation template.
          *
@@ -91,7 +95,7 @@ public final class BatchUpdates implements Parcelable {
          */
         public Builder updateTemplate(@NonNull RemoteViews updates) {
             throwIfDestroyed();
-            mUpdates = Preconditions.checkNotNull(updates);
+            mUpdates = Objects.requireNonNull(updates);
             return this;
         }
 
@@ -114,7 +118,7 @@ public final class BatchUpdates implements Parcelable {
         public Builder transformChild(int id, @NonNull Transformation transformation) {
             throwIfDestroyed();
             Preconditions.checkArgument((transformation instanceof InternalTransformation),
-                    "not provided by Android System: " + transformation);
+                    "not provided by Android System: %s", transformation);
             if (mTransformations == null) {
                 mTransformations = new ArrayList<>();
             }
@@ -184,7 +188,7 @@ public final class BatchUpdates implements Parcelable {
         }
         dest.writeParcelable(mUpdates, flags);
     }
-    public static final Parcelable.Creator<BatchUpdates> CREATOR =
+    public static final @android.annotation.NonNull Parcelable.Creator<BatchUpdates> CREATOR =
             new Parcelable.Creator<BatchUpdates>() {
         @Override
         public BatchUpdates createFromParcel(Parcel parcel) {
@@ -201,7 +205,7 @@ public final class BatchUpdates implements Parcelable {
                     builder.transformChild(ids[i], values[i]);
                 }
             }
-            final RemoteViews updates = parcel.readParcelable(null);
+            final RemoteViews updates = parcel.readParcelable(null, android.widget.RemoteViews.class);
             if (updates != null) {
                 builder.updateTemplate(updates);
             }

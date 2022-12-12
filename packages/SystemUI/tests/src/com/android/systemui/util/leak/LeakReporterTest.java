@@ -24,8 +24,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import android.app.NotificationManager;
-import android.support.test.filters.MediumTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.MediumTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
 
@@ -62,7 +63,7 @@ public class LeakReporterTest extends SysuiTestCase {
         doAnswer(invocation -> {
             invocation.<PrintWriter>getArgument(1).println("test");
             return null;
-        }).when(mLeakDetector).dump(any(), any(), any());
+        }).when(mLeakDetector).dump(any(), any());
 
         mLeakReporter = new LeakReporter(mContext, mLeakDetector, "test@example.com");
     }

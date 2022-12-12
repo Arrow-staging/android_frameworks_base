@@ -84,21 +84,31 @@ static int getFdCount() {
 }
 
 static jlong nativeCreate(JNIEnv* env, jclass clazz, jstring nameObj, jint cursorWindowSize) {
+    status_t status;
     String8 name;
+    CursorWindow* window;
+
     const char* nameStr = env->GetStringUTFChars(nameObj, NULL);
     name.setTo(nameStr);
     env->ReleaseStringUTFChars(nameObj, nameStr);
 
-    CursorWindow* window;
-    status_t status = CursorWindow::create(name, cursorWindowSize, &window);
+    if (cursorWindowSize < 0) {
+        status = INVALID_OPERATION;
+        goto fail;
+    }
+    status = CursorWindow::create(name, cursorWindowSize, &window);
     if (status || !window) {
-        ALOGE("Could not allocate CursorWindow '%s' of size %d due to error %d.",
-                name.string(), cursorWindowSize, status);
-        return 0;
+        goto fail;
     }
 
     LOG_WINDOW("nativeInitializeEmpty: window = %p", window);
     return reinterpret_cast<jlong>(window);
+
+fail:
+    jniThrowExceptionFmt(env, "android/database/CursorWindowAllocationException",
+                         "Could not allocate CursorWindow '%s' of size %d due to error %d.",
+                         name.string(), cursorWindowSize, status);
+    return 0;
 }
 
 static jlong nativeCreateFromParcel(JNIEnv* env, jclass clazz, jobject parcelObj) {
@@ -107,7 +117,9 @@ static jlong nativeCreateFromParcel(JNIEnv* env, jclass clazz, jobject parcelObj
     CursorWindow* window;
     status_t status = CursorWindow::createFromParcel(parcel, &window);
     if (status || !window) {
-        ALOGE("Could not create CursorWindow from Parcel due to error %d, process fd count=%d",
+        jniThrowExceptionFmt(env,
+                "android/database/CursorWindowAllocationException",
+                "Could not create CursorWindow from Parcel due to error %d, process fd count=%d",
                 status, getFdCount());
         return 0;
     }
@@ -462,7 +474,7 @@ static jboolean nativePutString(JNIEnv* env, jclass clazz, jlong windowPtr,
         return false;
     }
 
-    LOG_WINDOW("%d,%d is TEXT with %u bytes", row, column, sizeIncludingNull);
+    LOG_WINDOW("%d,%d is TEXT with %zu bytes", row, column, sizeIncludingNull);
     return true;
 }
 
@@ -476,7 +488,7 @@ static jboolean nativePutLong(JNIEnv* env, jclass clazz, jlong windowPtr,
         return false;
     }
 
-    LOG_WINDOW("%d,%d is INTEGER 0x%016llx", row, column, value);
+    LOG_WINDOW("%d,%d is INTEGER %" PRId64, row, column, value);
     return true;
 }
 

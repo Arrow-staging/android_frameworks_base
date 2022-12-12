@@ -24,9 +24,10 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.service.settings.suggestions.ISuggestionService;
 import android.service.settings.suggestions.Suggestion;
-import android.support.annotation.Nullable;
-import android.support.annotation.WorkerThread;
 import android.util.Log;
+
+import androidx.annotation.Nullable;
+import androidx.annotation.WorkerThread;
 
 import java.util.List;
 
@@ -107,7 +108,7 @@ public class SuggestionController {
         } catch (NullPointerException e) {
             Log.w(TAG, "mRemote service detached before able to query", e);
             return null;
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             Log.w(TAG, "Error when calling getSuggestion()", e);
             return null;
         }
@@ -120,7 +121,7 @@ public class SuggestionController {
         }
         try {
             mRemoteService.dismissSuggestion(suggestion);
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             Log.w(TAG, "Error when calling dismissSuggestion()", e);
         }
     }
@@ -133,7 +134,7 @@ public class SuggestionController {
 
         try {
             mRemoteService.launchSuggestion(suggestion);
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             Log.w(TAG, "Error when calling launchSuggestion()", e);
         }
     }

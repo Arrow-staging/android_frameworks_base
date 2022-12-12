@@ -16,26 +16,28 @@
 
 #include "RenderNode.h"
 
-#include "BakedOpRenderer.h"
 #include "DamageAccumulator.h"
 #include "Debug.h"
-#include "RecordedOp.h"
+#include "Properties.h"
 #include "TreeInfo.h"
 #include "VectorDrawable.h"
-#include "renderstate/RenderState.h"
+#include "private/hwui/WebViewFunctor.h"
+#ifdef __ANDROID__
 #include "renderthread/CanvasContext.h"
-#include "utils/FatVector.h"
+#else
+#include "DamageAccumulator.h"
+#include "pipeline/skia/SkiaDisplayList.h"
+#endif
+#include <gui/TraceUtils.h>
 #include "utils/MathUtils.h"
 #include "utils/StringUtils.h"
-#include "utils/TraceUtils.h"
-
-#include "protos/ProtoHelpers.h"
-#include "protos/hwui.pb.h"
 
 #include <SkPathOps.h>
 #include <algorithm>
+#include <atomic>
 #include <sstream>
 #include <string>
+#include <ui/FatVector.h>
 
 namespace android {
 namespace uirenderer {
@@ -52,8 +54,14 @@ private:
     TreeInfo* mTreeInfo;
 };
 
+static int64_t generateId() {
+    static std::atomic<int64_t> sNextId{1};
+    return sNextId++;
+}
+
 RenderNode::RenderNode()
-        : mDirtyPropertyFields(0)
+        : mUniqueId(generateId())
+        , mDirtyPropertyFields(0)
         , mNeedsDisplayListSync(false)
         , mDisplayList(nullptr)
         , mStagingDisplayList(nullptr)
@@ -63,15 +71,17 @@ RenderNode::RenderNode()
 RenderNode::~RenderNode() {
     ImmediateRemoved observer(nullptr);
     deleteDisplayList(observer);
-    delete mStagingDisplayList;
     LOG_ALWAYS_FATAL_IF(hasLayer(), "layer missed detachment!");
 }
 
-void RenderNode::setStagingDisplayList(DisplayList* displayList) {
-    mValid = (displayList != nullptr);
+void RenderNode::setStagingDisplayList(DisplayList&& newData) {
+    mValid = newData.isValid();
     mNeedsDisplayListSync = true;
-    delete mStagingDisplayList;
-    mStagingDisplayList = displayList;
+    mStagingDisplayList = std::move(newData);
+}
+
+void RenderNode::discardStagingDisplayList() {
+    setStagingDisplayList(DisplayList());
 }
 
 /**
@@ -94,105 +104,34 @@ void RenderNode::output(std::ostream& output, uint32_t level) {
 
     properties().debugOutputProperties(output, level + 1);
 
-    if (mDisplayList) {
-        mDisplayList->output(output, level);
-    }
+    mDisplayList.output(output, level);
     output << std::string(level * 2, ' ') << "/RenderNode(" << getName() << " " << this << ")";
     output << std::endl;
 }
 
-void RenderNode::copyTo(proto::RenderNode* pnode) {
-    pnode->set_id(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this)));
-    pnode->set_name(mName.string(), mName.length());
-
-    proto::RenderProperties* pprops = pnode->mutable_properties();
-    pprops->set_left(properties().getLeft());
-    pprops->set_top(properties().getTop());
-    pprops->set_right(properties().getRight());
-    pprops->set_bottom(properties().getBottom());
-    pprops->set_clip_flags(properties().getClippingFlags());
-    pprops->set_alpha(properties().getAlpha());
-    pprops->set_translation_x(properties().getTranslationX());
-    pprops->set_translation_y(properties().getTranslationY());
-    pprops->set_translation_z(properties().getTranslationZ());
-    pprops->set_elevation(properties().getElevation());
-    pprops->set_rotation(properties().getRotation());
-    pprops->set_rotation_x(properties().getRotationX());
-    pprops->set_rotation_y(properties().getRotationY());
-    pprops->set_scale_x(properties().getScaleX());
-    pprops->set_scale_y(properties().getScaleY());
-    pprops->set_pivot_x(properties().getPivotX());
-    pprops->set_pivot_y(properties().getPivotY());
-    pprops->set_has_overlapping_rendering(properties().getHasOverlappingRendering());
-    pprops->set_pivot_explicitly_set(properties().isPivotExplicitlySet());
-    pprops->set_project_backwards(properties().getProjectBackwards());
-    pprops->set_projection_receiver(properties().isProjectionReceiver());
-    set(pprops->mutable_clip_bounds(), properties().getClipBounds());
-
-    const Outline& outline = properties().getOutline();
-    if (outline.getType() != Outline::Type::None) {
-        proto::Outline* poutline = pprops->mutable_outline();
-        poutline->clear_path();
-        if (outline.getType() == Outline::Type::Empty) {
-            poutline->set_type(proto::Outline_Type_Empty);
-        } else if (outline.getType() == Outline::Type::ConvexPath) {
-            poutline->set_type(proto::Outline_Type_ConvexPath);
-            if (const SkPath* path = outline.getPath()) {
-                set(poutline->mutable_path(), *path);
-            }
-        } else if (outline.getType() == Outline::Type::RoundRect) {
-            poutline->set_type(proto::Outline_Type_RoundRect);
-        } else {
-            ALOGW("Uknown outline type! %d", static_cast<int>(outline.getType()));
-            poutline->set_type(proto::Outline_Type_None);
-        }
-        poutline->set_should_clip(outline.getShouldClip());
-        poutline->set_alpha(outline.getAlpha());
-        poutline->set_radius(outline.getRadius());
-        set(poutline->mutable_bounds(), outline.getBounds());
-    } else {
-        pprops->clear_outline();
-    }
-
-    const RevealClip& revealClip = properties().getRevealClip();
-    if (revealClip.willClip()) {
-        proto::RevealClip* prevealClip = pprops->mutable_reveal_clip();
-        prevealClip->set_x(revealClip.getX());
-        prevealClip->set_y(revealClip.getY());
-        prevealClip->set_radius(revealClip.getRadius());
-    } else {
-        pprops->clear_reveal_clip();
-    }
-
-    pnode->clear_children();
-    if (mDisplayList) {
-        for (auto&& child : mDisplayList->getChildren()) {
-            child->renderNode->copyTo(pnode->add_children());
-        }
-    }
-}
-
-int RenderNode::getDebugSize() {
+int RenderNode::getUsageSize() {
     int size = sizeof(RenderNode);
-    if (mStagingDisplayList) {
-        size += mStagingDisplayList->getUsedSize();
-    }
-    if (mDisplayList && mDisplayList != mStagingDisplayList) {
-        size += mDisplayList->getUsedSize();
-    }
+    size += mStagingDisplayList.getUsedSize();
+    size += mDisplayList.getUsedSize();
     return size;
 }
+
+int RenderNode::getAllocatedSize() {
+    int size = sizeof(RenderNode);
+    size += mStagingDisplayList.getAllocatedSize();
+    size += mDisplayList.getAllocatedSize();
+    return size;
+}
+
 
 void RenderNode::prepareTree(TreeInfo& info) {
     ATRACE_CALL();
     LOG_ALWAYS_FATAL_IF(!info.damageAccumulator, "DamageAccumulator missing");
     MarkAndSweepRemoved observer(&info);
 
-    // The OpenGL renderer reserves the stencil buffer for overdraw debugging.  Functors
-    // will need to be drawn in a layer.
-    bool functorsNeedLayer = Properties::debugOverdraw && !Properties::isSkiaEnabled();
-
-    prepareTreeImpl(observer, info, functorsNeedLayer);
+    const int before = info.disableForceDark;
+    prepareTreeImpl(observer, info, false);
+    LOG_ALWAYS_FATAL_IF(before != info.disableForceDark, "Mis-matched force dark");
 }
 
 void RenderNode::addAnimator(const sp<BaseRenderNodeAnimator>& animator) {
@@ -205,6 +144,7 @@ void RenderNode::removeAnimator(const sp<BaseRenderNodeAnimator>& animator) {
 
 void RenderNode::damageSelf(TreeInfo& info) {
     if (isRenderable()) {
+        mDamageGenerationId = info.damageGenerationId;
         if (properties().getClipDamageToBounds()) {
             info.damageAccumulator->dirty(0, 0, properties().getWidth(), properties().getHeight());
         } else {
@@ -231,6 +171,7 @@ void RenderNode::prepareLayer(TreeInfo& info, uint32_t dirtyMask) {
 }
 
 void RenderNode::pushLayerUpdate(TreeInfo& info) {
+#ifdef __ANDROID__ // Layoutlib does not support CanvasContext and Layers
     LayerType layerType = properties().effectiveLayerType();
     // If we are not a layer OR we cannot be rendered (eg, view was detached)
     // we need to destroy any Layers we may have had previously
@@ -238,40 +179,31 @@ void RenderNode::pushLayerUpdate(TreeInfo& info) {
         CC_UNLIKELY(properties().getWidth() == 0) || CC_UNLIKELY(properties().getHeight() == 0) ||
         CC_UNLIKELY(!properties().fitsOnLayer())) {
         if (CC_UNLIKELY(hasLayer())) {
-            renderthread::CanvasContext::destroyLayer(this);
+            this->setLayerSurface(nullptr);
         }
         return;
     }
 
-    if (info.canvasContext.createOrUpdateLayer(this, *info.damageAccumulator)) {
+    if (info.canvasContext.createOrUpdateLayer(this, *info.damageAccumulator, info.errorHandler)) {
         damageSelf(info);
     }
 
     if (!hasLayer()) {
-        Caches::getInstance().dumpMemoryUsage();
-        if (info.errorHandler) {
-            std::ostringstream err;
-            err << "Unable to create layer for " << getName();
-            const int maxTextureSize = Caches::getInstance().maxTextureSize;
-            if (getWidth() > maxTextureSize || getHeight() > maxTextureSize) {
-                err << ", size " << getWidth() << "x" << getHeight() << " exceeds max size "
-                    << maxTextureSize;
-            } else {
-                err << ", see logcat for more info";
-            }
-            info.errorHandler->onError(err.str());
-        }
         return;
     }
 
     SkRect dirty;
     info.damageAccumulator->peekAtDirty(&dirty);
     info.layerUpdateQueue->enqueueLayerWithDamage(this, dirty);
+    if (!dirty.isEmpty()) {
+      mStretchMask.markDirty();
+    }
 
     // There might be prefetched layers that need to be accounted for.
     // That might be us, so tell CanvasContext that this layer is in the
     // tree and should not be destroyed.
     info.canvasContext.markLayerInUse(this);
+#endif
 }
 
 /**
@@ -283,11 +215,25 @@ void RenderNode::pushLayerUpdate(TreeInfo& info) {
  * stencil buffer may be needed. Views that use a functor to draw will be forced onto a layer.
  */
 void RenderNode::prepareTreeImpl(TreeObserver& observer, TreeInfo& info, bool functorsNeedLayer) {
+    if (mDamageGenerationId == info.damageGenerationId) {
+        // We hit the same node a second time in the same tree. We don't know the minimal
+        // damage rect anymore, so just push the biggest we can onto our parent's transform
+        // We push directly onto parent in case we are clipped to bounds but have moved position.
+        info.damageAccumulator->dirty(DIRTY_MIN, DIRTY_MIN, DIRTY_MAX, DIRTY_MAX);
+    }
     info.damageAccumulator->pushTransform(this);
 
     if (info.mode == TreeInfo::MODE_FULL) {
         pushStagingPropertiesChanges(info);
     }
+
+    if (!mProperties.getAllowForceDark()) {
+        info.disableForceDark++;
+    }
+    if (!mProperties.layerProperties().getStretchEffect().isEmpty()) {
+        info.stretchEffectCount++;
+    }
+
     uint32_t animatorDirtyMask = 0;
     if (CC_LIKELY(info.runAnimations)) {
         animatorDirtyMask = mAnimatorManager.animate(info);
@@ -295,9 +241,9 @@ void RenderNode::prepareTreeImpl(TreeObserver& observer, TreeInfo& info, bool fu
 
     bool willHaveFunctor = false;
     if (info.mode == TreeInfo::MODE_FULL && mStagingDisplayList) {
-        willHaveFunctor = mStagingDisplayList->hasFunctor();
+        willHaveFunctor = mStagingDisplayList.hasFunctor();
     } else if (mDisplayList) {
-        willHaveFunctor = mDisplayList->hasFunctor();
+        willHaveFunctor = mDisplayList.hasFunctor();
     }
     bool childFunctorsNeedLayer =
             mProperties.prepareForFunctorPresence(willHaveFunctor, functorsNeedLayer);
@@ -312,19 +258,29 @@ void RenderNode::prepareTreeImpl(TreeObserver& observer, TreeInfo& info, bool fu
     }
 
     if (mDisplayList) {
-        info.out.hasFunctors |= mDisplayList->hasFunctor();
-        bool isDirty = mDisplayList->prepareListAndChildren(
+        info.out.hasFunctors |= mDisplayList.hasFunctor();
+        mHasHolePunches = mDisplayList.hasHolePunches();
+        bool isDirty = mDisplayList.prepareListAndChildren(
                 observer, info, childFunctorsNeedLayer,
-                [](RenderNode* child, TreeObserver& observer, TreeInfo& info,
-                   bool functorsNeedLayer) {
+                [this](RenderNode* child, TreeObserver& observer, TreeInfo& info,
+                       bool functorsNeedLayer) {
                     child->prepareTreeImpl(observer, info, functorsNeedLayer);
+                    mHasHolePunches |= child->hasHolePunches();
                 });
         if (isDirty) {
             damageSelf(info);
         }
+    } else {
+        mHasHolePunches = false;
     }
     pushLayerUpdate(info);
 
+    if (!mProperties.getAllowForceDark()) {
+        info.disableForceDark--;
+    }
+    if (!mProperties.layerProperties().getStretchEffect().isEmpty()) {
+        info.stretchEffectCount--;
+    }
     info.damageAccumulator->popTransform();
 }
 
@@ -333,6 +289,12 @@ void RenderNode::syncProperties() {
 }
 
 void RenderNode::pushStagingPropertiesChanges(TreeInfo& info) {
+    if (mPositionListenerDirty) {
+        mPositionListener = std::move(mStagingPositionListener);
+        mStagingPositionListener = nullptr;
+        mPositionListenerDirty = false;
+    }
+
     // Push the animators first so that setupStartValueIfNecessary() is called
     // before properties() is trampled by stagingProperties(), as they are
     // required by some animators.
@@ -344,6 +306,18 @@ void RenderNode::pushStagingPropertiesChanges(TreeInfo& info) {
         damageSelf(info);
         info.damageAccumulator->popTransform();
         syncProperties();
+
+        auto& layerProperties = mProperties.layerProperties();
+        const StretchEffect& stagingStretch = layerProperties.getStretchEffect();
+        if (stagingStretch.isEmpty()) {
+            mStretchMask.clear();
+        }
+
+        if (layerProperties.getImageFilter() == nullptr) {
+            mSnapshotResult.snapshot = nullptr;
+            mTargetImageFilter = nullptr;
+        }
+
         // We could try to be clever and only re-damage if the matrix changed.
         // However, we don't need to worry about that. The cost of over-damaging
         // here is only going to be a single additional map rect of this node
@@ -354,18 +328,102 @@ void RenderNode::pushStagingPropertiesChanges(TreeInfo& info) {
     }
 }
 
+std::optional<RenderNode::SnapshotResult> RenderNode::updateSnapshotIfRequired(
+    GrRecordingContext* context,
+    const SkImageFilter* imageFilter,
+    const SkIRect& clipBounds
+) {
+    auto* layerSurface = getLayerSurface();
+    if (layerSurface == nullptr) {
+        return std::nullopt;
+    }
+
+    sk_sp<SkImage> snapshot = layerSurface->makeImageSnapshot();
+    const auto subset = SkIRect::MakeWH(properties().getWidth(),
+                                        properties().getHeight());
+    uint32_t layerSurfaceGenerationId = layerSurface->generationID();
+    // If we don't have an ImageFilter just return the snapshot
+    if (imageFilter == nullptr) {
+        mSnapshotResult.snapshot = snapshot;
+        mSnapshotResult.outSubset = subset;
+        mSnapshotResult.outOffset = SkIPoint::Make(0.0f, 0.0f);
+        mImageFilterClipBounds = clipBounds;
+        mTargetImageFilter = nullptr;
+        mTargetImageFilterLayerSurfaceGenerationId = 0;
+    } else if (mSnapshotResult.snapshot == nullptr || imageFilter != mTargetImageFilter.get() ||
+               mImageFilterClipBounds != clipBounds ||
+               mTargetImageFilterLayerSurfaceGenerationId != layerSurfaceGenerationId) {
+        // Otherwise create a new snapshot with the given filter and snapshot
+        mSnapshotResult.snapshot =
+                snapshot->makeWithFilter(context,
+                                         imageFilter,
+                                         subset,
+                                         clipBounds,
+                                         &mSnapshotResult.outSubset,
+                                         &mSnapshotResult.outOffset);
+        mTargetImageFilter = sk_ref_sp(imageFilter);
+        mImageFilterClipBounds = clipBounds;
+        mTargetImageFilterLayerSurfaceGenerationId = layerSurfaceGenerationId;
+    }
+
+    return mSnapshotResult;
+}
+
 void RenderNode::syncDisplayList(TreeObserver& observer, TreeInfo* info) {
     // Make sure we inc first so that we don't fluctuate between 0 and 1,
     // which would thrash the layer cache
     if (mStagingDisplayList) {
-        mStagingDisplayList->updateChildren([](RenderNode* child) { child->incParentRefCount(); });
+        mStagingDisplayList.updateChildren([](RenderNode* child) { child->incParentRefCount(); });
     }
     deleteDisplayList(observer, info);
-    mDisplayList = mStagingDisplayList;
-    mStagingDisplayList = nullptr;
+    mDisplayList = std::move(mStagingDisplayList);
     if (mDisplayList) {
-        mDisplayList->syncContents();
+        WebViewSyncData syncData {
+            .applyForceDark = info && !info->disableForceDark
+        };
+        mDisplayList.syncContents(syncData);
+        handleForceDark(info);
     }
+}
+
+void RenderNode::handleForceDark(android::uirenderer::TreeInfo *info) {
+    if (CC_LIKELY(!info || info->disableForceDark)) {
+        return;
+    }
+    auto usage = usageHint();
+    FatVector<RenderNode*, 6> children;
+    mDisplayList.updateChildren([&children](RenderNode* node) {
+        children.push_back(node);
+    });
+    if (mDisplayList.hasText()) {
+        usage = UsageHint::Foreground;
+    }
+    if (usage == UsageHint::Unknown) {
+        if (children.size() > 1) {
+            usage = UsageHint::Background;
+        } else if (children.size() == 1 &&
+                children.front()->usageHint() !=
+                        UsageHint::Background) {
+            usage = UsageHint::Background;
+        }
+    }
+    if (children.size() > 1) {
+        // Crude overlap check
+        SkRect drawn = SkRect::MakeEmpty();
+        for (auto iter = children.rbegin(); iter != children.rend(); ++iter) {
+            const auto& child = *iter;
+            // We use stagingProperties here because we haven't yet sync'd the children
+            SkRect bounds = SkRect::MakeXYWH(child->stagingProperties().getX(), child->stagingProperties().getY(),
+                    child->stagingProperties().getWidth(), child->stagingProperties().getHeight());
+            if (bounds.contains(drawn)) {
+                // This contains everything drawn after it, so make it a background
+                child->setUsageHint(UsageHint::Background);
+            }
+            drawn.join(bounds);
+        }
+    }
+    mDisplayList.applyColorTransform(
+            usage == UsageHint::Background ? ColorTransform::Dark : ColorTransform::Light);
 }
 
 void RenderNode::pushStagingDisplayListChanges(TreeObserver& observer, TreeInfo& info) {
@@ -381,20 +439,17 @@ void RenderNode::pushStagingDisplayListChanges(TreeObserver& observer, TreeInfo&
 
 void RenderNode::deleteDisplayList(TreeObserver& observer, TreeInfo* info) {
     if (mDisplayList) {
-        mDisplayList->updateChildren(
+        mDisplayList.updateChildren(
                 [&observer, info](RenderNode* child) { child->decParentRefCount(observer, info); });
-        if (!mDisplayList->reuseDisplayList(this, info ? &info->canvasContext : nullptr)) {
-            delete mDisplayList;
-        }
+        mDisplayList.clear(this);
     }
-    mDisplayList = nullptr;
 }
 
 void RenderNode::destroyHardwareResources(TreeInfo* info) {
     if (hasLayer()) {
-        renderthread::CanvasContext::destroyLayer(this);
+        this->setLayerSurface(nullptr);
     }
-    setStagingDisplayList(nullptr);
+    discardStagingDisplayList();
 
     ImmediateRemoved observer(info);
     deleteDisplayList(observer, info);
@@ -402,10 +457,11 @@ void RenderNode::destroyHardwareResources(TreeInfo* info) {
 
 void RenderNode::destroyLayers() {
     if (hasLayer()) {
-        renderthread::CanvasContext::destroyLayer(this);
+        this->setLayerSurface(nullptr);
     }
+
     if (mDisplayList) {
-        mDisplayList->updateChildren([](RenderNode* child) { child->destroyLayers(); });
+        mDisplayList.updateChildren([](RenderNode* child) { child->destroyLayers(); });
     }
 }
 
@@ -421,6 +477,9 @@ void RenderNode::decParentRefCount(TreeObserver& observer, TreeInfo* info) {
 }
 
 void RenderNode::onRemovedFromTree(TreeInfo* info) {
+    if (Properties::enableWebViewOverlays && mDisplayList) {
+        mDisplayList.onRemovedFromTree();
+    }
     destroyHardwareResources(info);
 }
 
@@ -470,76 +529,12 @@ void RenderNode::applyViewPropertyTransforms(mat4& matrix, bool true3dTransform)
             }
         }
     }
-}
 
-/**
- * Organizes the DisplayList hierarchy to prepare for background projection reordering.
- *
- * This should be called before a call to defer() or drawDisplayList()
- *
- * Each DisplayList that serves as a 3d root builds its list of composited children,
- * which are flagged to not draw in the standard draw loop.
- */
-void RenderNode::computeOrdering() {
-    ATRACE_CALL();
-    mProjectedNodes.clear();
-
-    // TODO: create temporary DDLOp and call computeOrderingImpl on top DisplayList so that
-    // transform properties are applied correctly to top level children
-    if (mDisplayList == nullptr) return;
-    for (unsigned int i = 0; i < mDisplayList->getChildren().size(); i++) {
-        RenderNodeOp* childOp = mDisplayList->getChildren()[i];
-        childOp->renderNode->computeOrderingImpl(childOp, &mProjectedNodes, &mat4::identity());
-    }
-}
-
-void RenderNode::computeOrderingImpl(
-        RenderNodeOp* opState, std::vector<RenderNodeOp*>* compositedChildrenOfProjectionSurface,
-        const mat4* transformFromProjectionSurface) {
-    mProjectedNodes.clear();
-    if (mDisplayList == nullptr || mDisplayList->isEmpty()) return;
-
-    // TODO: should avoid this calculation in most cases
-    // TODO: just calculate single matrix, down to all leaf composited elements
-    Matrix4 localTransformFromProjectionSurface(*transformFromProjectionSurface);
-    localTransformFromProjectionSurface.multiply(opState->localMatrix);
-
-    if (properties().getProjectBackwards()) {
-        // composited projectee, flag for out of order draw, save matrix, and store in proj surface
-        opState->skipInOrderDraw = true;
-        opState->transformFromCompositingAncestor = localTransformFromProjectionSurface;
-        compositedChildrenOfProjectionSurface->push_back(opState);
-    } else {
-        // standard in order draw
-        opState->skipInOrderDraw = false;
-    }
-
-    if (mDisplayList->getChildren().size() > 0) {
-        const bool isProjectionReceiver = mDisplayList->projectionReceiveIndex >= 0;
-        bool haveAppliedPropertiesToProjection = false;
-        for (unsigned int i = 0; i < mDisplayList->getChildren().size(); i++) {
-            RenderNodeOp* childOp = mDisplayList->getChildren()[i];
-            RenderNode* child = childOp->renderNode;
-
-            std::vector<RenderNodeOp*>* projectionChildren = nullptr;
-            const mat4* projectionTransform = nullptr;
-            if (isProjectionReceiver && !child->properties().getProjectBackwards()) {
-                // if receiving projections, collect projecting descendant
-
-                // Note that if a direct descendant is projecting backwards, we pass its
-                // grandparent projection collection, since it shouldn't project onto its
-                // parent, where it will already be drawing.
-                projectionChildren = &mProjectedNodes;
-                projectionTransform = &mat4::identity();
-            } else {
-                if (!haveAppliedPropertiesToProjection) {
-                    applyViewPropertyTransforms(localTransformFromProjectionSurface);
-                    haveAppliedPropertiesToProjection = true;
-                }
-                projectionChildren = compositedChildrenOfProjectionSurface;
-                projectionTransform = &localTransformFromProjectionSurface;
-            }
-            child->computeOrderingImpl(childOp, projectionChildren, projectionTransform);
+    if (Properties::getStretchEffectBehavior() == StretchEffectBehavior::UniformScale) {
+        const StretchEffect& stretch = properties().layerProperties().getStretchEffect();
+        if (!stretch.isEmpty()) {
+            matrix.multiply(
+                    stretch.makeLinearStretch(properties().getWidth(), properties().getHeight()));
         }
     }
 }
@@ -559,6 +554,43 @@ const SkPath* RenderNode::getClippedOutline(const SkRect& clipRect) const {
         Op(*outlinePath, clipPath, kIntersect_SkPathOp, &mClippedOutlineCache.clippedOutline);
     }
     return &mClippedOutlineCache.clippedOutline;
+}
+
+using StringBuffer = FatVector<char, 128>;
+
+template <typename... T>
+// TODO:__printflike(2, 3)
+// Doesn't work because the warning doesn't understand string_view and doesn't like that
+// it's not a C-style variadic function.
+static void format(StringBuffer& buffer, const std::string_view& format, T... args) {
+    buffer.resize(buffer.capacity());
+    while (1) {
+        int needed = snprintf(buffer.data(), buffer.size(),
+                format.data(), std::forward<T>(args)...);
+        if (needed < 0) {
+            buffer[0] = '\0';
+            buffer.resize(1);
+            return;
+        }
+        if (needed < buffer.size()) {
+            buffer.resize(needed + 1);
+            return;
+        }
+        // If we're doing a heap alloc anyway might as well give it some slop
+        buffer.resize(needed + 100);
+    }
+}
+
+void RenderNode::markDrawStart(SkCanvas& canvas) {
+    StringBuffer buffer;
+    format(buffer, "RenderNode(id=%" PRId64 ", name='%s')", uniqueId(), getName());
+    canvas.drawAnnotation(SkRect::MakeWH(getWidth(), getHeight()), buffer.data(), nullptr);
+}
+
+void RenderNode::markDrawEnd(SkCanvas& canvas) {
+    StringBuffer buffer;
+    format(buffer, "/RenderNode(id=%" PRId64 ", name='%s')", uniqueId(), getName());
+    canvas.drawAnnotation(SkRect::MakeWH(getWidth(), getHeight()), buffer.data(), nullptr);
 }
 
 } /* namespace uirenderer */

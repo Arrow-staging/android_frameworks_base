@@ -22,7 +22,8 @@
 #include <vector>
 
 #include "android-base/macros.h"
-#include "androidfw/AssetManager.h"
+#include "androidfw/Asset.h"
+#include "androidfw/AssetManager2.h"
 #include "utils/JenkinsHash.h"
 #include "utils/LruCache.h"
 
@@ -37,7 +38,7 @@ inline android::hash_t hash_type(const ResourceName& name) {
   std::hash<std::string> str_hash;
   android::hash_t hash = 0;
   hash = android::JenkinsHashMix(hash, (uint32_t)str_hash(name.package));
-  hash = android::JenkinsHashMix(hash, (uint32_t)name.type);
+  hash = android::JenkinsHashMix(hash, (uint32_t)str_hash(name.type.name));
   hash = android::JenkinsHashMix(hash, (uint32_t)str_hash(name.entry));
   return hash;
 }
@@ -55,7 +56,7 @@ class SymbolTable {
   struct Symbol {
     Symbol() = default;
 
-    explicit Symbol(const Maybe<ResourceId>& i, const std::shared_ptr<Attribute>& attr = {},
+    explicit Symbol(const std::optional<ResourceId>& i, const std::shared_ptr<Attribute>& attr = {},
                     bool pub = false)
         : id(i), attribute(attr), is_public(pub) {
     }
@@ -65,12 +66,13 @@ class SymbolTable {
     Symbol& operator=(const Symbol&) = default;
     Symbol& operator=(Symbol&&) = default;
 
-    Maybe<ResourceId> id;
+    std::optional<ResourceId> id;
     std::shared_ptr<Attribute> attribute;
     bool is_public = false;
+    bool is_dynamic = false;
   };
 
-  SymbolTable(NameMangler* mangler);
+  explicit SymbolTable(NameMangler* mangler);
 
   // Overrides the default ISymbolTableDelegate, which allows a custom defined strategy for
   // looking up resources from a set of sources.
@@ -192,6 +194,7 @@ class AssetManagerSymbolSource : public ISymbolSource {
 
   bool AddAssetPath(const android::StringPiece& path);
   std::map<size_t, std::string> GetAssignedPackageIds() const;
+  bool IsPackageDynamic(uint32_t packageId, const std::string& package_name) const;
 
   std::unique_ptr<SymbolTable::Symbol> FindByName(
       const ResourceName& name) override;
@@ -199,12 +202,13 @@ class AssetManagerSymbolSource : public ISymbolSource {
   std::unique_ptr<SymbolTable::Symbol> FindByReference(
       const Reference& ref) override;
 
-  android::AssetManager* GetAssetManager() {
-    return &assets_;
+  android::AssetManager2* GetAssetManager() {
+    return &asset_manager_;
   }
 
  private:
-  android::AssetManager assets_;
+  android::AssetManager2 asset_manager_;
+  std::vector<std::unique_ptr<const android::ApkAssets>> apk_assets_;
 
   DISALLOW_COPY_AND_ASSIGN(AssetManagerSymbolSource);
 };

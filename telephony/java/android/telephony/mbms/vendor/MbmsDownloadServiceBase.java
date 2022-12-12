@@ -18,17 +18,18 @@ package android.telephony.mbms.vendor;
 
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.content.Intent;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.telephony.MbmsDownloadSession;
+import android.telephony.mbms.DownloadProgressListener;
 import android.telephony.mbms.DownloadRequest;
-import android.telephony.mbms.DownloadStateCallback;
+import android.telephony.mbms.DownloadStatusListener;
 import android.telephony.mbms.FileInfo;
 import android.telephony.mbms.FileServiceInfo;
-import android.telephony.mbms.IDownloadStateCallback;
+import android.telephony.mbms.IDownloadProgressListener;
+import android.telephony.mbms.IDownloadStatusListener;
 import android.telephony.mbms.IMbmsDownloadSessionCallback;
 import android.telephony.mbms.MbmsDownloadSessionCallback;
 import android.telephony.mbms.MbmsErrors;
@@ -43,44 +44,46 @@ import java.util.Map;
  * @hide
  */
 @SystemApi
-@TestApi
 public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
-    private final Map<IBinder, DownloadStateCallback> mDownloadCallbackBinderMap = new HashMap<>();
+    private final Map<IBinder, DownloadStatusListener> mDownloadStatusListenerBinderMap =
+            new HashMap<>();
+    private final Map<IBinder, DownloadProgressListener> mDownloadProgressListenerBinderMap =
+            new HashMap<>();
     private final Map<IBinder, DeathRecipient> mDownloadCallbackDeathRecipients = new HashMap<>();
 
+    private abstract static class VendorDownloadStatusListener extends DownloadStatusListener {
+        private final IDownloadStatusListener mListener;
+        public VendorDownloadStatusListener(IDownloadStatusListener listener) {
+            mListener = listener;
+        }
 
-    // Filters the DownloadStateCallbacks by its configuration from the app.
-    private abstract static class FilteredDownloadStateCallback extends DownloadStateCallback {
+        @Override
+        public void onStatusUpdated(DownloadRequest request, FileInfo fileInfo,
+                @MbmsDownloadSession.DownloadStatus int state) {
+            try {
+                mListener.onStatusUpdated(request, fileInfo, state);
+            } catch (RemoteException e) {
+                onRemoteException(e);
+            }
+        }
 
-        private final IDownloadStateCallback mCallback;
-        public FilteredDownloadStateCallback(IDownloadStateCallback callback, int callbackFlags) {
-            super(callbackFlags);
-            mCallback = callback;
+        protected abstract void onRemoteException(RemoteException e);
+    }
+
+    private abstract static class VendorDownloadProgressListener extends DownloadProgressListener {
+        private final IDownloadProgressListener mListener;
+
+        public VendorDownloadProgressListener(IDownloadProgressListener listener) {
+            mListener = listener;
         }
 
         @Override
         public void onProgressUpdated(DownloadRequest request, FileInfo fileInfo,
                 int currentDownloadSize, int fullDownloadSize, int currentDecodedSize,
                 int fullDecodedSize) {
-            if (!isFilterFlagSet(PROGRESS_UPDATES)) {
-                return;
-            }
             try {
-                mCallback.onProgressUpdated(request, fileInfo, currentDownloadSize,
+                mListener.onProgressUpdated(request, fileInfo, currentDownloadSize,
                         fullDownloadSize, currentDecodedSize, fullDecodedSize);
-            } catch (RemoteException e) {
-                onRemoteException(e);
-            }
-        }
-
-        @Override
-        public void onStateUpdated(DownloadRequest request, FileInfo fileInfo,
-                @MbmsDownloadSession.DownloadStatus int state) {
-            if (!isFilterFlagSet(STATE_UPDATES)) {
-                return;
-            }
-            try {
-                mCallback.onStateUpdated(request, fileInfo, state);
             } catch (RemoteException e) {
                 onRemoteException(e);
             }
@@ -125,6 +128,10 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
             @Override
             public void onError(int errorCode, String message) {
                 try {
+                    if (errorCode == MbmsErrors.UNKNOWN) {
+                        throw new IllegalArgumentException(
+                                "Middleware cannot send an unknown error.");
+                    }
                     callback.onError(errorCode, message);
                 } catch (RemoteException e) {
                     onAppCallbackDied(uid, subscriptionId);
@@ -207,6 +214,29 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
     }
 
     /**
+     * Called when the client application wishes to receive file information according to a
+     * service announcement descriptor received from a group call server.
+     *
+     * The service announcement descriptor is in the format of a multipart MIME file with XML parts,
+     * though no validation is performed on the contents of the {@code contents} argument --
+     * implementing middleware applications should perform their own validation and return
+     * {@link MbmsErrors.DownloadErrors#ERROR_MALFORMED_SERVICE_ANNOUNCEMENT} if the descriptor is
+     * malformed.
+     *
+     * @param subscriptionId The subscription id the service announcement applies to.
+     * @param contents The contents of the service announcement descriptor.
+     * @return {@link MbmsErrors#SUCCESS}, or
+     *         {@link MbmsErrors.DownloadErrors#ERROR_MALFORMED_SERVICE_ANNOUNCEMENT}
+     */
+    // TODO: are there any public specifications of what the file format is that I can link to?
+    @Override
+    public @MbmsErrors.MbmsError int addServiceAnnouncement(
+            int subscriptionId, @NonNull byte[] contents) {
+        throw new UnsupportedOperationException("addServiceAnnouncement not supported by"
+                + " this middleware.");
+    }
+
+    /**
      * Issues a request to download a set of files.
      *
      * The middleware should expect that {@link #setTempFileRootDirectory(int, String)} has been
@@ -223,71 +253,70 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
     }
 
     /**
-     * Registers a download state callbacks for the provided {@link DownloadRequest}.
+     * Registers a download status listener for the provided {@link DownloadRequest}.
      *
-     * This method is called by the app when it wants to request updates on the progress or
-     * status of the download.
+     * This method is called by the app when it wants to request updates on the status of
+     * the download.
      *
      * If the middleware is not aware of a download having been requested with the provided
-     *
      * {@link DownloadRequest} in the past,
      * {@link MbmsErrors.DownloadErrors#ERROR_UNKNOWN_DOWNLOAD_REQUEST}
      * must be returned.
      *
      * @param downloadRequest The {@link DownloadRequest} that was used to initiate the download
      *                        for which progress updates are being requested.
-     * @param callback The callback object to use.
+     * @param listener The listener object to use.
      */
-    public int registerStateCallback(DownloadRequest downloadRequest,
-            DownloadStateCallback callback) throws RemoteException {
+    public int addStatusListener(DownloadRequest downloadRequest,
+            DownloadStatusListener listener) throws RemoteException {
         return 0;
     }
 
     /**
-     * Actual AIDL implementation -- hides the callback AIDL from the API.
+     * Actual AIDL implementation -- hides the listener AIDL from the API.
      * @hide
      */
     @Override
-    public final int registerStateCallback(final DownloadRequest downloadRequest,
-            final IDownloadStateCallback callback, int flags) throws RemoteException {
+    public final int addStatusListener(final DownloadRequest downloadRequest,
+            final IDownloadStatusListener listener) throws RemoteException {
         final int uid = Binder.getCallingUid();
         if (downloadRequest == null) {
             throw new NullPointerException("Download request must not be null");
         }
-        if (callback == null) {
+        if (listener == null) {
             throw new NullPointerException("Callback must not be null");
         }
 
-        DownloadStateCallback exposedCallback = new FilteredDownloadStateCallback(callback, flags) {
+        DownloadStatusListener exposedCallback = new VendorDownloadStatusListener(listener) {
             @Override
             protected void onRemoteException(RemoteException e) {
                 onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
             }
         };
 
-        int result = registerStateCallback(downloadRequest, exposedCallback);
+        int result = addStatusListener(downloadRequest, exposedCallback);
 
         if (result == MbmsErrors.SUCCESS) {
             DeathRecipient deathRecipient = new DeathRecipient() {
                 @Override
                 public void binderDied() {
                     onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
-                    mDownloadCallbackBinderMap.remove(callback.asBinder());
-                    mDownloadCallbackDeathRecipients.remove(callback.asBinder());
+                    mDownloadStatusListenerBinderMap.remove(listener.asBinder());
+                    mDownloadCallbackDeathRecipients.remove(listener.asBinder());
                 }
             };
-            mDownloadCallbackDeathRecipients.put(callback.asBinder(), deathRecipient);
-            callback.asBinder().linkToDeath(deathRecipient, 0);
-            mDownloadCallbackBinderMap.put(callback.asBinder(), exposedCallback);
+            mDownloadCallbackDeathRecipients.put(listener.asBinder(), deathRecipient);
+            listener.asBinder().linkToDeath(deathRecipient, 0);
+            mDownloadStatusListenerBinderMap.put(listener.asBinder(), exposedCallback);
         }
 
         return result;
     }
 
     /**
-     * Un-registers a download state callbacks for the provided {@link DownloadRequest}.
+     * Un-registers a download status listener for the provided {@link DownloadRequest}.
      *
-     * This method is called by the app when it no longer wants to request updates on the
+     * This method is called by the app when it no longer wants to request status updates on the
      * download.
      *
      * If the middleware is not aware of a download having been requested with the provided
@@ -296,45 +325,157 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
      * must be returned.
      *
      * @param downloadRequest The {@link DownloadRequest} that was used to register the callback
-     * @param callback The callback object that
-     *                 {@link #registerStateCallback(DownloadRequest, DownloadStateCallback)}
+     * @param listener The callback object that
+     *                 {@link #addStatusListener(DownloadRequest, DownloadStatusListener)}
      *                 was called with.
      */
-    public int unregisterStateCallback(DownloadRequest downloadRequest,
-            DownloadStateCallback callback) throws RemoteException {
+    public int removeStatusListener(DownloadRequest downloadRequest,
+            DownloadStatusListener listener) throws RemoteException {
         return 0;
     }
 
     /**
-     * Actual AIDL implementation -- hides the callback AIDL from the API.
+     * Actual AIDL implementation -- hides the listener AIDL from the API.
      * @hide
      */
-    @Override
-    public final int unregisterStateCallback(
-            final DownloadRequest downloadRequest, final IDownloadStateCallback callback)
+    public final int removeStatusListener(
+            final DownloadRequest downloadRequest, final IDownloadStatusListener listener)
             throws RemoteException {
         if (downloadRequest == null) {
             throw new NullPointerException("Download request must not be null");
         }
-        if (callback == null) {
+        if (listener == null) {
             throw new NullPointerException("Callback must not be null");
         }
 
         DeathRecipient deathRecipient =
-                mDownloadCallbackDeathRecipients.remove(callback.asBinder());
+                mDownloadCallbackDeathRecipients.remove(listener.asBinder());
         if (deathRecipient == null) {
-            throw new IllegalArgumentException("Unknown callback");
+            throw new IllegalArgumentException("Unknown listener");
         }
 
-        callback.asBinder().unlinkToDeath(deathRecipient, 0);
+        listener.asBinder().unlinkToDeath(deathRecipient, 0);
 
-        DownloadStateCallback exposedCallback =
-                mDownloadCallbackBinderMap.remove(callback.asBinder());
+        DownloadStatusListener exposedCallback =
+                mDownloadStatusListenerBinderMap.remove(listener.asBinder());
         if (exposedCallback == null) {
-            throw new IllegalArgumentException("Unknown callback");
+            throw new IllegalArgumentException("Unknown listener");
         }
 
-        return unregisterStateCallback(downloadRequest, exposedCallback);
+        return removeStatusListener(downloadRequest, exposedCallback);
+    }
+
+    /**
+     * Registers a download progress listener for the provided {@link DownloadRequest}.
+     *
+     * This method is called by the app when it wants to request updates on the progress of
+     * the download.
+     *
+     * If the middleware is not aware of a download having been requested with the provided
+     * {@link DownloadRequest} in the past,
+     * {@link MbmsErrors.DownloadErrors#ERROR_UNKNOWN_DOWNLOAD_REQUEST}
+     * must be returned.
+     *
+     * @param downloadRequest The {@link DownloadRequest} that was used to initiate the download
+     *                        for which progress updates are being requested.
+     * @param listener The listener object to use.
+     */
+    public int addProgressListener(DownloadRequest downloadRequest,
+            DownloadProgressListener listener) throws RemoteException {
+        return 0;
+    }
+
+    /**
+     * Actual AIDL implementation -- hides the listener AIDL from the API.
+     * @hide
+     */
+    @Override
+    public final int addProgressListener(final DownloadRequest downloadRequest,
+            final IDownloadProgressListener listener) throws RemoteException {
+        final int uid = Binder.getCallingUid();
+        if (downloadRequest == null) {
+            throw new NullPointerException("Download request must not be null");
+        }
+        if (listener == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
+
+        DownloadProgressListener exposedCallback = new VendorDownloadProgressListener(listener) {
+            @Override
+            protected void onRemoteException(RemoteException e) {
+                onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
+            }
+        };
+
+        int result = addProgressListener(downloadRequest, exposedCallback);
+
+        if (result == MbmsErrors.SUCCESS) {
+            DeathRecipient deathRecipient = new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
+                    mDownloadProgressListenerBinderMap.remove(listener.asBinder());
+                    mDownloadCallbackDeathRecipients.remove(listener.asBinder());
+                }
+            };
+            mDownloadCallbackDeathRecipients.put(listener.asBinder(), deathRecipient);
+            listener.asBinder().linkToDeath(deathRecipient, 0);
+            mDownloadProgressListenerBinderMap.put(listener.asBinder(), exposedCallback);
+        }
+
+        return result;
+    }
+
+    /**
+     * Un-registers a download progress listener for the provided {@link DownloadRequest}.
+     *
+     * This method is called by the app when it no longer wants to request progress updates on the
+     * download.
+     *
+     * If the middleware is not aware of a download having been requested with the provided
+     * {@link DownloadRequest} in the past,
+     * {@link MbmsErrors.DownloadErrors#ERROR_UNKNOWN_DOWNLOAD_REQUEST}
+     * must be returned.
+     *
+     * @param downloadRequest The {@link DownloadRequest} that was used to register the callback
+     * @param listener The callback object that
+     *                 {@link #addProgressListener(DownloadRequest, DownloadProgressListener)}
+     *                 was called with.
+     */
+    public int removeProgressListener(DownloadRequest downloadRequest,
+            DownloadProgressListener listener) throws RemoteException {
+        return 0;
+    }
+
+    /**
+     * Actual AIDL implementation -- hides the listener AIDL from the API.
+     * @hide
+     */
+    public final int removeProgressListener(
+            final DownloadRequest downloadRequest, final IDownloadProgressListener listener)
+            throws RemoteException {
+        if (downloadRequest == null) {
+            throw new NullPointerException("Download request must not be null");
+        }
+        if (listener == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
+
+        DeathRecipient deathRecipient =
+                mDownloadCallbackDeathRecipients.remove(listener.asBinder());
+        if (deathRecipient == null) {
+            throw new IllegalArgumentException("Unknown listener");
+        }
+
+        listener.asBinder().unlinkToDeath(deathRecipient, 0);
+
+        DownloadProgressListener exposedCallback =
+                mDownloadProgressListenerBinderMap.remove(listener.asBinder());
+        if (exposedCallback == null) {
+            throw new IllegalArgumentException("Unknown listener");
+        }
+
+        return removeProgressListener(downloadRequest, exposedCallback);
     }
 
     /**
@@ -428,5 +569,21 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
      * @param subscriptionId The subscription ID the app is using.
      */
     public void onAppCallbackDied(int uid, int subscriptionId) {
+    }
+
+    // Following two methods exist to workaround b/124210145
+    /** @hide */
+    @SystemApi
+    @Override
+    public android.os.IBinder asBinder() {
+        return super.asBinder();
+    }
+
+    /** @hide */
+    @SystemApi
+    @Override
+    public boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply,
+            int flags) throws RemoteException {
+        return super.onTransact(code, data, reply, flags);
     }
 }

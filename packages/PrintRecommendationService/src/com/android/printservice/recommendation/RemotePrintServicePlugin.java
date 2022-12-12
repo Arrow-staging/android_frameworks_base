@@ -16,11 +16,11 @@
 
 package com.android.printservice.recommendation;
 
-import android.annotation.NonNull;
-import android.annotation.Nullable;
-import android.annotation.StringRes;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.StringRes;
 
-import com.android.internal.util.Preconditions;
+import com.android.printservice.recommendation.util.Preconditions;
 
 import java.net.InetAddress;
 import java.util.Collections;

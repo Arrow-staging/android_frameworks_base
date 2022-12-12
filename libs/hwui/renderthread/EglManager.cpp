@@ -16,27 +16,21 @@
 
 #include "EglManager.h"
 
-#include <string>
-
+#include <EGL/eglext.h>
+#include <GLES/gl.h>
 #include <cutils/properties.h>
 #include <log/log.h>
-#include "utils/StringUtils.h"
+#include <sync/sync.h>
+#include <utils/Trace.h>
 
-#include "Caches.h"
-#include "DeviceInfo.h"
+#include <string>
+#include <vector>
+
 #include "Frame.h"
 #include "Properties.h"
-#include "RenderThread.h"
-#include "Texture.h"
-#include "renderstate/RenderState.h"
-
-#include <EGL/eglext.h>
-#include <GrContextOptions.h>
-#include <gl/GrGLInterface.h>
-
-#ifdef HWUI_GLES_WRAP_ENABLED
-#include "debug/GlesDriver.h"
-#endif
+#include "RenderEffectCapabilityQuery.h"
+#include "utils/Color.h"
+#include "utils/StringUtils.h"
 
 #define GLES_VERSION 2
 
@@ -82,16 +76,31 @@ static struct {
     bool pixelFormatFloat = false;
     bool glColorSpace = false;
     bool scRGB = false;
+    bool displayP3 = false;
+    bool hdr = false;
+    bool contextPriority = false;
+    bool surfacelessContext = false;
+    bool nativeFenceSync = false;
+    bool fenceSync = false;
+    bool waitSync = false;
 } EglExtensions;
 
-EglManager::EglManager(RenderThread& thread)
-        : mRenderThread(thread)
-        , mEglDisplay(EGL_NO_DISPLAY)
+EglManager::EglManager()
+        : mEglDisplay(EGL_NO_DISPLAY)
         , mEglConfig(nullptr)
-        , mEglConfigWideGamut(nullptr)
+        , mEglConfigF16(nullptr)
+        , mEglConfig1010102(nullptr)
+        , mEglConfigA8(nullptr)
         , mEglContext(EGL_NO_CONTEXT)
         , mPBufferSurface(EGL_NO_SURFACE)
-        , mCurrentSurface(EGL_NO_SURFACE) {}
+        , mCurrentSurface(EGL_NO_SURFACE)
+        , mHasWideColorGamutSupport(false) {}
+
+EglManager::~EglManager() {
+    if (hasEglContext()) {
+        ALOGW("~EglManager() leaked an EGL context");
+    }
+}
 
 void EglManager::initialize() {
     if (hasEglContext()) return;
@@ -106,7 +115,7 @@ void EglManager::initialize() {
     LOG_ALWAYS_FATAL_IF(eglInitialize(mEglDisplay, &major, &minor) == EGL_FALSE,
                         "Failed to initialize display %p! err=%s", mEglDisplay, eglErrorString());
 
-    ALOGI("Initialized EGL, version %d.%d", (int)major, (int)minor);
+    ALOGV("Initialized EGL, version %d.%d", (int)major, (int)minor);
 
     initExtensions();
 
@@ -125,26 +134,161 @@ void EglManager::initialize() {
     loadConfigs();
     createContext();
     createPBufferSurface();
-    makeCurrent(mPBufferSurface);
-    DeviceInfo::initialize();
-    mRenderThread.renderState().onGLContextCreated();
+    makeCurrent(mPBufferSurface, nullptr, /* force */ true);
 
-    if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL) {
-#ifdef HWUI_GLES_WRAP_ENABLED
-        debug::GlesDriver* driver = debug::GlesDriver::get();
-        sk_sp<const GrGLInterface> glInterface(driver->getSkiaInterface());
-#else
-        sk_sp<const GrGLInterface> glInterface(GrGLCreateNativeInterface());
-#endif
-        LOG_ALWAYS_FATAL_IF(!glInterface.get());
-
-        GrContextOptions options;
-        options.fDisableDistanceFieldPaths = true;
-        mRenderThread.cacheManager().configureContext(&options);
-        sk_sp<GrContext> grContext(GrContext::MakeGL(std::move(glInterface), options));
-        LOG_ALWAYS_FATAL_IF(!grContext.get());
-        mRenderThread.setGrContext(grContext);
+    skcms_Matrix3x3 wideColorGamut;
+    LOG_ALWAYS_FATAL_IF(!DeviceInfo::get()->getWideColorSpace()->toXYZD50(&wideColorGamut),
+                        "Could not get gamut matrix from wideColorSpace");
+    bool hasWideColorSpaceExtension = false;
+    if (memcmp(&wideColorGamut, &SkNamedGamut::kDisplayP3, sizeof(wideColorGamut)) == 0) {
+        hasWideColorSpaceExtension = EglExtensions.displayP3;
+    } else if (memcmp(&wideColorGamut, &SkNamedGamut::kSRGB, sizeof(wideColorGamut)) == 0) {
+        hasWideColorSpaceExtension = EglExtensions.scRGB;
+    } else {
+        LOG_ALWAYS_FATAL("Unsupported wide color space.");
     }
+    mHasWideColorGamutSupport = EglExtensions.glColorSpace && hasWideColorSpaceExtension;
+
+    auto* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+    auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    Properties::enableRenderEffectCache = supportsRenderEffectCache(
+        vendor, version);
+    ALOGV("RenderEffectCache supported %d on driver version %s",
+          Properties::enableRenderEffectCache, version);
+}
+
+EGLConfig EglManager::load8BitsConfig(EGLDisplay display, EglManager::SwapBehavior swapBehavior) {
+    EGLint eglSwapBehavior =
+            (swapBehavior == SwapBehavior::Preserved) ? EGL_SWAP_BEHAVIOR_PRESERVED_BIT : 0;
+    EGLint attribs[] = {EGL_RENDERABLE_TYPE,
+                        EGL_OPENGL_ES2_BIT,
+                        EGL_RED_SIZE,
+                        8,
+                        EGL_GREEN_SIZE,
+                        8,
+                        EGL_BLUE_SIZE,
+                        8,
+                        EGL_ALPHA_SIZE,
+                        8,
+                        EGL_DEPTH_SIZE,
+                        0,
+                        EGL_CONFIG_CAVEAT,
+                        EGL_NONE,
+                        EGL_STENCIL_SIZE,
+                        STENCIL_BUFFER_SIZE,
+                        EGL_SURFACE_TYPE,
+                        EGL_WINDOW_BIT | eglSwapBehavior,
+                        EGL_NONE};
+    EGLConfig config = EGL_NO_CONFIG_KHR;
+    EGLint numConfigs = 1;
+    if (!eglChooseConfig(display, attribs, &config, numConfigs, &numConfigs) || numConfigs != 1) {
+        return EGL_NO_CONFIG_KHR;
+    }
+    return config;
+}
+
+EGLConfig EglManager::load1010102Config(EGLDisplay display, SwapBehavior swapBehavior) {
+    EGLint eglSwapBehavior =
+            (swapBehavior == SwapBehavior::Preserved) ? EGL_SWAP_BEHAVIOR_PRESERVED_BIT : 0;
+    // If we reached this point, we have a valid swap behavior
+    EGLint attribs[] = {EGL_RENDERABLE_TYPE,
+                        EGL_OPENGL_ES2_BIT,
+                        EGL_RED_SIZE,
+                        10,
+                        EGL_GREEN_SIZE,
+                        10,
+                        EGL_BLUE_SIZE,
+                        10,
+                        EGL_ALPHA_SIZE,
+                        2,
+                        EGL_DEPTH_SIZE,
+                        0,
+                        EGL_STENCIL_SIZE,
+                        STENCIL_BUFFER_SIZE,
+                        EGL_SURFACE_TYPE,
+                        EGL_WINDOW_BIT | eglSwapBehavior,
+                        EGL_NONE};
+    EGLConfig config = EGL_NO_CONFIG_KHR;
+    EGLint numConfigs = 1;
+    if (!eglChooseConfig(display, attribs, &config, numConfigs, &numConfigs) || numConfigs != 1) {
+        return EGL_NO_CONFIG_KHR;
+    }
+    return config;
+}
+
+EGLConfig EglManager::loadFP16Config(EGLDisplay display, SwapBehavior swapBehavior) {
+    EGLint eglSwapBehavior =
+            (swapBehavior == SwapBehavior::Preserved) ? EGL_SWAP_BEHAVIOR_PRESERVED_BIT : 0;
+    // If we reached this point, we have a valid swap behavior
+    EGLint attribs[] = {EGL_RENDERABLE_TYPE,
+                        EGL_OPENGL_ES2_BIT,
+                        EGL_COLOR_COMPONENT_TYPE_EXT,
+                        EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
+                        EGL_RED_SIZE,
+                        16,
+                        EGL_GREEN_SIZE,
+                        16,
+                        EGL_BLUE_SIZE,
+                        16,
+                        EGL_ALPHA_SIZE,
+                        16,
+                        EGL_DEPTH_SIZE,
+                        0,
+                        EGL_STENCIL_SIZE,
+                        STENCIL_BUFFER_SIZE,
+                        EGL_SURFACE_TYPE,
+                        EGL_WINDOW_BIT | eglSwapBehavior,
+                        EGL_NONE};
+    EGLConfig config = EGL_NO_CONFIG_KHR;
+    EGLint numConfigs = 1;
+    if (!eglChooseConfig(display, attribs, &config, numConfigs, &numConfigs) || numConfigs != 1) {
+        return EGL_NO_CONFIG_KHR;
+    }
+    return config;
+}
+
+EGLConfig EglManager::loadA8Config(EGLDisplay display, EglManager::SwapBehavior swapBehavior) {
+    EGLint eglSwapBehavior =
+            (swapBehavior == SwapBehavior::Preserved) ? EGL_SWAP_BEHAVIOR_PRESERVED_BIT : 0;
+    EGLint attribs[] = {EGL_RENDERABLE_TYPE,
+                        EGL_OPENGL_ES2_BIT,
+                        EGL_RED_SIZE,
+                        8,
+                        EGL_GREEN_SIZE,
+                        0,
+                        EGL_BLUE_SIZE,
+                        0,
+                        EGL_ALPHA_SIZE,
+                        0,
+                        EGL_DEPTH_SIZE,
+                        0,
+                        EGL_SURFACE_TYPE,
+                        EGL_WINDOW_BIT | eglSwapBehavior,
+                        EGL_NONE};
+    EGLint numConfigs = 1;
+    if (!eglChooseConfig(display, attribs, nullptr, numConfigs, &numConfigs)) {
+        return EGL_NO_CONFIG_KHR;
+    }
+
+    std::vector<EGLConfig> configs(numConfigs, EGL_NO_CONFIG_KHR);
+    if (!eglChooseConfig(display, attribs, configs.data(), numConfigs, &numConfigs)) {
+        return EGL_NO_CONFIG_KHR;
+    }
+
+    // The component sizes passed to eglChooseConfig are minimums, so configs
+    // contains entries that exceed them. Choose one that matches the sizes
+    // exactly.
+    for (EGLConfig config : configs) {
+        EGLint r{0}, g{0}, b{0}, a{0};
+        eglGetConfigAttrib(display, config, EGL_RED_SIZE, &r);
+        eglGetConfigAttrib(display, config, EGL_GREEN_SIZE, &g);
+        eglGetConfigAttrib(display, config, EGL_BLUE_SIZE, &b);
+        eglGetConfigAttrib(display, config, EGL_ALPHA_SIZE, &a);
+        if (8 == r && 0 == g && 0 == b && 0 == a) {
+            return config;
+        }
+    }
+    return EGL_NO_CONFIG_KHR;
 }
 
 void EglManager::initExtensions() {
@@ -163,11 +307,14 @@ void EglManager::initExtensions() {
     EglExtensions.glColorSpace = extensions.has("EGL_KHR_gl_colorspace");
     EglExtensions.noConfigContext = extensions.has("EGL_KHR_no_config_context");
     EglExtensions.pixelFormatFloat = extensions.has("EGL_EXT_pixel_format_float");
-#ifdef ANDROID_ENABLE_LINEAR_BLENDING
-    EglExtensions.scRGB = extensions.has("EGL_EXT_gl_colorspace_scrgb_linear");
-#else
     EglExtensions.scRGB = extensions.has("EGL_EXT_gl_colorspace_scrgb");
-#endif
+    EglExtensions.displayP3 = extensions.has("EGL_EXT_gl_colorspace_display_p3_passthrough");
+    EglExtensions.hdr = extensions.has("EGL_EXT_gl_colorspace_bt2020_pq");
+    EglExtensions.contextPriority = extensions.has("EGL_IMG_context_priority");
+    EglExtensions.surfacelessContext = extensions.has("EGL_KHR_surfaceless_context");
+    EglExtensions.fenceSync = extensions.has("EGL_KHR_fence_sync");
+    EglExtensions.waitSync = extensions.has("EGL_KHR_wait_sync");
+    EglExtensions.nativeFenceSync = extensions.has("EGL_ANDROID_native_fence_sync");
 }
 
 bool EglManager::hasEglContext() {
@@ -175,82 +322,51 @@ bool EglManager::hasEglContext() {
 }
 
 void EglManager::loadConfigs() {
-    ALOGD("Swap behavior %d", static_cast<int>(mSwapBehavior));
-    EGLint swapBehavior =
-            (mSwapBehavior == SwapBehavior::Preserved) ? EGL_SWAP_BEHAVIOR_PRESERVED_BIT : 0;
-    EGLint attribs[] = {EGL_RENDERABLE_TYPE,
-                        EGL_OPENGL_ES2_BIT,
-                        EGL_RED_SIZE,
-                        8,
-                        EGL_GREEN_SIZE,
-                        8,
-                        EGL_BLUE_SIZE,
-                        8,
-                        EGL_ALPHA_SIZE,
-                        8,
-                        EGL_DEPTH_SIZE,
-                        0,
-                        EGL_CONFIG_CAVEAT,
-                        EGL_NONE,
-                        EGL_STENCIL_SIZE,
-                        Stencil::getStencilSize(),
-                        EGL_SURFACE_TYPE,
-                        EGL_WINDOW_BIT | swapBehavior,
-                        EGL_NONE};
-
-    EGLint numConfigs = 1;
-    if (!eglChooseConfig(mEglDisplay, attribs, &mEglConfig, numConfigs, &numConfigs) ||
-        numConfigs != 1) {
+    // Note: The default pixel format is RGBA_8888, when other formats are
+    // available, we should check the target pixel format and configure the
+    // attributes list properly.
+    mEglConfig = load8BitsConfig(mEglDisplay, mSwapBehavior);
+    if (mEglConfig == EGL_NO_CONFIG_KHR) {
         if (mSwapBehavior == SwapBehavior::Preserved) {
             // Try again without dirty regions enabled
             ALOGW("Failed to choose config with EGL_SWAP_BEHAVIOR_PRESERVED, retrying without...");
             mSwapBehavior = SwapBehavior::Discard;
-            loadConfigs();
-            return;  // the call to loadConfigs() we just made picks the wide gamut config
+            mEglConfig = load8BitsConfig(mEglDisplay, mSwapBehavior);
         } else {
             // Failed to get a valid config
             LOG_ALWAYS_FATAL("Failed to choose config, error = %s", eglErrorString());
         }
     }
 
+    // When we reach this point, we have a valid swap behavior
     if (EglExtensions.pixelFormatFloat) {
-        // If we reached this point, we have a valid swap behavior
-        EGLint attribs16F[] = {EGL_RENDERABLE_TYPE,
-                               EGL_OPENGL_ES2_BIT,
-                               EGL_COLOR_COMPONENT_TYPE_EXT,
-                               EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
-                               EGL_RED_SIZE,
-                               16,
-                               EGL_GREEN_SIZE,
-                               16,
-                               EGL_BLUE_SIZE,
-                               16,
-                               EGL_ALPHA_SIZE,
-                               16,
-                               EGL_DEPTH_SIZE,
-                               0,
-                               EGL_STENCIL_SIZE,
-                               Stencil::getStencilSize(),
-                               EGL_SURFACE_TYPE,
-                               EGL_WINDOW_BIT | swapBehavior,
-                               EGL_NONE};
-
-        numConfigs = 1;
-        if (!eglChooseConfig(mEglDisplay, attribs16F, &mEglConfigWideGamut, numConfigs,
-                             &numConfigs) ||
-            numConfigs != 1) {
+        mEglConfigF16 = loadFP16Config(mEglDisplay, mSwapBehavior);
+        if (mEglConfigF16 == EGL_NO_CONFIG_KHR) {
             ALOGE("Device claims wide gamut support, cannot find matching config, error = %s",
-                    eglErrorString());
+                  eglErrorString());
             EglExtensions.pixelFormatFloat = false;
         }
+    }
+    mEglConfig1010102 = load1010102Config(mEglDisplay, mSwapBehavior);
+    if (mEglConfig1010102 == EGL_NO_CONFIG_KHR) {
+        ALOGW("Failed to initialize 101010-2 format, error = %s",
+              eglErrorString());
     }
 }
 
 void EglManager::createContext() {
-    EGLint attribs[] = {EGL_CONTEXT_CLIENT_VERSION, GLES_VERSION, EGL_NONE};
+    std::vector<EGLint> contextAttributes;
+    contextAttributes.reserve(5);
+    contextAttributes.push_back(EGL_CONTEXT_CLIENT_VERSION);
+    contextAttributes.push_back(GLES_VERSION);
+    if (Properties::contextPriority != 0 && EglExtensions.contextPriority) {
+        contextAttributes.push_back(EGL_CONTEXT_PRIORITY_LEVEL_IMG);
+        contextAttributes.push_back(Properties::contextPriority);
+    }
+    contextAttributes.push_back(EGL_NONE);
     mEglContext = eglCreateContext(
             mEglDisplay, EglExtensions.noConfigContext ? ((EGLConfig) nullptr) : mEglConfig,
-            EGL_NO_CONTEXT, attribs);
+            EGL_NO_CONTEXT, contextAttributes.data());
     LOG_ALWAYS_FATAL_IF(mEglContext == EGL_NO_CONTEXT, "Failed to create context, error = %s",
                         eglErrorString());
 }
@@ -259,18 +375,29 @@ void EglManager::createPBufferSurface() {
     LOG_ALWAYS_FATAL_IF(mEglDisplay == EGL_NO_DISPLAY,
                         "usePBufferSurface() called on uninitialized GlobalContext!");
 
-    if (mPBufferSurface == EGL_NO_SURFACE) {
+    if (mPBufferSurface == EGL_NO_SURFACE && !EglExtensions.surfacelessContext) {
         EGLint attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
         mPBufferSurface = eglCreatePbufferSurface(mEglDisplay, mEglConfig, attribs);
+        LOG_ALWAYS_FATAL_IF(mPBufferSurface == EGL_NO_SURFACE,
+                            "Failed to create a pixel buffer display=%p, "
+                            "mEglConfig=%p, error=%s",
+                            mEglDisplay, mEglConfig, eglErrorString());
     }
 }
 
-EGLSurface EglManager::createSurface(EGLNativeWindowType window, bool wideColorGamut) {
-    initialize();
+Result<EGLSurface, EGLint> EglManager::createSurface(EGLNativeWindowType window,
+                                                     ColorMode colorMode,
+                                                     sk_sp<SkColorSpace> colorSpace) {
+    LOG_ALWAYS_FATAL_IF(!hasEglContext(), "Not initialized");
 
-    wideColorGamut = wideColorGamut && EglExtensions.glColorSpace && EglExtensions.scRGB &&
-                     EglExtensions.pixelFormatFloat && EglExtensions.noConfigContext;
+    if (!EglExtensions.noConfigContext) {
+        // The caller shouldn't use A8 if we cannot switch modes.
+        LOG_ALWAYS_FATAL_IF(colorMode == ColorMode::A8,
+                            "Cannot use A8 without EGL_KHR_no_config_context!");
 
+        // Cannot switch modes without EGL_KHR_no_config_context.
+        colorMode = ColorMode::Default;
+    }
     // The color space we want to use depends on whether linear blending is turned
     // on and whether the app has requested wide color gamut rendering. When wide
     // color gamut rendering is off, the app simply renders in the display's native
@@ -279,44 +406,85 @@ EGLSurface EglManager::createSurface(EGLNativeWindowType window, bool wideColorG
     // When wide gamut rendering is off:
     // - Blending is done by default in gamma space, which requires using a
     //   linear EGL color space (the GPU uses the color values as is)
-    // - If linear blending is on, we must use the sRGB EGL color space (the
-    //   GPU will perform sRGB to linear and linear to SRGB conversions before
-    //   and after blending)
+    // - If linear blending is on, we must use the non-linear EGL color space
+    //   (the GPU will perform sRGB to linear and linear to SRGB conversions
+    //   before and after blending)
     //
     // When wide gamut rendering is on we cannot rely on the GPU performing
     // linear blending for us. We use two different color spaces to tag the
     // surface appropriately for SurfaceFlinger:
-    // - Gamma blending (default) requires the use of the scRGB-nl color space
-    // - Linear blending requires the use of the scRGB color space
+    // - Gamma blending (default) requires the use of the non-linear color space
+    // - Linear blending requires the use of the linear color space
 
-    // Not all Android targets support the EGL_GL_COLOR_SPACE_KHR extension
+    // Not all Android targets support the EGL_GL_COLORSPACE_KHR extension
     // We insert to placeholders to set EGL_GL_COLORSPACE_KHR and its value.
     // According to section 3.4.1 of the EGL specification, the attributes
     // list is considered empty if the first entry is EGL_NONE
     EGLint attribs[] = {EGL_NONE, EGL_NONE, EGL_NONE};
 
-    if (EglExtensions.glColorSpace) {
-        attribs[0] = EGL_GL_COLORSPACE_KHR;
-#ifdef ANDROID_ENABLE_LINEAR_BLENDING
-        if (wideColorGamut) {
-            attribs[1] = EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT;
-        } else {
-            attribs[1] = EGL_GL_COLORSPACE_SRGB_KHR;
+    EGLConfig config = mEglConfig;
+    if (colorMode == ColorMode::A8) {
+        // A8 doesn't use a color space
+        if (!mEglConfigA8) {
+            mEglConfigA8 = loadA8Config(mEglDisplay, mSwapBehavior);
+            LOG_ALWAYS_FATAL_IF(!mEglConfigA8,
+                                "Requested ColorMode::A8, but EGL lacks support! error = %s",
+                                eglErrorString());
         }
-#else
-        if (wideColorGamut) {
-            attribs[1] = EGL_GL_COLORSPACE_SCRGB_EXT;
-        } else {
-            attribs[1] = EGL_GL_COLORSPACE_LINEAR_KHR;
+        config = mEglConfigA8;
+    } else {
+        if (!mHasWideColorGamutSupport) {
+            colorMode = ColorMode::Default;
         }
-#endif
+
+        if (DeviceInfo::get()->getWideColorType() == kRGBA_F16_SkColorType) {
+            if (mEglConfigF16 == EGL_NO_CONFIG_KHR) {
+                colorMode = ColorMode::Default;
+            } else {
+                config = mEglConfigF16;
+            }
+        }
+        if (EglExtensions.glColorSpace) {
+            attribs[0] = EGL_GL_COLORSPACE_KHR;
+            switch (colorMode) {
+                case ColorMode::Default:
+                    attribs[1] = EGL_GL_COLORSPACE_LINEAR_KHR;
+                    break;
+                case ColorMode::WideColorGamut: {
+                    skcms_Matrix3x3 colorGamut;
+                    LOG_ALWAYS_FATAL_IF(!colorSpace->toXYZD50(&colorGamut),
+                                        "Could not get gamut matrix from color space");
+                    if (memcmp(&colorGamut, &SkNamedGamut::kDisplayP3, sizeof(colorGamut)) == 0) {
+                        attribs[1] = EGL_GL_COLORSPACE_DISPLAY_P3_PASSTHROUGH_EXT;
+                    } else if (memcmp(&colorGamut, &SkNamedGamut::kSRGB, sizeof(colorGamut)) == 0) {
+                        attribs[1] = EGL_GL_COLORSPACE_SCRGB_EXT;
+                    } else if (memcmp(&colorGamut, &SkNamedGamut::kRec2020, sizeof(colorGamut)) ==
+                               0) {
+                        attribs[1] = EGL_GL_COLORSPACE_BT2020_PQ_EXT;
+                    } else {
+                        LOG_ALWAYS_FATAL("Unreachable: unsupported wide color space.");
+                    }
+                    break;
+                }
+                case ColorMode::Hdr:
+                    config = mEglConfigF16;
+                    attribs[1] = EGL_GL_COLORSPACE_BT2020_PQ_EXT;
+                    break;
+                case ColorMode::Hdr10:
+                    config = mEglConfig1010102;
+                    attribs[1] = EGL_GL_COLORSPACE_BT2020_PQ_EXT;
+                    break;
+                case ColorMode::A8:
+                    LOG_ALWAYS_FATAL("Unreachable: A8 doesn't use a color space");
+                    break;
+            }
+        }
     }
 
-    EGLSurface surface = eglCreateWindowSurface(
-            mEglDisplay, wideColorGamut ? mEglConfigWideGamut : mEglConfig, window, attribs);
-    LOG_ALWAYS_FATAL_IF(surface == EGL_NO_SURFACE,
-                        "Failed to create EGLSurface for window %p, eglErr = %s", (void*)window,
-                        eglErrorString());
+    EGLSurface surface = eglCreateWindowSurface(mEglDisplay, config, window, attribs);
+    if (surface == EGL_NO_SURFACE) {
+        return Error<EGLint>{eglGetError()};
+    }
 
     if (mSwapBehavior != SwapBehavior::Preserved) {
         LOG_ALWAYS_FATAL_IF(eglSurfaceAttrib(mEglDisplay, surface, EGL_SWAP_BEHAVIOR,
@@ -340,10 +508,10 @@ void EglManager::destroySurface(EGLSurface surface) {
 void EglManager::destroy() {
     if (mEglDisplay == EGL_NO_DISPLAY) return;
 
-    mRenderThread.setGrContext(nullptr);
-    mRenderThread.renderState().onGLContextDestroyed();
     eglDestroyContext(mEglDisplay, mEglContext);
-    eglDestroySurface(mEglDisplay, mPBufferSurface);
+    if (mPBufferSurface != EGL_NO_SURFACE) {
+        eglDestroySurface(mEglDisplay, mPBufferSurface);
+    }
     eglMakeCurrent(mEglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglTerminate(mEglDisplay);
     eglReleaseThread();
@@ -354,8 +522,8 @@ void EglManager::destroy() {
     mCurrentSurface = EGL_NO_SURFACE;
 }
 
-bool EglManager::makeCurrent(EGLSurface surface, EGLint* errOut) {
-    if (isCurrent(surface)) return false;
+bool EglManager::makeCurrent(EGLSurface surface, EGLint* errOut, bool force) {
+    if (!force && isCurrent(surface)) return false;
 
     if (surface == EGL_NO_SURFACE) {
         // Ensure we always have a valid surface & context
@@ -473,6 +641,117 @@ bool EglManager::setPreserveBuffer(EGLSurface surface, bool preserve) {
     }
 
     return preserved;
+}
+
+static status_t waitForeverOnFence(int fence, const char* logname) {
+    ATRACE_CALL();
+    if (fence == -1) {
+        return NO_ERROR;
+    }
+    constexpr int warningTimeout = 3000;
+    int err = sync_wait(fence, warningTimeout);
+    if (err < 0 && errno == ETIME) {
+        ALOGE("%s: fence %d didn't signal in %d ms", logname, fence, warningTimeout);
+        err = sync_wait(fence, -1);
+    }
+    return err < 0 ? -errno : status_t(NO_ERROR);
+}
+
+status_t EglManager::fenceWait(int fence) {
+    if (!hasEglContext()) {
+        ALOGE("EglManager::fenceWait: EGLDisplay not initialized");
+        return INVALID_OPERATION;
+    }
+
+    if (EglExtensions.waitSync && EglExtensions.nativeFenceSync) {
+        // Block GPU on the fence.
+        // Create an EGLSyncKHR from the current fence.
+        int fenceFd = ::dup(fence);
+        if (fenceFd == -1) {
+            ALOGE("EglManager::fenceWait: error dup'ing fence fd: %d", errno);
+            return -errno;
+        }
+        EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fenceFd, EGL_NONE};
+        EGLSyncKHR sync = eglCreateSyncKHR(mEglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+        if (sync == EGL_NO_SYNC_KHR) {
+            close(fenceFd);
+            ALOGE("EglManager::fenceWait: error creating EGL fence: %#x", eglGetError());
+            return UNKNOWN_ERROR;
+        }
+
+        // XXX: The spec draft is inconsistent as to whether this should
+        // return an EGLint or void.  Ignore the return value for now, as
+        // it's not strictly needed.
+        eglWaitSyncKHR(mEglDisplay, sync, 0);
+        EGLint eglErr = eglGetError();
+        eglDestroySyncKHR(mEglDisplay, sync);
+        if (eglErr != EGL_SUCCESS) {
+            ALOGE("EglManager::fenceWait: error waiting for EGL fence: %#x", eglErr);
+            return UNKNOWN_ERROR;
+        }
+    } else {
+        // Block CPU on the fence.
+        status_t err = waitForeverOnFence(fence, "EglManager::fenceWait");
+        if (err != NO_ERROR) {
+            ALOGE("EglManager::fenceWait: error waiting for fence: %d", err);
+            return err;
+        }
+    }
+    return OK;
+}
+
+status_t EglManager::createReleaseFence(bool useFenceSync, EGLSyncKHR* eglFence, int* nativeFence) {
+    *nativeFence = -1;
+    if (!hasEglContext()) {
+        ALOGE("EglManager::createReleaseFence: EGLDisplay not initialized");
+        return INVALID_OPERATION;
+    }
+
+    if (EglExtensions.nativeFenceSync) {
+        EGLSyncKHR sync = eglCreateSyncKHR(mEglDisplay, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+        if (sync == EGL_NO_SYNC_KHR) {
+            ALOGE("EglManager::createReleaseFence: error creating EGL fence: %#x", eglGetError());
+            return UNKNOWN_ERROR;
+        }
+        glFlush();
+        int fenceFd = eglDupNativeFenceFDANDROID(mEglDisplay, sync);
+        eglDestroySyncKHR(mEglDisplay, sync);
+        if (fenceFd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+            ALOGE("EglManager::createReleaseFence: error dup'ing native fence "
+                  "fd: %#x",
+                  eglGetError());
+            return UNKNOWN_ERROR;
+        }
+        *nativeFence = fenceFd;
+        *eglFence = EGL_NO_SYNC_KHR;
+    } else if (useFenceSync && EglExtensions.fenceSync) {
+        if (*eglFence != EGL_NO_SYNC_KHR) {
+            // There is already a fence for the current slot.  We need to
+            // wait on that before replacing it with another fence to
+            // ensure that all outstanding buffer accesses have completed
+            // before the producer accesses it.
+            EGLint result = eglClientWaitSyncKHR(mEglDisplay, *eglFence, 0, 1000000000);
+            if (result == EGL_FALSE) {
+                ALOGE("EglManager::createReleaseFence: error waiting for previous fence: %#x",
+                      eglGetError());
+                return UNKNOWN_ERROR;
+            } else if (result == EGL_TIMEOUT_EXPIRED_KHR) {
+                ALOGE("EglManager::createReleaseFence: timeout waiting for previous fence");
+                return TIMED_OUT;
+            }
+            eglDestroySyncKHR(mEglDisplay, *eglFence);
+        }
+
+        // Create a fence for the outstanding accesses in the current
+        // OpenGL ES context.
+        *eglFence = eglCreateSyncKHR(mEglDisplay, EGL_SYNC_FENCE_KHR, nullptr);
+        if (*eglFence == EGL_NO_SYNC_KHR) {
+            ALOGE("EglManager::createReleaseFence: error creating fence: %#x", eglGetError());
+            return UNKNOWN_ERROR;
+        }
+        glFlush();
+    }
+    return OK;
 }
 
 } /* namespace renderthread */

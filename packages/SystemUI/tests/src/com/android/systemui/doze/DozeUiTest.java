@@ -27,52 +27,67 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.app.AlarmManager;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
 
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.statusbar.phone.DozeParameters;
+import com.android.systemui.tuner.TunerService;
 import com.android.systemui.util.wakelock.WakeLockFake;
 
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class DozeUiTest extends SysuiTestCase {
 
+    @Mock
     private AlarmManager mAlarmManager;
+    @Mock
     private DozeMachine mMachine;
+    @Mock
+    private DozeParameters mDozeParameters;
+    @Mock
+    private KeyguardUpdateMonitor mKeyguardUpdateMonitor;
+    @Mock
+    private DozeHost mHost;
+    @Mock
+    private DozeLog mDozeLog;
+    @Mock
+    private TunerService mTunerService;
     private WakeLockFake mWakeLock;
-    private DozeHostFake mHost;
     private Handler mHandler;
     private HandlerThread mHandlerThread;
     private DozeUi mDozeUi;
+    @Mock
+    private StatusBarStateController mStatusBarStateController;
 
     @Before
     public void setUp() throws Exception {
+        MockitoAnnotations.initMocks(this);
+
         mHandlerThread = new HandlerThread("DozeUiTest");
         mHandlerThread.start();
-        mAlarmManager = mock(AlarmManager.class);
-        mMachine = mock(DozeMachine.class);
         mWakeLock = new WakeLockFake();
-        mHost = new DozeHostFake();
         mHandler = mHandlerThread.getThreadHandler();
-        DozeParameters params = mock(DozeParameters.class);
-        when(params.getCanControlScreenOffAnimation()).thenReturn(true);
-        when(params.getDisplayNeedsBlanking()).thenReturn(false);
 
-        mDozeUi = new DozeUi(mContext, mAlarmManager, mMachine, mWakeLock, mHost, mHandler, params);
+        mDozeUi = new DozeUi(mContext, mAlarmManager, mWakeLock, mHost, mHandler,
+                mDozeParameters, mStatusBarStateController, mDozeLog);
+        mDozeUi.setDozeMachine(mMachine);
     }
 
     @After
@@ -83,7 +98,7 @@ public class DozeUiTest extends SysuiTestCase {
     }
 
     @Test
-    public void pausingAndUnpausingAod_registersTimeTickAfterUnpausing() throws Exception {
+    public void pausingAndUnpausingAod_registersTimeTickAfterUnpausing() {
         mDozeUi.transitionTo(UNINITIALIZED, INITIALIZED);
         mDozeUi.transitionTo(INITIALIZED, DOZE_AOD);
         mDozeUi.transitionTo(DOZE_AOD, DOZE_AOD_PAUSED);
@@ -96,18 +111,16 @@ public class DozeUiTest extends SysuiTestCase {
     }
 
     @Test
-    public void propagatesAnimateScreenOff() {
-        Assert.assertTrue("animateScreenOff should be true", mHost.animateScreenOff);
-
-        DozeParameters params = mock(DozeParameters.class);
-        new DozeUi(mContext, mAlarmManager, mMachine, mWakeLock, mHost, mHandler, params);
-        Assert.assertFalse("animateScreenOff should be false", mHost.animateScreenOff);
+    public void transitionSetsAnimateWakeup_noAlwaysOn() {
+        mDozeUi.transitionTo(UNINITIALIZED, DOZE);
+        verify(mHost).setAnimateWakeup(eq(false));
     }
 
     @Test
-    public void transitionSetsAnimateWakeup() {
-        mHost.animateWakeup = false;
+    public void transitionSetsAnimateWakeup_alwaysOn() {
+        when(mDozeParameters.getAlwaysOn()).thenReturn(true);
+        when(mDozeParameters.getDisplayNeedsBlanking()).thenReturn(false);
         mDozeUi.transitionTo(UNINITIALIZED, DOZE);
-        Assert.assertTrue("animateScreenOff should be true", mHost.animateWakeup);
+        verify(mHost).setAnimateWakeup(eq(true));
     }
 }

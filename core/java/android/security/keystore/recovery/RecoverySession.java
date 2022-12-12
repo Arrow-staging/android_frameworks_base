@@ -16,16 +16,25 @@
 
 package android.security.keystore.recovery;
 
+import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
+import android.security.keystore.KeyPermanentlyInvalidatedException;
+import android.util.ArrayMap;
 import android.util.Log;
 
+import libcore.util.HexEncoding;
+
+import java.security.Key;
 import java.security.SecureRandom;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertPath;
 import java.security.cert.CertificateException;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -43,31 +52,28 @@ public class RecoverySession implements AutoCloseable {
     private final String mSessionId;
     private final RecoveryController mRecoveryController;
 
-    private RecoverySession(RecoveryController recoveryController, String sessionId) {
+    private RecoverySession(@NonNull RecoveryController recoveryController,
+            @NonNull String sessionId) {
         mRecoveryController = recoveryController;
         mSessionId = sessionId;
     }
 
     /**
-     * A new session, started by {@code recoveryManager}.
+     * A new session, started by the {@link RecoveryController}.
      */
     @RequiresPermission(android.Manifest.permission.RECOVER_KEYSTORE)
-    static RecoverySession newInstance(RecoveryController recoveryController) {
+    static @NonNull RecoverySession newInstance(RecoveryController recoveryController) {
         return new RecoverySession(recoveryController, newSessionId());
     }
 
     /**
      * Returns a new random session ID.
      */
-    private static String newSessionId() {
+    private static @NonNull String newSessionId() {
         SecureRandom secureRandom = new SecureRandom();
         byte[] sessionId = new byte[SESSION_ID_LENGTH_BYTES];
         secureRandom.nextBytes(sessionId);
-        StringBuilder sb = new StringBuilder();
-        for (byte b : sessionId) {
-            sb.append(Byte.toHexString(b, /*upperCase=*/ false));
-        }
-        return sb.toString();
+        return HexEncoding.encodeToString(sessionId, /*upperCase=*/ false);
     }
 
     /**
@@ -75,35 +81,40 @@ public class RecoverySession implements AutoCloseable {
      * The method generates a symmetric key for a session, which trusted remote device can use to
      * return recovery key.
      *
-     * @param verifierPublicKey Encoded {@code java.security.cert.X509Certificate} with Public key
-     *     used to create the recovery blob on the source device.
-     *     Keystore will verify the certificate using root of trust.
+     * @param rootCertificateAlias The alias of the root certificate that is already in the Android
+     *     OS. The root certificate will be used for validating {@code verifierCertPath}.
+     * @param verifierCertPath The certificate path used to create the recovery blob on the source
+     *     device. Keystore will verify the certificate path by using the root of trust.
      * @param vaultParams Must match the parameters in the corresponding field in the recovery blob.
      *     Used to limit number of guesses.
      * @param vaultChallenge Data passed from server for this recovery session and used to prevent
-     *     replay attacks
+     *     replay attacks.
      * @param secrets Secrets provided by user, the method only uses type and secret fields.
-     * @return The recovery claim. Claim provides a b binary blob with recovery claim. It is
-     *     encrypted with verifierPublicKey and contains a proof of user secrets, session symmetric
+     * @return The binary blob with recovery claim. It is encrypted with verifierPublicKey
+     * and contains a proof of user secrets possession, session symmetric
      *     key and parameters necessary to identify the counter with the number of failed recovery
      *     attempts.
-     * @throws CertificateException if the {@code verifierPublicKey} is in an incorrect
-     *     format.
+     * @throws CertificateException if the {@code verifierCertPath} is invalid.
      * @throws InternalRecoveryServiceException if an unexpected error occurred in the recovery
      *     service.
      */
     @RequiresPermission(android.Manifest.permission.RECOVER_KEYSTORE)
     @NonNull public byte[] start(
-            @NonNull byte[] verifierPublicKey,
+            @NonNull String rootCertificateAlias,
+            @NonNull CertPath verifierCertPath,
             @NonNull byte[] vaultParams,
             @NonNull byte[] vaultChallenge,
             @NonNull List<KeyChainProtectionParams> secrets)
             throws CertificateException, InternalRecoveryServiceException {
+        // Wrap the CertPath in a Parcelable so it can be passed via Binder calls.
+        RecoveryCertPath recoveryCertPath =
+                RecoveryCertPath.createRecoveryCertPath(verifierCertPath);
         try {
             byte[] recoveryClaim =
-                    mRecoveryController.getBinder().startRecoverySession(
+                    mRecoveryController.getBinder().startRecoverySessionWithCertPath(
                             mSessionId,
-                            verifierPublicKey,
+                            rootCertificateAlias,
+                            recoveryCertPath,
                             vaultParams,
                             vaultChallenge,
                             secrets);
@@ -111,34 +122,35 @@ public class RecoverySession implements AutoCloseable {
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         } catch (ServiceSpecificException e) {
-            if (e.errorCode == RecoveryController.ERROR_BAD_CERTIFICATE_FORMAT) {
-                throw new CertificateException(e.getMessage());
+            if (e.errorCode == RecoveryController.ERROR_BAD_CERTIFICATE_FORMAT
+                    || e.errorCode == RecoveryController.ERROR_INVALID_CERTIFICATE) {
+                throw new CertificateException("Invalid certificate for recovery session", e);
             }
             throw mRecoveryController.wrapUnexpectedServiceSpecificException(e);
         }
     }
 
     /**
-     * Imports keys.
+     * Imports key chain snapshot recovered from a remote vault.
      *
      * @param recoveryKeyBlob Recovery blob encrypted by symmetric key generated for this session.
      * @param applicationKeys Application keys. Key material can be decrypted using recoveryKeyBlob
-     *     and session. KeyStore only uses package names from the application info in {@link
-     *     WrappedApplicationKey}. Caller is responsibility to perform certificates check.
-     * @return Map from alias to raw key material.
+     *     and session key generated by {@link #start}.
+     * @return {@code Map} from recovered keys aliases to their references.
      * @throws SessionExpiredException if {@code session} has since been closed.
      * @throws DecryptionFailedException if unable to decrypt the snapshot.
      * @throws InternalRecoveryServiceException if an error occurs internal to the recovery service.
      */
-    @RequiresPermission(android.Manifest.permission.RECOVER_KEYSTORE)
-    public Map<String, byte[]> recoverKeys(
+    @RequiresPermission(Manifest.permission.RECOVER_KEYSTORE)
+    @NonNull public Map<String, Key> recoverKeyChainSnapshot(
             @NonNull byte[] recoveryKeyBlob,
-            @NonNull List<WrappedApplicationKey> applicationKeys)
-            throws SessionExpiredException, DecryptionFailedException,
-            InternalRecoveryServiceException {
+            @NonNull List<WrappedApplicationKey> applicationKeys
+    ) throws SessionExpiredException, DecryptionFailedException, InternalRecoveryServiceException {
         try {
-            return (Map<String, byte[]>) mRecoveryController.getBinder().recoverKeys(
-                    mSessionId, recoveryKeyBlob, applicationKeys);
+            Map<String, String> grantAliases = mRecoveryController
+                    .getBinder()
+                    .recoverKeyChainSnapshot(mSessionId, recoveryKeyBlob, applicationKeys);
+            return getKeysFromGrants(grantAliases);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         } catch (ServiceSpecificException e) {
@@ -152,18 +164,39 @@ public class RecoverySession implements AutoCloseable {
         }
     }
 
+    /** Given a map from alias to grant alias, returns a map from alias to a {@link Key} handle. */
+    private @NonNull Map<String, Key> getKeysFromGrants(@NonNull Map<String, String> grantAliases)
+            throws InternalRecoveryServiceException {
+        ArrayMap<String, Key> keysByAlias = new ArrayMap<>(grantAliases.size());
+        for (String alias : grantAliases.keySet()) {
+            String grantAlias = grantAliases.get(alias);
+            Key key;
+            try {
+                key = mRecoveryController.getKeyFromGrant(grantAlias);
+            } catch (KeyPermanentlyInvalidatedException | UnrecoverableKeyException e) {
+                throw new InternalRecoveryServiceException(
+                        String.format(
+                                Locale.US,
+                                "Failed to get key '%s' from grant '%s'",
+                                alias,
+                                grantAlias), e);
+            }
+            keysByAlias.put(alias, key);
+        }
+        return keysByAlias;
+    }
+
     /**
      * An internal session ID, used by the framework to match recovery claims to snapshot responses.
      *
      * @hide
      */
-    String getSessionId() {
+    @NonNull String getSessionId() {
         return mSessionId;
     }
 
     /**
-     * Deletes all data associated with {@code session}. Should not be invoked directly but via
-     * {@link RecoverySession#close()}.
+     * Deletes all data associated with {@code session}.
      */
     @RequiresPermission(android.Manifest.permission.RECOVER_KEYSTORE)
     @Override

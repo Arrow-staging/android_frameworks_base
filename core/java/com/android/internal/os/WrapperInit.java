@@ -23,15 +23,17 @@ import android.system.Os;
 import android.system.OsConstants;
 import android.system.StructCapUserData;
 import android.system.StructCapUserHeader;
-import android.util.TimingsTraceLog;
 import android.util.Slog;
+import android.util.TimingsTraceLog;
+
 import dalvik.system.VMRuntime;
+
+import libcore.io.IoUtils;
+
 import java.io.DataOutputStream;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.IOException;
-
-import libcore.io.IoUtils;
 
 /**
  * Startup class for the wrapper process.
@@ -67,15 +69,16 @@ public class WrapperInit {
         // Tell the Zygote what our actual PID is (since it only knows about the
         // wrapper that it directly forked).
         if (fdNum != 0) {
+            FileDescriptor fd = new FileDescriptor();
             try {
-                FileDescriptor fd = new FileDescriptor();
                 fd.setInt$(fdNum);
                 DataOutputStream os = new DataOutputStream(new FileOutputStream(fd));
                 os.writeInt(Process.myPid());
                 os.close();
-                IoUtils.closeQuietly(fd);
             } catch (IOException ex) {
                 Slog.d(TAG, "Could not write pid of wrapped process to Zygote pipe.", ex);
+            } finally {
+                IoUtils.closeQuietly(fd);
             }
         }
 
@@ -114,6 +117,14 @@ public class WrapperInit {
         }
         command.append(' ');
         command.append(appProcess);
+
+        // Generate bare minimum of debug information to be able to backtrace through JITed code.
+        // We assume that if the invoke wrapper is used, backtraces are desirable:
+        //  * The wrap.sh script can only be used by debuggable apps, which would enable this flag
+        //    without the script anyway (the fork-zygote path).  So this makes the two consistent.
+        //  * The wrap.* property can only be used on userdebug builds and is likely to be used by
+        //    developers (e.g. enable debug-malloc), in which case backtraces are also useful.
+        command.append(" -Xcompiler-option --generate-mini-debug-info");
 
         command.append(" /system/bin --application");
         if (niceName != null) {
@@ -158,10 +169,10 @@ public class WrapperInit {
             System.arraycopy(argv, 2, removedArgs, 0, argv.length - 2);
             argv = removedArgs;
         }
-
         // Perform the same initialization that would happen after the Zygote forks.
         Zygote.nativePreApplicationInit();
-        return RuntimeInit.applicationInit(targetSdkVersion, argv, classLoader);
+        return RuntimeInit.applicationInit(targetSdkVersion, /*disabledCompatChanges*/ null,
+                argv, classLoader);
     }
 
     /**

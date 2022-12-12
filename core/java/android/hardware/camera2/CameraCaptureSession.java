@@ -16,14 +16,18 @@
 
 package android.hardware.camera2;
 
+import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.hardware.camera2.CameraOfflineSession;
+import android.hardware.camera2.CameraOfflineSession.CameraOfflineSessionCallback;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.os.Handler;
 import android.view.Surface;
 
+import java.util.Collection;
 import java.util.List;
-
+import java.util.concurrent.Executor;
 
 /**
  * A configured capture session for a {@link CameraDevice}, used for capturing images from the
@@ -184,6 +188,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void prepare(int maxCount, @NonNull Surface surface)
             throws CameraAccessException;
 
@@ -223,6 +228,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void tearDown(@NonNull Surface surface) throws CameraAccessException;
 
     /**
@@ -315,6 +321,9 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      * can submit reprocess capture requests. Submitting a reprocess request to a regular capture
      * session will result in an {@link IllegalArgumentException}.</p>
      *
+     * <p>Submitting a request that targets Surfaces with an unsupported dynamic range combination
+     * will result in an {@link IllegalArgumentException}.</p>
+     *
      * @param request the settings for this capture
      * @param listener The callback object to notify once this request has been
      * processed. If null, no metadata will be produced for this capture,
@@ -341,17 +350,66 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *                                  a different session; or the capture targets a Surface in
      *                                  the middle of being {@link #prepare prepared}; or the
      *                                  handler is null, the listener is not null, and the calling
-     *                                  thread has no looper.
+     *                                  thread has no looper; or the request targets Surfaces with
+     *                                  an unsupported dynamic range combination
      *
      * @see #captureBurst
      * @see #setRepeatingRequest
      * @see #setRepeatingBurst
      * @see #abortCaptures
      * @see CameraDevice#createReprocessableCaptureSession
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
      */
     public abstract int capture(@NonNull CaptureRequest request,
             @Nullable CaptureCallback listener, @Nullable Handler handler)
             throws CameraAccessException;
+
+    /**
+     * <p>Submit a request for an image to be captured by the camera device.</p>
+     *
+     * <p>The behavior of this method matches that of
+     * {@link #capture(CaptureRequest, CaptureCallback, Handler)},
+     * except that it uses {@link java.util.concurrent.Executor} as an argument
+     * instead of {@link android.os.Handler}.</p>
+     *
+     * @param request the settings for this capture
+     * @param executor the executor which will be used for invoking the listener.
+     * @param listener The callback object to notify once this request has been
+     * processed.
+     *
+     * @return int A unique capture sequence ID used by
+     *             {@link CaptureCallback#onCaptureSequenceCompleted}.
+     *
+     * @throws CameraAccessException if the camera device is no longer connected or has
+     *                               encountered a fatal error
+     * @throws IllegalStateException if this session is no longer active, either because the session
+     *                               was explicitly closed, a new session has been created
+     *                               or the camera device has been closed.
+     * @throws IllegalArgumentException if the request targets no Surfaces or Surfaces that are not
+     *                                  configured as outputs for this session; or the request
+     *                                  targets a set of Surfaces that cannot be submitted
+     *                                  simultaneously in a reprocessable capture session; or a
+     *                                  reprocess capture request is submitted in a
+     *                                  non-reprocessable capture session; or the reprocess capture
+     *                                  request was created with a {@link TotalCaptureResult} from
+     *                                  a different session; or the capture targets a Surface in
+     *                                  the middle of being {@link #prepare prepared}; or the
+     *                                  executor is null, or the listener is not null;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination;
+     *
+     * @see #captureBurst
+     * @see #setRepeatingRequest
+     * @see #setRepeatingBurst
+     * @see #abortCaptures
+     * @see CameraDevice#createReprocessableCaptureSession
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
+     */
+    public int captureSingleRequest(@NonNull CaptureRequest request,
+            @NonNull @CallbackExecutor Executor executor, @NonNull CaptureCallback listener)
+            throws CameraAccessException {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
 
     /**
      * Submit a list of requests to be captured in sequence as a burst. The
@@ -376,6 +434,9 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      * {@link CameraDevice#createReprocessableCaptureSession createReprocessableCaptureSession}
      * can submit reprocess capture requests. Submitting a reprocess request to a regular
      * capture session will result in an {@link IllegalArgumentException}.</p>
+     *
+     * <p>Submitting a request that targets Surfaces with an unsupported dynamic range combination
+     * will result in an {@link IllegalArgumentException}.</p>
      *
      * @param requests the list of settings for this burst capture
      * @param listener The callback object to notify each time one of the
@@ -404,16 +465,69 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *                                  {@link TotalCaptureResult} from a different session; or one
      *                                  of the captures targets a Surface in the middle of being
      *                                  {@link #prepare prepared}; or if the handler is null, the
-     *                                  listener is not null, and the calling thread has no looper.
+     *                                  listener is not null, and the calling thread has no looper;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
      *
      * @see #capture
      * @see #setRepeatingRequest
      * @see #setRepeatingBurst
      * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
      */
     public abstract int captureBurst(@NonNull List<CaptureRequest> requests,
             @Nullable CaptureCallback listener, @Nullable Handler handler)
             throws CameraAccessException;
+
+    /**
+     * Submit a list of requests to be captured in sequence as a burst. The
+     * burst will be captured in the minimum amount of time possible, and will
+     * not be interleaved with requests submitted by other capture or repeat
+     * calls.
+     *
+     * <p>The behavior of this method matches that of
+     * {@link #captureBurst(List, CaptureCallback, Handler)},
+     * except that it uses {@link java.util.concurrent.Executor} as an argument
+     * instead of {@link android.os.Handler}.</p>
+     *
+     * @param requests the list of settings for this burst capture
+     * @param executor the executor which will be used for invoking the listener.
+     * @param listener The callback object to notify each time one of the
+     * requests in the burst has been processed.
+     *
+     * @return int A unique capture sequence ID used by
+     *             {@link CaptureCallback#onCaptureSequenceCompleted}.
+     *
+     * @throws CameraAccessException if the camera device is no longer connected or has
+     *                               encountered a fatal error
+     * @throws IllegalStateException if this session is no longer active, either because the session
+     *                               was explicitly closed, a new session has been created
+     *                               or the camera device has been closed.
+     * @throws IllegalArgumentException If the requests target no Surfaces, or the requests target
+     *                                  Surfaces not currently configured as outputs; or one of the
+     *                                  requests targets a set of Surfaces that cannot be submitted
+     *                                  simultaneously in a reprocessable capture session; or a
+     *                                  reprocess capture request is submitted in a
+     *                                  non-reprocessable capture session; or one of the reprocess
+     *                                  capture requests was created with a
+     *                                  {@link TotalCaptureResult} from a different session; or one
+     *                                  of the captures targets a Surface in the middle of being
+     *                                  {@link #prepare prepared}; or if the executor is null; or if
+     *                                  the listener is null;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
+     *
+     * @see #capture
+     * @see #setRepeatingRequest
+     * @see #setRepeatingBurst
+     * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
+     */
+    public int captureBurstRequests(@NonNull List<CaptureRequest> requests,
+            @NonNull @CallbackExecutor Executor executor, @NonNull CaptureCallback listener)
+            throws CameraAccessException {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
 
     /**
      * Request endlessly repeating capture of images by this capture session.
@@ -448,6 +562,9 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      * single reprocess input image. The request must be capturing images from the camera. If a
      * reprocess capture request is submitted, this method will throw IllegalArgumentException.</p>
      *
+     * <p>Submitting a request that targets Surfaces with an unsupported dynamic range combination
+     * will result in an {@link IllegalArgumentException}.</p>
+     *
      * @param request the request to repeat indefinitely
      * @param listener The callback object to notify every time the
      * request finishes processing. If null, no metadata will be
@@ -470,17 +587,62 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *                                  is a reprocess capture request; or the capture targets a
      *                                  Surface in the middle of being {@link #prepare prepared}; or
      *                                  the handler is null, the listener is not null, and the
-     *                                  calling thread has no looper; or no requests were passed in.
+     *                                  calling thread has no looper; or no requests were passed in;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
      *
      * @see #capture
      * @see #captureBurst
      * @see #setRepeatingBurst
      * @see #stopRepeating
      * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
      */
     public abstract int setRepeatingRequest(@NonNull CaptureRequest request,
             @Nullable CaptureCallback listener, @Nullable Handler handler)
             throws CameraAccessException;
+
+    /**
+     * Request endlessly repeating capture of images by this capture session.
+     *
+     * <p>The behavior of this method matches that of
+     * {@link #setRepeatingRequest(CaptureRequest, CaptureCallback, Handler)},
+     * except that it uses {@link java.util.concurrent.Executor} as an argument
+     * instead of {@link android.os.Handler}.</p>
+     *
+     * @param request the request to repeat indefinitely
+     * @param executor the executor which will be used for invoking the listener.
+     * @param listener The callback object to notify every time the
+     * request finishes processing.
+     *
+     * @return int A unique capture sequence ID used by
+     *             {@link CaptureCallback#onCaptureSequenceCompleted}.
+     *
+     * @throws CameraAccessException if the camera device is no longer connected or has
+     *                               encountered a fatal error
+     * @throws IllegalStateException if this session is no longer active, either because the session
+     *                               was explicitly closed, a new session has been created
+     *                               or the camera device has been closed.
+     * @throws IllegalArgumentException If the request references no Surfaces or references Surfaces
+     *                                  that are not currently configured as outputs; or the request
+     *                                  is a reprocess capture request; or the capture targets a
+     *                                  Surface in the middle of being {@link #prepare prepared}; or
+     *                                  the executor is null; or the listener is null;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
+     *
+     * @see #capture
+     * @see #captureBurst
+     * @see #setRepeatingBurst
+     * @see #stopRepeating
+     * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
+     */
+    public int setSingleRepeatingRequest(@NonNull CaptureRequest request,
+            @NonNull @CallbackExecutor Executor executor, @NonNull CaptureCallback listener)
+            throws CameraAccessException {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
 
     /**
      * <p>Request endlessly repeating capture of a sequence of images by this
@@ -519,6 +681,9 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      * single reprocess input image. The request must be capturing images from the camera. If a
      * reprocess capture request is submitted, this method will throw IllegalArgumentException.</p>
      *
+     * <p>Submitting a request that targets Surfaces with an unsupported dynamic range combination
+     * will result in an {@link IllegalArgumentException}.</p>
+     *
      * @param requests the list of requests to cycle through indefinitely
      * @param listener The callback object to notify each time one of the
      * requests in the repeating bursts has finished processing. If null, no
@@ -542,17 +707,64 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *                                  targets a Surface in the middle of being
      *                                  {@link #prepare prepared}; or the handler is null, the
      *                                  listener is not null, and the calling thread has no looper;
-     *                                  or no requests were passed in.
+     *                                  or no requests were passed in;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
      *
      * @see #capture
      * @see #captureBurst
      * @see #setRepeatingRequest
      * @see #stopRepeating
      * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
      */
     public abstract int setRepeatingBurst(@NonNull List<CaptureRequest> requests,
             @Nullable CaptureCallback listener, @Nullable Handler handler)
             throws CameraAccessException;
+
+    /**
+     * <p>Request endlessly repeating capture of a sequence of images by this
+     * capture session.</p>
+     *
+     * <p>The behavior of this method matches that of
+     * {@link #setRepeatingBurst(List, CaptureCallback, Handler)},
+     * except that it uses {@link java.util.concurrent.Executor} as an argument
+     * instead of {@link android.os.Handler}.</p>
+     *
+     * @param requests the list of requests to cycle through indefinitely
+     * @param executor the executor which will be used for invoking the listener.
+     * @param listener The callback object to notify each time one of the
+     * requests in the repeating bursts has finished processing.
+     *
+     * @return int A unique capture sequence ID used by
+     *             {@link CaptureCallback#onCaptureSequenceCompleted}.
+     *
+     * @throws CameraAccessException if the camera device is no longer connected or has
+     *                               encountered a fatal error
+     * @throws IllegalStateException if this session is no longer active, either because the session
+     *                               was explicitly closed, a new session has been created
+     *                               or the camera device has been closed.
+     * @throws IllegalArgumentException If the requests reference no Surfaces or reference Surfaces
+     *                                  not currently configured as outputs; or one of the requests
+     *                                  is a reprocess capture request; or one of the captures
+     *                                  targets a Surface in the middle of being
+     *                                  {@link #prepare prepared}; or the executor is null; or the
+     *                                  listener is null;
+     *                                  or the request targets Surfaces with an unsupported dynamic
+     *                                  range combination.
+     *
+     * @see #capture
+     * @see #captureBurst
+     * @see #setRepeatingRequest
+     * @see #stopRepeating
+     * @see #abortCaptures
+     * @see android.hardware.camera2.params.DynamicRangeProfiles#getProfileCaptureRequestConstraints
+     */
+    public int setRepeatingBurstRequests(@NonNull List<CaptureRequest> requests,
+            @NonNull @CallbackExecutor Executor executor, @NonNull CaptureCallback listener)
+            throws CameraAccessException {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
 
     /**
      * <p>Cancel any ongoing repeating capture set by either
@@ -573,7 +785,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
      *
      * @see #setRepeatingRequest
      * @see #setRepeatingBurst
-     * @see StateCallback#onIdle
+     * @see StateCallback#onReady
      */
     public abstract void stopRepeating() throws CameraAccessException;
 
@@ -683,16 +895,123 @@ public abstract class CameraCaptureSession implements AutoCloseable {
     }
 
     /**
+     * Switch the current capture session and a given set of registered camera surfaces
+     * to offline processing mode.
+     *
+     * <p>Devices support this method will report
+     * {@link CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_OFFLINE_PROCESSING OFFLINE_PROCESSING}
+     * capability in {@link CameraCharacteristics#REQUEST_AVAILABLE_CAPABILITIES}. When this method
+     * is supported, applications can use it to improve the latency of closing camera or recreating
+     * capture session without losing the in progresss capture request outputs.</p>
+     *
+     * <p>Offline processing mode and the corresponding {@link CameraOfflineSession} differ from
+     * a regular online camera capture session in several ways. Successful offline switches will
+     * close the currently active camera capture session. Camera clients are also allowed
+     * to call {@link CameraDevice#close} while offline processing of selected capture
+     * requests is still in progress. Such side effects free device close is only possible
+     * when the offline session moves to the ready state. Once this happens, closing the camera
+     * device will not affect the pending offline requests and they must complete as normal.</p>
+     *
+     * <p>Offline processing mode switches may need several hundred milliseconds to complete
+     * as the underlying camera implementation must abort all currently active repeating requests
+     * as well as all other pending requests not specified by the client. Additionally the switch
+     * will be blocked until all requests that continue processing within the offline session
+     * acquire their initial input frame from camera sensor. The call to {@link #switchToOffline}
+     * itself is not blocking and will only trigger the offline switch sequence. Clients will
+     * be notified via {@link CameraOfflineSessionCallback#onReady} once the entire sequence is
+     * complete.</p>
+     *
+     * <p>Please note that after a successful call to this method the currently active capture
+     * session will no longer be valid and clients will begin receiving capture
+     * callbacks with a corresponding {@link CameraOfflineSession} passed as a session
+     * argument.</p>
+     *
+     * @param offlineSurfaces Client-specified collection of input/output camera registered surfaces
+     *                        that need to be switched to offline mode along with their pending
+     *                        capture requests. Do note that not all camera registered
+     *                        surfaces can be switched to offline mode. Offline processing
+     *                        support for individual surfaces can be queried using
+     *                        {@link #supportsOfflineProcessing}. Additionally offline mode
+     *                        switches are not available for shared surfaces
+     *                        {@link OutputConfiguration#enableSurfaceSharing} and surfaces
+     *                        as part of a surface group.
+     *
+     * @param executor The executor which will be used for invoking the offline callback listener.
+     *
+     * @param listener The callback object to notify for offline session events.
+     *
+     * @return camera offline session which in case of successful offline switch will move in ready
+     *         state after clients receive {@link CameraOfflineSessionCallback#onReady}. In case the
+     *         offline switch was not successful clients will receive respective
+     *         {@link CameraOfflineSessionCallback#onSwitchFailed} notification.
+     *
+     * @throws IllegalArgumentException if an attempt was made to pass a {@link Surface} that was
+     *                                  not registered with this capture session or a shared
+     *                                  surface {@link OutputConfiguration#enableSurfaceSharing} or
+     *                                  surface as part of a surface group. The current capture
+     *                                  session will remain valid and active in case of this
+     *                                  exception.
+     *
+     * @throws CameraAccessException if the camera device is no longer connected or has
+     *                               encountered a fatal error.
+     *
+     * @see CameraOfflineSession
+     * @see CameraOfflineSessionCallback
+     * @see #supportsOfflineProcessing
+     * @see CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_OFFLINE_PROCESSING
+     */
+    @Nullable
+    public CameraOfflineSession switchToOffline(@NonNull Collection<Surface> offlineSurfaces,
+            @NonNull @CallbackExecutor Executor executor,
+            @NonNull CameraOfflineSessionCallback listener)
+            throws CameraAccessException {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
+
+    /**
+     * <p>Query whether a given Surface is able to support offline mode. </p>
+     *
+     * <p>Surfaces that support offline mode can be passed as arguments to {@link #switchToOffline}.
+     * </p>
+     *
+     * @param surface An input/output surface that was used to create this session or the result of
+     *                {@link #getInputSurface}.
+     *
+     * @return {@code true} if the surface can support offline mode and can be passed as argument to
+     *         {@link #switchToOffline}. {@code false} otherwise.
+     *
+     * @throws IllegalArgumentException if an attempt was made to pass a {@link Surface} that was
+     *                                  not registered with this capture session.
+     * @throws UnsupportedOperationException if an attempt was made to call this method using
+     *                                       unsupported camera capture session like
+     *                                       {@link CameraConstrainedHighSpeedCaptureSession} or
+     *                                       {@link CameraOfflineSession}.
+     *
+     * @see #switchToOffline
+     */
+    public boolean supportsOfflineProcessing(@NonNull Surface surface) {
+        throw new UnsupportedOperationException("Subclasses must override this method");
+    }
+
+    /**
      * Close this capture session asynchronously.
      *
      * <p>Closing a session frees up the target output Surfaces of the session for reuse with either
      * a new session, or to other APIs that can draw to Surfaces.</p>
      *
-     * <p>Note that creating a new capture session with {@link CameraDevice#createCaptureSession}
+     * <p>Note that for common usage scenarios like creating a new session or closing the camera
+     * device, it is faster to call respective APIs directly (see below for more details) without
+     * calling into this method. This API is only useful when application wants to uncofigure the
+     * camera but keep the device open for later use.</p>
+     *
+     * <p>Creating a new capture session with {@link CameraDevice#createCaptureSession}
      * will close any existing capture session automatically, and call the older session listener's
      * {@link StateCallback#onClosed} callback. Using {@link CameraDevice#createCaptureSession}
      * directly without closing is the recommended approach for quickly switching to a new session,
      * since unchanged target outputs can be reused more efficiently.</p>
+     *
+     * <p>Closing the device with {@link CameraDevice#close} directly without calling this API is
+     * also recommended for quickly closing the camera.</p>
      *
      * <p>Once a session is closed, all methods on it will throw an IllegalStateException, and any
      * repeating requests or bursts are stopped (as if {@link #stopRepeating()} was called).
@@ -725,7 +1044,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * <p>If the camera device configuration fails, then {@link #onConfigureFailed} will
          * be invoked instead of this callback.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the successfully configured session instance
          */
         public abstract void onConfigured(@NonNull CameraCaptureSession session);
 
@@ -740,7 +1059,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * to the session prior to this callback will be discarded and will not produce any
          * callbacks on their listeners.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the session instance that failed during configuration
          */
         public abstract void onConfigureFailed(@NonNull CameraCaptureSession session);
 
@@ -754,7 +1073,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * <p>Otherwise, this callback will be invoked any time the session finishes processing
          * all of its active capture requests, and no repeating request or burst is set up.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the session returned by {@link #onConfigured}
          *
          */
         public void onReady(@NonNull CameraCaptureSession session) {
@@ -771,7 +1090,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * <p>If the session runs out of capture requests to process and calls {@link #onReady},
          * then this callback will be invoked again once new requests are submitted for capture.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the session returned by {@link #onConfigured}
          */
         public void onActive(@NonNull CameraCaptureSession session) {
             // default empty implementation
@@ -801,7 +1120,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * {@link #onReady}, which is fired when all requests in both queues have been processed.</p>
          *
          * @param session
-         *            The session returned by {@link CameraDevice#createCaptureSession}
+         *            The session returned by {@link #onConfigured}
          */
         public void onCaptureQueueEmpty(@NonNull CameraCaptureSession session) {
             // default empty implementation
@@ -819,7 +1138,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * However, any in-progress capture requests submitted to the session will be completed
          * as normal.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the session returned by {@link #onConfigured}
          */
         public void onClosed(@NonNull CameraCaptureSession session) {
             // default empty implementation
@@ -837,7 +1156,7 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * this callback is still invoked after the error is encountered, though some buffers may
          * not have been successfully pre-allocated.</p>
          *
-         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param session the session returned by {@link #onConfigured}
          * @param surface the Surface that was used with the {@link #prepare} call.
          */
         public void onSurfacePrepared(@NonNull CameraCaptureSession session,
@@ -910,6 +1229,42 @@ public abstract class CameraCaptureSession implements AutoCloseable {
          * @see android.media.MediaActionSound
          */
         public void onCaptureStarted(@NonNull CameraCaptureSession session,
+                @NonNull CaptureRequest request, long timestamp, long frameNumber) {
+            // default empty implementation
+        }
+
+        /**
+         * This method is called when the camera device has started reading out the output
+         * image for the request, at the beginning of the sensor image readout.
+         *
+         * <p>For a capture request, this callback is invoked right after
+         * {@link #onCaptureStarted}. Unlike {@link #onCaptureStarted}, instead of passing
+         * a timestamp of start of exposure, this callback passes a timestamp of start of
+         * camera data readout. This is useful because for a camera running at fixed frame
+         * rate, the start of readout is at fixed interval, which is not necessarily true for
+         * the start of exposure, particularly when autoexposure is changing exposure duration
+         * between frames.</p>
+         *
+         * <p>This timestamp may not match {@link CaptureResult#SENSOR_TIMESTAMP the result
+         * timestamp field}. It will, however, match the timestamp of buffers sent to the
+         * output surfaces with {@link OutputConfiguration#TIMESTAMP_BASE_READOUT_SENSOR}
+         * timestamp base.</p>
+         *
+         * <p>This callback will be called only if {@link
+         * CameraCharacteristics#SENSOR_READOUT_TIMESTAMP} is
+         * {@link CameraMetadata#SENSOR_READOUT_TIMESTAMP_HARDWARE}, and it's called
+         * right after {@link #onCaptureStarted}.</p>
+         *
+         * @param session the session returned by {@link CameraDevice#createCaptureSession}
+         * @param request the request for the readout that just began
+         * @param timestamp the timestamp at start of readout for a regular request, or
+         *                  the timestamp at the input image's start of readout for a
+         *                  reprocess request, in nanoseconds.
+         * @param frameNumber the frame number for this capture
+         *
+         * @hide
+         */
+        public void onReadoutStarted(@NonNull CameraCaptureSession session,
                 @NonNull CaptureRequest request, long timestamp, long frameNumber) {
             // default empty implementation
         }

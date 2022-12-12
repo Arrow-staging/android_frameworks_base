@@ -21,58 +21,36 @@ LOCAL_MODULE_TAGS := tests
 LOCAL_JACK_FLAGS := --multi-dex native
 LOCAL_DX_FLAGS := --multi-dex
 
-LOCAL_PROTOC_OPTIMIZE_TYPE := nano
-LOCAL_PROTOC_FLAGS := -I$(LOCAL_PATH)/..
-LOCAL_PROTO_JAVA_OUTPUT_PARAMS := optional_field_style=accessors
-
 LOCAL_PACKAGE_NAME := SystemUITests
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../NOTICE
+LOCAL_PRIVATE_PLATFORM_APIS := true
 LOCAL_COMPATIBILITY_SUITE := device-tests
 
-LOCAL_SRC_FILES := $(call all-java-files-under, src) \
-    $(call all-Iaidl-files-under, src) \
-    $(call all-java-files-under, ../src)
-
-LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/res \
-    frameworks/base/packages/SystemUI/res \
-    frameworks/base/packages/SystemUI/res-keyguard \
-
 LOCAL_STATIC_ANDROID_LIBRARIES := \
-    SystemUIPluginLib \
-    SystemUISharedLib \
-    android-support-v4 \
-    android-support-v7-recyclerview \
-    android-support-v7-preference \
-    android-support-v7-appcompat \
-    android-support-v7-mediarouter \
-    android-support-v7-palette \
-    android-support-v14-preference \
-    android-support-v17-leanback \
-    android-slices-core \
-    android-slices-view \
-    android-slices-builders \
-    android-arch-core-runtime \
-    android-arch-lifecycle-extensions \
+    SystemUI-tests
 
-LOCAL_STATIC_JAVA_LIBRARIES := \
-    metrics-helper-lib \
-    android-support-test \
-    mockito-target-minus-junit4 \
-    SystemUI-proto \
-    SystemUI-tags \
-    testables \
-    truth-prebuilt \
+LOCAL_MULTILIB := both
+
+LOCAL_JNI_SHARED_LIBRARIES := \
+    libdexmakerjvmtiagent \
+    libmultiplejvmtiagentsinterferenceagent \
+    libstaticjvmtiagent
 
 LOCAL_JAVA_LIBRARIES := \
     android.test.runner \
     telephony-common \
     android.test.base \
 
-
-LOCAL_AAPT_FLAGS := --extra-packages com.android.systemui:com.android.keyguard
+LOCAL_AAPT_FLAGS := --extra-packages com.android.systemui
 
 # sign this with platform cert, so this test is allowed to inject key events into
 # UI it doesn't own. This is necessary to allow screenshots to be taken
 LOCAL_CERTIFICATE := platform
+
+LOCAL_FULL_LIBS_MANIFEST_FILES := $(LOCAL_PATH)/AndroidManifest.xml
+LOCAL_MANIFEST_FILE := AndroidManifest-base.xml
 
 # Provide jack a list of classes to exclude from code coverage.
 # This is needed because the SystemUITests compile SystemUI source directly, rather than using
@@ -100,10 +78,8 @@ local_space := $(local_empty) $(local_empty)
 # This appends a * to all classes and replace the space separators with commas.
 jacoco_exclude := $(subst $(space),$(comma),$(patsubst %,%*,$(local_classes)))
 
-LOCAL_JACK_COVERAGE_INCLUDE_FILTER := com.android.systemui.*
-LOCAL_JACK_COVERAGE_EXCLUDE_FILTER := com.android.systemui.tests.*,$(jacoco_exclude)
-
-include frameworks/base/packages/SettingsLib/common.mk
+LOCAL_JACK_COVERAGE_INCLUDE_FILTER := com.android.systemui.*,com.android.keyguard.*
+LOCAL_JACK_COVERAGE_EXCLUDE_FILTER := $(jacoco_exclude)
 
 ifeq ($(EXCLUDE_SYSTEMUI_TESTS),)
     include $(BUILD_PACKAGE)

@@ -16,140 +16,98 @@
 
 package com.android.systemui.util.leak;
 
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.testing.AndroidTestingRunner;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.dump.DumpManager;
+import com.android.systemui.util.concurrency.FakeExecutor;
+import com.android.systemui.util.concurrency.MessageRouterImpl;
+import com.android.systemui.util.time.FakeSystemClock;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 @SmallTest
-@RunWith(AndroidJUnit4.class)
+@RunWith(AndroidTestingRunner.class)
 public class GarbageMonitorTest extends SysuiTestCase {
 
-    private LeakReporter mLeakReporter;
-    private TrackedGarbage mTrackedGarbage;
-    private TestableGarbageMonitor mGarbageMonitor;
+    @Mock private LeakReporter mLeakReporter;
+    @Mock private TrackedGarbage mTrackedGarbage;
+    @Mock private DumpManager mDumpManager;
+    private GarbageMonitor mGarbageMonitor;
+    private final FakeExecutor mFakeExecutor = new FakeExecutor(new FakeSystemClock());
 
     @Before
     public void setup() {
-        mTrackedGarbage = mock(TrackedGarbage.class);
-        mLeakReporter = mock(LeakReporter.class);
-        mGarbageMonitor = new TestableGarbageMonitor(
-                new LeakDetector(null, mTrackedGarbage, null),
-                mLeakReporter);
-    }
-
-    @Test
-    public void testCallbacks_getScheduled() {
-        mGarbageMonitor.start();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
-    }
-
-    @Test
-    public void testNoGarbage_doesntDump() {
-        when(mTrackedGarbage.countOldGarbage()).thenReturn(0);
-
-        mGarbageMonitor.start();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
-
-        verify(mLeakReporter, never()).dumpLeak(anyInt());
+        MockitoAnnotations.initMocks(this);
+        mGarbageMonitor =
+                new GarbageMonitor(
+                        mContext,
+                        mFakeExecutor,
+                        new MessageRouterImpl(mFakeExecutor),
+                        new LeakDetector(null, mTrackedGarbage, null, mDumpManager),
+                        mLeakReporter,
+                        mDumpManager);
     }
 
     @Test
     public void testALittleGarbage_doesntDump() {
-        when(mTrackedGarbage.countOldGarbage()).thenReturn(4);
+        when(mTrackedGarbage.countOldGarbage()).thenReturn(GarbageMonitor.GARBAGE_ALLOWANCE);
 
-        mGarbageMonitor.start();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
-        mGarbageMonitor.runCallbacksOnce();
+        mGarbageMonitor.reinspectGarbageAfterGc();
 
         verify(mLeakReporter, never()).dumpLeak(anyInt());
     }
 
     @Test
     public void testTransientGarbage_doesntDump() {
-        when(mTrackedGarbage.countOldGarbage()).thenReturn(100);
+        when(mTrackedGarbage.countOldGarbage()).thenReturn(GarbageMonitor.GARBAGE_ALLOWANCE + 1);
 
-        mGarbageMonitor.start();
-        mGarbageMonitor.runInspectCallback();
+        // Start the leak monitor. Nothing gets reported immediately.
+        mGarbageMonitor.startLeakMonitor();
+        mFakeExecutor.runAllReady();
+        verify(mLeakReporter, never()).dumpLeak(anyInt());
 
+        // Garbage gets reset to 0 before the leak reporte actually gets called.
         when(mTrackedGarbage.countOldGarbage()).thenReturn(0);
+        mFakeExecutor.advanceClockToLast();
+        mFakeExecutor.runAllReady();
 
-        mGarbageMonitor.runReinspectCallback();
-
+        // Therefore nothing gets dumped.
         verify(mLeakReporter, never()).dumpLeak(anyInt());
     }
 
     @Test
     public void testLotsOfPersistentGarbage_dumps() {
-        when(mTrackedGarbage.countOldGarbage()).thenReturn(100);
+        when(mTrackedGarbage.countOldGarbage()).thenReturn(GarbageMonitor.GARBAGE_ALLOWANCE + 1);
 
-        mGarbageMonitor.start();
-        mGarbageMonitor.runCallbacksOnce();
+        mGarbageMonitor.reinspectGarbageAfterGc();
 
-        verify(mLeakReporter).dumpLeak(anyInt());
+        verify(mLeakReporter).dumpLeak(GarbageMonitor.GARBAGE_ALLOWANCE + 1);
     }
 
-    private static class TestableGarbageMonitor extends GarbageMonitor {
-        Runnable mInspectCallback;
-        Runnable mReinspectCallback;
+    @Test
+    public void testLotsOfPersistentGarbage_dumpsAfterAtime() {
+        when(mTrackedGarbage.countOldGarbage()).thenReturn(GarbageMonitor.GARBAGE_ALLOWANCE + 1);
 
-        public TestableGarbageMonitor(LeakDetector leakDetector,
-                LeakReporter leakReporter) {
-            super(null /* bgLooper */, leakDetector, leakReporter);
-        }
+        // Start the leak monitor. Nothing gets reported immediately.
+        mGarbageMonitor.startLeakMonitor();
+        mFakeExecutor.runAllReady();
+        verify(mLeakReporter, never()).dumpLeak(anyInt());
 
-        @Override
-        void scheduleInspectGarbage(Runnable runnable) {
-            assertNull("must not have more than one pending inspect callback", mInspectCallback);
-            mInspectCallback = runnable;
-        }
+        mFakeExecutor.advanceClockToLast();
+        mFakeExecutor.runAllReady();
 
-        void runInspectCallback() {
-            assertNotNull("expected an inspect callback to be scheduled", mInspectCallback);
-            Runnable callback = mInspectCallback;
-            mInspectCallback = null;
-            callback.run();
-        }
-
-        @Override
-        void scheduleReinspectGarbage(Runnable runnable) {
-            assertNull("must not have more than one reinspect callback", mReinspectCallback);
-            mReinspectCallback = runnable;
-        }
-
-        void runReinspectCallback() {
-            assertNotNull("expected a reinspect callback to be scheduled", mInspectCallback);
-            maybeRunReinspectCallback();
-        }
-
-        void maybeRunReinspectCallback() {
-            Runnable callback = mReinspectCallback;
-            mReinspectCallback = null;
-            if (callback != null) {
-                callback.run();
-            }
-        }
-
-        void runCallbacksOnce() {
-            runInspectCallback();
-            maybeRunReinspectCallback();
-        }
+        verify(mLeakReporter).dumpLeak(GarbageMonitor.GARBAGE_ALLOWANCE + 1);
     }
 }

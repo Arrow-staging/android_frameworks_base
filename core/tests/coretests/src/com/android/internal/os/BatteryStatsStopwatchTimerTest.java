@@ -13,10 +13,12 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
+
 package com.android.internal.os;
 
 import android.os.BatteryStats;
-import android.support.test.filters.SmallTest;
+
+import androidx.test.filters.SmallTest;
 
 import junit.framework.TestCase;
 
@@ -29,7 +31,7 @@ public class BatteryStatsStopwatchTimerTest extends TestCase {
     // negative values of count.
     @SmallTest
     public void testCount() throws Exception {
-        final MockClocks clocks = new MockClocks(); // holds realtime and uptime in ms
+        final MockClock clocks = new MockClock(); // holds realtime and uptime in ms
         final BatteryStatsImpl.TimeBase timeBase = new BatteryStatsImpl.TimeBase();
         timeBase.init(clocks.uptimeMillis(), clocks.elapsedRealtime());
         final BatteryStatsImpl.StopwatchTimer timer = new BatteryStatsImpl.StopwatchTimer(clocks,
@@ -140,7 +142,7 @@ public class BatteryStatsStopwatchTimerTest extends TestCase {
         assertEquals(expectedCount, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
     }
 
-    private static long updateTime(MockClocks clocks, long time) {
+    private static long updateTime(MockClock clocks, long time) {
         return clocks.realtime = clocks.uptime = time;
     }
 }

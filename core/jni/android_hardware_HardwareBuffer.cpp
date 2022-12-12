@@ -20,9 +20,9 @@
 #include <nativehelper/JNIHelp.h>
 
 #include "android_os_Parcel.h"
-#include "android/graphics/GraphicsJNI.h"
 
 #include <android/hardware_buffer.h>
+#include <android_runtime/android_graphics_GraphicBuffer.h>
 #include <android_runtime/android_hardware_HardwareBuffer.h>
 #include <android_runtime/AndroidRuntime.h>
 #include <android_runtime/Log.h>
@@ -30,8 +30,8 @@
 
 #include <binder/Parcel.h>
 
-#include <ui/GraphicBuffer.h>
 #include <private/gui/ComposerService.h>
+#include <ui/PixelFormat.h>
 
 #include <hardware/gralloc1.h>
 #include <grallocusage/GrallocUsageConversion.h>
@@ -85,7 +85,7 @@ static jlong android_hardware_HardwareBuffer_create(JNIEnv* env, jobject clazz,
     sp<GraphicBuffer> buffer = new GraphicBuffer(width, height, pixelFormat, layers,
             grallocUsage, std::string("HardwareBuffer pid [") + std::to_string(getpid()) +"]");
     status_t error = buffer->initCheck();
-    if (error < 0) {
+    if (error != OK) {
         if (kDebugGraphicBuffer) {
             ALOGW("createGraphicBuffer() failed in HardwareBuffer.create()");
         }
@@ -96,12 +96,34 @@ static jlong android_hardware_HardwareBuffer_create(JNIEnv* env, jobject clazz,
     return reinterpret_cast<jlong>(wrapper);
 }
 
+static jlong android_hardware_HardwareBuffer_createFromGraphicBuffer(JNIEnv* env, jobject clazz, jobject graphicBuffer) {
+    sp<GraphicBuffer> buffer(android_graphics_GraphicBuffer_getNativeGraphicsBuffer(env,
+                                                                                    graphicBuffer));
+    GraphicBufferWrapper* wrapper = new GraphicBufferWrapper(buffer);
+    return reinterpret_cast<jlong>(wrapper);
+}
+
 static void destroyWrapper(GraphicBufferWrapper* wrapper) {
     delete wrapper;
 }
 
 static jlong android_hardware_HardwareBuffer_getNativeFinalizer(JNIEnv* env, jobject clazz) {
     return static_cast<jlong>(reinterpret_cast<uintptr_t>(&destroyWrapper));
+}
+
+static jboolean android_hardware_HardwareBuffer_isSupported(JNIEnv* env, jobject clazz,
+        jint width, jint height, jint format, jint layers, jlong usage) {
+
+    AHardwareBuffer_Desc desc;
+    desc.width = width;
+    desc.height = height;
+    desc.format = format;
+    desc.layers = layers;
+    desc.usage = usage;
+    desc.stride = 0;
+    desc.rfu0 = 0;
+    desc.rfu1 = 0;
+    return AHardwareBuffer_isSupported(&desc);
 }
 
 //----------------------------------------------------------------------------
@@ -142,6 +164,20 @@ static jlong android_hardware_HardwareBuffer_getUsage(JNIEnv* env,
     jobject clazz, jlong nativeObject) {
     GraphicBuffer* buffer = GraphicBufferWrapper_to_GraphicBuffer(nativeObject);
     return AHardwareBuffer_convertFromGrallocUsageBits(buffer->getUsage());
+}
+
+static jlong android_hardware_HardwareBuffer_estimateSize(jlong nativeObject) {
+    GraphicBuffer* buffer = GraphicBufferWrapper_to_GraphicBuffer(nativeObject);
+
+    uint32_t bpp = bytesPerPixel(buffer->getPixelFormat());
+    if (bpp == 0) {
+        // If the pixel format is not recognized, use 1 as default.
+        bpp = 1;
+    }
+
+    const uint32_t bufferStride =
+            buffer->getStride() > 0 ? buffer->getStride() : buffer->getWidth();
+    return static_cast<jlong>(buffer->getHeight() * bufferStride * bpp);
 }
 
 // ----------------------------------------------------------------------------
@@ -187,6 +223,16 @@ AHardwareBuffer* android_hardware_HardwareBuffer_getNativeHardwareBuffer(
     }
 }
 
+GraphicBuffer* android_hardware_HardwareBuffer_getNativeGraphicBuffer(
+        JNIEnv* env, jobject hardwareBufferObj) {
+    if (env->IsInstanceOf(hardwareBufferObj, gHardwareBufferClassInfo.clazz)) {
+        return GraphicBufferWrapper_to_GraphicBuffer(
+                env->GetLongField(hardwareBufferObj, gHardwareBufferClassInfo.mNativeObject));
+    } else {
+        return nullptr;
+    }
+}
+
 jobject android_hardware_HardwareBuffer_createFromAHardwareBuffer(
         JNIEnv* env, AHardwareBuffer* hardwareBuffer) {
     GraphicBuffer* buffer = AHardwareBuffer_to_GraphicBuffer(hardwareBuffer);
@@ -225,15 +271,20 @@ uint64_t android_hardware_HardwareBuffer_convertToGrallocUsageBits(uint64_t usag
 
 const char* const kClassPathName = "android/hardware/HardwareBuffer";
 
+// clang-format off
 static const JNINativeMethod gMethods[] = {
     { "nCreateHardwareBuffer",  "(IIIIJ)J",
             (void*) android_hardware_HardwareBuffer_create },
+    { "nCreateFromGraphicBuffer", "(Landroid/graphics/GraphicBuffer;)J",
+            (void*) android_hardware_HardwareBuffer_createFromGraphicBuffer },
     { "nGetNativeFinalizer", "()J",
             (void*) android_hardware_HardwareBuffer_getNativeFinalizer },
     { "nWriteHardwareBufferToParcel",  "(JLandroid/os/Parcel;)V",
             (void*) android_hardware_HardwareBuffer_write },
     { "nReadHardwareBufferFromParcel", "(Landroid/os/Parcel;)J",
             (void*) android_hardware_HardwareBuffer_read },
+    { "nIsSupported",  "(IIIIJ)Z",
+            (void*) android_hardware_HardwareBuffer_isSupported },
 
     // --------------- @FastNative ----------------------
     { "nGetWidth", "(J)I",      (void*) android_hardware_HardwareBuffer_getWidth },
@@ -241,7 +292,11 @@ static const JNINativeMethod gMethods[] = {
     { "nGetFormat", "(J)I",     (void*) android_hardware_HardwareBuffer_getFormat },
     { "nGetLayers", "(J)I",     (void*) android_hardware_HardwareBuffer_getLayers },
     { "nGetUsage", "(J)J",      (void*) android_hardware_HardwareBuffer_getUsage },
+
+    // --------------- @CriticalNative ----------------------
+    { "nEstimateSize", "(J)J",  (void*) android_hardware_HardwareBuffer_estimateSize },
 };
+// clang-format on
 
 int register_android_hardware_HardwareBuffer(JNIEnv* env) {
     int err = RegisterMethodsOrDie(env, kClassPathName, gMethods,

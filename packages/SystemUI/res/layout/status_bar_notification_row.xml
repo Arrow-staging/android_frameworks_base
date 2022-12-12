@@ -15,8 +15,10 @@
     limitations under the License.
 -->
 
-<com.android.systemui.statusbar.ExpandableNotificationRow
+<!-- extends FrameLayout -->
+<com.android.systemui.statusbar.notification.row.ExpandableNotificationRow
     xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/expandableNotificationRow"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:focusable="true"
@@ -25,21 +27,23 @@
 
     <!-- Menu displayed behind notification added here programmatically -->
 
-    <com.android.systemui.statusbar.NotificationBackgroundView
+    <com.android.systemui.statusbar.notification.row.NotificationBackgroundView
         android:id="@+id/backgroundNormal"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <com.android.systemui.statusbar.NotificationBackgroundView
+    <com.android.systemui.statusbar.notification.row.NotificationBackgroundView
         android:id="@+id/backgroundDimmed"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <com.android.systemui.statusbar.NotificationContentView android:id="@+id/expanded"
+    <com.android.systemui.statusbar.notification.row.NotificationContentView
+        android:id="@+id/expanded"
        android:layout_width="match_parent"
        android:layout_height="wrap_content" />
 
-    <com.android.systemui.statusbar.NotificationContentView android:id="@+id/expandedPublic"
+    <com.android.systemui.statusbar.notification.row.NotificationContentView
+        android:id="@+id/expandedPublic"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
@@ -52,18 +56,6 @@
         android:background="@null"
         android:paddingEnd="8dp"
         android:paddingStart="8dp"
-        />
-
-    <ImageButton
-        android:id="@+id/helper"
-        android:layout_width="48dp"
-        android:layout_height="@*android:dimen/notification_header_height"
-        android:layout_gravity="top|end"
-        android:layout_marginEnd="6dp"
-        android:src="@drawable/ic_dnd"
-        android:tint="#FF0000"
-        android:background="@drawable/ripple_drawable"
-        android:visibility="visible"
         />
 
     <ViewStub
@@ -87,4 +79,4 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-</com.android.systemui.statusbar.ExpandableNotificationRow>
+</com.android.systemui.statusbar.notification.row.ExpandableNotificationRow>

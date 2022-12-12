@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,19 +17,18 @@
 package android.security.keystore.recovery;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.SystemApi;
-
 import android.os.Parcel;
 import android.os.Parcelable;
 
-import com.android.internal.util.Preconditions;
+import java.util.Objects;
 
 /**
  * Helper class with data necessary recover a single application key, given a recovery key.
  *
  * <ul>
  *   <li>Alias - Keystore alias of the key.
- *   <li>Account Recovery Agent specific account associated with the key.
  *   <li>Encrypted key material.
  * </ul>
  *
@@ -43,7 +42,23 @@ public final class WrappedApplicationKey implements Parcelable {
     private String mAlias;
     // The only supported format is AES-256 symmetric key.
     private byte[] mEncryptedKeyMaterial;
-    private byte[] mAccount;
+    // The optional metadata that's authenticated (but unencrypted) with the key material.
+    private byte[] mMetadata;
+
+    // IMPORTANT! PLEASE READ!
+    // -----------------------
+    // If you edit this file (e.g., to add new fields), please MAKE SURE to also do the following:
+    // - Update the #writeToParcel(Parcel) method below
+    // - Update the #(Parcel) constructor below
+    // - Update android.security.keystore.recovery.KeyChainSnapshotTest to make sure nobody
+    //     accidentally breaks your fields in the Parcel in the future.
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly serialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly deserialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeychainSnapshotSerializerTest to make sure nobody breaks serialization of your field
+    //     in the future.
 
     /**
      * Builder for creating {@link WrappedApplicationKey}.
@@ -57,19 +72,8 @@ public final class WrappedApplicationKey implements Parcelable {
          * @param alias The alias.
          * @return This builder.
          */
-        public Builder setAlias(@NonNull String alias) {
+        public @NonNull Builder setAlias(@NonNull String alias) {
             mInstance.mAlias = alias;
-            return this;
-        }
-
-        /**
-         * Sets Recovery agent specific account.
-         *
-         * @param account The account.
-         * @return This builder.
-         */
-        public Builder setAccount(@NonNull byte[] account) {
-            mInstance.mAccount = account;
             return this;
         }
 
@@ -79,9 +83,19 @@ public final class WrappedApplicationKey implements Parcelable {
          * @param encryptedKeyMaterial The key material
          * @return This builder
          */
-
-        public Builder setEncryptedKeyMaterial(@NonNull byte[] encryptedKeyMaterial) {
+        public @NonNull Builder setEncryptedKeyMaterial(@NonNull byte[] encryptedKeyMaterial) {
             mInstance.mEncryptedKeyMaterial = encryptedKeyMaterial;
+            return this;
+        }
+
+        /**
+         * Sets the metadata that is authenticated (but unecrypted) with the key material.
+         *
+         * @param metadata The metadata
+         * @return This builder
+         */
+        public @NonNull Builder setMetadata(@Nullable byte[] metadata) {
+            mInstance.mMetadata = metadata;
             return this;
         }
 
@@ -91,26 +105,23 @@ public final class WrappedApplicationKey implements Parcelable {
          * @return new instance
          * @throws NullPointerException if some required fields were not set.
          */
-        @NonNull public WrappedApplicationKey build() {
-            Preconditions.checkNotNull(mInstance.mAlias);
-            Preconditions.checkNotNull(mInstance.mEncryptedKeyMaterial);
-            if (mInstance.mAccount == null) {
-                mInstance.mAccount = new byte[]{};
-            }
+        public @NonNull WrappedApplicationKey build() {
+            Objects.requireNonNull(mInstance.mAlias);
+            Objects.requireNonNull(mInstance.mEncryptedKeyMaterial);
             return mInstance;
         }
     }
 
-    private WrappedApplicationKey() {
-    }
+    private WrappedApplicationKey() { }
 
     /**
-     * Deprecated - consider using Builder.
+     * @deprecated Use the builder instead.
      * @hide
      */
+    @Deprecated
     public WrappedApplicationKey(@NonNull String alias, @NonNull byte[] encryptedKeyMaterial) {
-        mAlias = Preconditions.checkNotNull(alias);
-        mEncryptedKeyMaterial = Preconditions.checkNotNull(encryptedKeyMaterial);
+        mAlias = Objects.requireNonNull(alias);
+        mEncryptedKeyMaterial = Objects.requireNonNull(encryptedKeyMaterial);
     }
 
     /**
@@ -127,15 +138,12 @@ public final class WrappedApplicationKey implements Parcelable {
         return mEncryptedKeyMaterial;
     }
 
-    /** Account, default value is empty array */
-    public @NonNull byte[] getAccount() {
-        if (mAccount == null) {
-            return new byte[]{};
-        }
-        return mAccount;
+    /** The metadata with the key. */
+    public @Nullable byte[] getMetadata() {
+        return mMetadata;
     }
 
-    public static final Parcelable.Creator<WrappedApplicationKey> CREATOR =
+    public static final @NonNull Parcelable.Creator<WrappedApplicationKey> CREATOR =
             new Parcelable.Creator<WrappedApplicationKey>() {
                 public WrappedApplicationKey createFromParcel(Parcel in) {
                     return new WrappedApplicationKey(in);
@@ -150,7 +158,7 @@ public final class WrappedApplicationKey implements Parcelable {
     public void writeToParcel(Parcel out, int flags) {
         out.writeString(mAlias);
         out.writeByteArray(mEncryptedKeyMaterial);
-        out.writeByteArray(mAccount);
+        out.writeByteArray(mMetadata);
     }
 
     /**
@@ -159,7 +167,7 @@ public final class WrappedApplicationKey implements Parcelable {
     protected WrappedApplicationKey(Parcel in) {
         mAlias = in.readString();
         mEncryptedKeyMaterial = in.createByteArray();
-        mAccount = in.createByteArray();
+        mMetadata = in.createByteArray();
     }
 
     @Override

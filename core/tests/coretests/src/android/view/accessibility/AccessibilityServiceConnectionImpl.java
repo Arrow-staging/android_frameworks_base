@@ -16,12 +16,18 @@
 
 package android.view.accessibility;
 
+import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.IAccessibilityServiceConnection;
+import android.accessibilityservice.MagnificationConfig;
+import android.annotation.NonNull;
 import android.content.pm.ParceledListSlice;
 import android.graphics.Region;
 import android.os.Bundle;
+import android.os.IBinder;
+import android.os.RemoteCallback;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -30,6 +36,8 @@ import java.util.List;
  */
 public class AccessibilityServiceConnectionImpl extends IAccessibilityServiceConnection.Stub {
     public void setServiceInfo(AccessibilityServiceInfo info) {}
+
+    public void setAttributionTag(String attributionTag) {}
 
     public String[] findAccessibilityNodeInfoByAccessibilityId(int accessibilityWindowId,
             long accessibilityNodeId, int interactionId,
@@ -72,7 +80,7 @@ public class AccessibilityServiceConnectionImpl extends IAccessibilityServiceCon
         return null;
     }
 
-    public List<AccessibilityWindowInfo> getWindows() {
+    public AccessibilityWindowInfo.WindowListSparseArray getWindows() {
         return null;
     }
 
@@ -84,42 +92,70 @@ public class AccessibilityServiceConnectionImpl extends IAccessibilityServiceCon
         return false;
     }
 
+    public List<AccessibilityNodeInfo.AccessibilityAction> getSystemActions() {
+        return Collections.emptyList();
+    }
+
     public void disableSelf() {}
 
     public void setOnKeyEventResult(boolean handled, int sequence) {}
 
-    public float getMagnificationScale() {
-        return 0.0f;
-    }
-
-    public float getMagnificationCenterX() {
-        return 0.0f;
-    }
-
-    public float getMagnificationCenterY() {
-        return 0.0f;
-    }
-
-    public Region getMagnificationRegion() {
+    public MagnificationConfig getMagnificationConfig(int displayId) {
         return null;
     }
 
-    public boolean resetMagnification(boolean animate) {
+    public float getMagnificationScale(int displayId) {
+        return 0.0f;
+    }
+
+    public float getMagnificationCenterX(int displayId) {
+        return 0.0f;
+    }
+
+    public float getMagnificationCenterY(int displayId) {
+        return 0.0f;
+    }
+
+    public Region getMagnificationRegion(int displayId) {
+        return null;
+    }
+
+    public Region getCurrentMagnificationRegion(int displayId) {
+        return null;
+    }
+
+    public boolean resetMagnification(int displayId, boolean animate) {
         return false;
     }
 
-    public boolean setMagnificationScaleAndCenter(float scale, float centerX, float centerY,
-            boolean animate) {
+    public boolean resetCurrentMagnification(int displayId, boolean animate) {
         return false;
     }
 
-    public void setMagnificationCallbackEnabled(boolean enabled) {}
+    public boolean setMagnificationConfig(int displayId,
+            @NonNull MagnificationConfig config, boolean animate) {
+        return false;
+    }
+
+    public void setMagnificationCallbackEnabled(int displayId, boolean enabled) {}
 
     public boolean setSoftKeyboardShowMode(int showMode) {
         return false;
     }
 
+    public int getSoftKeyboardShowMode() {
+        return 0;
+    }
+
     public void setSoftKeyboardCallbackEnabled(boolean enabled) {}
+
+    public boolean switchToInputMethod(String imeId) {
+        return false;
+    }
+
+    public int setInputMethodEnabled(String imeId, boolean enabled) {
+        return AccessibilityService.SoftKeyboardController.ENABLE_IME_FAIL_UNKNOWN;
+    }
 
     public boolean isAccessibilityButtonAvailable() {
         return false;
@@ -127,7 +163,47 @@ public class AccessibilityServiceConnectionImpl extends IAccessibilityServiceCon
 
     public void sendGesture(int sequence, ParceledListSlice gestureSteps) {}
 
+    public void dispatchGesture(int sequence, ParceledListSlice gestureSteps, int displayId) {}
+
     public boolean isFingerprintGestureDetectionAvailable() {
         return false;
     }
+
+    public IBinder getOverlayWindowToken(int displayId) {
+        return null;
+    }
+
+    public int getWindowIdForLeashToken(IBinder token) {
+        return -1;
+    }
+
+    public void takeScreenshot(int displayId, RemoteCallback callback) {}
+
+    public void setFocusAppearance(int strokeWidth, int color) {}
+
+    public void setCacheEnabled(boolean enabled) {}
+
+    public void logTrace(long timestamp, String where, String callingParams, int processId,
+            long threadId, int callingUid, Bundle callingStack) {}
+
+    public void setGestureDetectionPassthroughRegion(int displayId, Region region) {}
+
+    public void setTouchExplorationPassthroughRegion(int displayId, Region region) {}
+
+    public void setServiceDetectsGesturesEnabled(int displayId, boolean mode) {}
+
+    public void requestTouchExploration(int displayId) {}
+
+    public void requestDragging(int displayId, int pointerId) {}
+
+    public void requestDelegating(int displayId) {}
+
+    public void onDoubleTap(int displayId) {}
+
+    public void onDoubleTapAndHold(int displayId) {}
+
+    public void logTrace(long timestamp, String where, long loggingTypes, String callingParams,
+            int processId, long threadId, int callingUid, Bundle serializedCallingStackInBundle) {}
+
+    public void setAnimationScale(float scale) {}
 }

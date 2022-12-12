@@ -13,8 +13,6 @@ import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.util.Slog;
 
-import com.android.server.backup.restore.PerformAdbRestoreTask;
-
 import libcore.io.IoUtils;
 
 import java.io.File;
@@ -39,16 +37,15 @@ public class KeyValueAdbRestoreEngine implements Runnable {
     private static final String TAG = "KeyValueAdbRestoreEngine";
     private static final boolean DEBUG = false;
 
-    private final BackupManagerServiceInterface mBackupManagerService;
+    private final UserBackupManagerService mBackupManagerService;
     private final File mDataDir;
 
-    FileMetadata mInfo;
-    PerformAdbRestoreTask mRestoreTask;
-    ParcelFileDescriptor mInFD;
-    IBackupAgent mAgent;
-    int mToken;
+    private final FileMetadata mInfo;
+    private final ParcelFileDescriptor mInFD;
+    private final IBackupAgent mAgent;
+    private final int mToken;
 
-    public KeyValueAdbRestoreEngine(BackupManagerServiceInterface backupManagerService,
+    public KeyValueAdbRestoreEngine(UserBackupManagerService backupManagerService,
             File dataDir, FileMetadata info, ParcelFileDescriptor inFD, IBackupAgent agent,
             int token) {
         mBackupManagerService = backupManagerService;
@@ -64,8 +61,7 @@ public class KeyValueAdbRestoreEngine implements Runnable {
         try {
             File restoreData = prepareRestoreData(mInfo, mInFD);
 
-            // TODO: version ?
-            invokeAgentForAdbRestore(mAgent, mInfo, restoreData, 0);
+            invokeAgentForAdbRestore(mAgent, mInfo, restoreData);
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -83,8 +79,8 @@ public class KeyValueAdbRestoreEngine implements Runnable {
         return sortedDataName;
     }
 
-    private void invokeAgentForAdbRestore(IBackupAgent agent, FileMetadata info, File restoreData,
-            int versionCode) throws IOException {
+    private void invokeAgentForAdbRestore(IBackupAgent agent, FileMetadata info, File restoreData)
+            throws IOException {
         String pkg = info.packageName;
         File newStateName = new File(mDataDir, pkg + ".new");
         try {
@@ -95,9 +91,9 @@ public class KeyValueAdbRestoreEngine implements Runnable {
 
             if (DEBUG) {
                 Slog.i(TAG, "Starting restore of package " + pkg + " for version code "
-                        + versionCode);
+                        + info.version);
             }
-            agent.doRestore(backupData, versionCode, newState, mToken,
+            agent.doRestore(backupData, info.version, newState, mToken,
                     mBackupManagerService.getBackupManagerBinder());
         } catch (IOException e) {
             Slog.e(TAG, "Exception opening file. " + e);

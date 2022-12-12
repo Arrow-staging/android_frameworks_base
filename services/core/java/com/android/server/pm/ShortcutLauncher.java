@@ -22,18 +22,26 @@ import android.content.pm.PackageInfo;
 import android.content.pm.ShortcutInfo;
 import android.util.ArrayMap;
 import android.util.ArraySet;
+import android.util.AtomicFile;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
+import android.util.Xml;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.pm.ShortcutService.DumpFilter;
 import com.android.server.pm.ShortcutUser.PackageWithUser;
 
+import libcore.io.IoUtils;
+
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -136,8 +144,8 @@ class ShortcutLauncher extends ShortcutPackageItem {
             final ArraySet<String> prevSet = mPinnedShortcuts.get(pu);
 
             // Actually pin shortcuts.
-            // This logic here is to make sure a launcher cannot pin a shortcut that is floating
-            // (i.e. not dynamic nor manifest but is pinned) and pinned by another launcher.
+            // This logic here is to make sure a launcher cannot pin a shortcut that is not dynamic
+            // nor long-lived nor manifest but is pinned.
             // In this case, technically the shortcut doesn't exist to this launcher, so it can't
             // pin it.
             // (Maybe unnecessarily strict...)
@@ -150,7 +158,7 @@ class ShortcutLauncher extends ShortcutPackageItem {
                 if (si == null) {
                     continue;
                 }
-                if (si.isDynamic()
+                if (si.isDynamic() || si.isLongLived()
                         || si.isManifestShortcut()
                         || (prevSet != null && prevSet.contains(id))
                         || forPinRequest) {
@@ -216,7 +224,7 @@ class ShortcutLauncher extends ShortcutPackageItem {
      * Persist.
      */
     @Override
-    public void saveToXml(XmlSerializer out, boolean forBackup)
+    public void saveToXml(TypedXmlSerializer out, boolean forBackup)
             throws IOException {
         if (forBackup && !getPackageInfo().isBackupAllowed()) {
             // If an launcher app doesn't support backup&restore, then nothing to do.
@@ -230,7 +238,7 @@ class ShortcutLauncher extends ShortcutPackageItem {
         out.startTag(null, TAG_ROOT);
         ShortcutService.writeAttr(out, ATTR_PACKAGE_NAME, getPackageName());
         ShortcutService.writeAttr(out, ATTR_LAUNCHER_USER_ID, getPackageUserId());
-        getPackageInfo().saveToXml(out, forBackup);
+        getPackageInfo().saveToXml(mShortcutUser.mService, out, forBackup);
 
         for (int i = 0; i < size; i++) {
             final PackageWithUser pu = mPinnedShortcuts.keyAt(i);
@@ -254,10 +262,54 @@ class ShortcutLauncher extends ShortcutPackageItem {
         out.endTag(null, TAG_ROOT);
     }
 
+    public static ShortcutLauncher loadFromFile(File path, ShortcutUser shortcutUser,
+            int ownerUserId, boolean fromBackup) {
+
+        final AtomicFile file = new AtomicFile(path);
+        final FileInputStream in;
+        try {
+            in = file.openRead();
+        } catch (FileNotFoundException e) {
+            if (ShortcutService.DEBUG) {
+                Slog.d(TAG, "Not found " + path);
+            }
+            return null;
+        }
+
+        try {
+            ShortcutLauncher ret = null;
+            TypedXmlPullParser parser = Xml.resolvePullParser(in);
+
+            int type;
+            while ((type = parser.next()) != XmlPullParser.END_DOCUMENT) {
+                if (type != XmlPullParser.START_TAG) {
+                    continue;
+                }
+                final int depth = parser.getDepth();
+
+                final String tag = parser.getName();
+                if (ShortcutService.DEBUG_LOAD) {
+                    Slog.d(TAG, String.format("depth=%d type=%d name=%s", depth, type, tag));
+                }
+                if ((depth == 1) && TAG_ROOT.equals(tag)) {
+                    ret = loadFromXml(parser, shortcutUser, ownerUserId, fromBackup);
+                    continue;
+                }
+                ShortcutService.throwForInvalidTag(depth, tag);
+            }
+            return ret;
+        } catch (IOException | XmlPullParserException e) {
+            Slog.e(TAG, "Failed to read file " + file.getBaseFile(), e);
+            return null;
+        } finally {
+            IoUtils.closeQuietly(in);
+        }
+    }
+
     /**
      * Load.
      */
-    public static ShortcutLauncher loadFromXml(XmlPullParser parser, ShortcutUser shortcutUser,
+    public static ShortcutLauncher loadFromXml(TypedXmlPullParser parser, ShortcutUser shortcutUser,
             int ownerUserId, boolean fromBackup) throws IOException, XmlPullParserException {
         final String launcherPackageName = ShortcutService.parseStringAttribute(parser,
                 ATTR_PACKAGE_NAME);
@@ -367,5 +419,15 @@ class ShortcutLauncher extends ShortcutPackageItem {
     @VisibleForTesting
     ArraySet<String> getAllPinnedShortcutsForTest(String packageName, int packageUserId) {
         return new ArraySet<>(mPinnedShortcuts.get(PackageWithUser.of(packageUserId, packageName)));
+    }
+
+    @Override
+    protected File getShortcutPackageItemFile() {
+        final File path = new File(mShortcutUser.mService.injectUserDataPath(
+                mShortcutUser.getUserId()), ShortcutUser.DIRECTORY_LUANCHERS);
+        // Package user id and owner id can have different values for ShortcutLaunchers. Adding
+        // user Id to the file name to create a unique path. Owner id is used in the root path.
+        final String fileName = getPackageName() + getPackageUserId() + ".xml";
+        return new File(path, fileName);
     }
 }

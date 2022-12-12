@@ -16,22 +16,20 @@
 
 package android.telephony;
 
-import android.content.Context;
-import android.os.RemoteException;
-import android.os.ServiceManager;
 import android.annotation.IntDef;
-import android.util.Log;
+import android.os.RemoteException;
 
 import com.android.internal.telephony.ITelephony;
+import com.android.telephony.Rlog;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
 /**
  * The caller of
- * {@link TelephonyManager#requestNetworkScan(NetworkScanRequest, NetworkScanCallback)}
+ * {@link TelephonyManager#requestNetworkScan(NetworkScanRequest, Executor, NetworkScanCallback)}
  * will receive an instance of {@link NetworkScan}, which contains a callback method
- * {@link #stop()} for stopping the in-progress scan.
+ * {@link #stopScan()} for stopping the in-progress scan.
  */
 public class NetworkScan {
 
@@ -106,16 +104,31 @@ public class NetworkScan {
      * Use this method to stop an ongoing scan. When user requests a new scan, a {@link NetworkScan}
      * object will be returned, and the user can stop the scan by calling this method.
      */
-    public void stop() throws RemoteException {
+    public void stopScan() {
+        ITelephony telephony = getITelephony();
+        if (telephony == null) {
+            Rlog.e(TAG, "Failed to get the ITelephony instance.");
+        }
         try {
-            ITelephony telephony = getITelephony();
-            if (telephony != null) {
-                telephony.stopNetworkScan(mSubId, mScanId);
-            } else {
-                throw new RemoteException("Failed to get the ITelephony instance.");
-            }
+            telephony.stopNetworkScan(mSubId, mScanId);
+        } catch (IllegalArgumentException ex) {
+            Rlog.d(TAG,  "stopNetworkScan - no active scan for ScanID=" + mScanId);
         } catch (RemoteException ex) {
             Rlog.e(TAG, "stopNetworkScan  RemoteException", ex);
+        } catch (RuntimeException ex) {
+            Rlog.e(TAG, "stopNetworkScan  RuntimeException", ex);
+        }
+    }
+
+    /**
+     * @deprecated Use {@link #stopScan()}
+     * @removed
+     */
+    @Deprecated
+    public void stop() throws RemoteException {
+        try {
+            stopScan();
+        } catch (RuntimeException ex) {
             throw new RemoteException("Failed to stop the network scan with id " + mScanId);
         }
     }
@@ -134,6 +147,9 @@ public class NetworkScan {
 
     private ITelephony getITelephony() {
         return ITelephony.Stub.asInterface(
-            ServiceManager.getService(Context.TELEPHONY_SERVICE));
+            TelephonyFrameworkInitializer
+                    .getTelephonyServiceManager()
+                    .getTelephonyServiceRegisterer()
+                    .get());
     }
 }

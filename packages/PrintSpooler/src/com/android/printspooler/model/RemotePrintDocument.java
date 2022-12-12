@@ -16,7 +16,6 @@
 
 package com.android.printspooler.model;
 
-import android.annotation.NonNull;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
@@ -39,6 +38,7 @@ import android.print.PrintDocumentAdapter;
 import android.print.PrintDocumentInfo;
 import android.util.Log;
 
+import com.android.internal.util.function.pooled.PooledLambda;
 import com.android.printspooler.R;
 import com.android.printspooler.util.PageRangeUtils;
 
@@ -52,6 +52,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
+import java.util.NoSuchElementException;
 
 public final class RemotePrintDocument {
     private static final String LOG_TAG = "RemotePrintDocument";
@@ -218,8 +219,14 @@ public final class RemotePrintDocument {
             throw new IllegalStateException("Cannot update in state:" + stateToString(mState));
         }
 
-        // We schedule a layout if the constraints changed.
-        if (!mUpdateSpec.hasSameConstraints(attributes, preview)) {
+        /*
+         * We schedule a layout in two cases:
+         * - if the current command is canceling. In this case the mUpdateSpec will be marked as
+         *   stale once the command is done, hence we have to start from scratch
+         * - if the constraints changed we have a different document, hence start a new layout
+         */
+        if (mCurrentCommand != null && mCurrentCommand.isCanceling()
+                || !mUpdateSpec.hasSameConstraints(attributes, preview)) {
             willUpdate = true;
 
             // If there is a current command that is running we ask for a
@@ -435,7 +442,12 @@ public final class RemotePrintDocument {
             // Keep going - best effort...
         }
 
-        mPrintDocumentAdapter.asBinder().unlinkToDeath(mDeathRecipient, 0);
+        try {
+            mPrintDocumentAdapter.asBinder().unlinkToDeath(mDeathRecipient, 0);
+        } catch (NoSuchElementException e) {
+            Log.w(LOG_TAG, "Error unlinking print document adapter death recipient.");
+            // Keep going - best effort...
+        }
     }
 
     private void scheduleCommand(AsyncCommand command) {
@@ -549,6 +561,9 @@ public final class RemotePrintDocument {
     }
 
     private static abstract class AsyncCommand implements Runnable {
+        /** Message indicated the desire to {@link #forceCancel} a command */
+        static final int MSG_FORCE_CANCEL = 0;
+
         private static final int STATE_PENDING = 0;
         private static final int STATE_RUNNING = 1;
         private static final int STATE_COMPLETED = 2;
@@ -574,7 +589,7 @@ public final class RemotePrintDocument {
 
         public AsyncCommand(Looper looper, IPrintDocumentAdapter adapter, RemotePrintDocumentInfo document,
                 CommandDoneCallback doneCallback) {
-            mHandler = new AsyncCommandHandler(looper);
+            mHandler = new Handler(looper);
             mAdapter = adapter;
             mDocument = document;
             mDoneCallback = doneCallback;
@@ -594,12 +609,12 @@ public final class RemotePrintDocument {
          */
         protected void removeForceCancel() {
             if (DEBUG) {
-                if (mHandler.hasMessages(AsyncCommandHandler.MSG_FORCE_CANCEL)) {
+                if (mHandler.hasMessages(MSG_FORCE_CANCEL)) {
                     Log.i(LOG_TAG, "[FORCE CANCEL] Removed");
                 }
             }
 
-            mHandler.removeMessages(AsyncCommandHandler.MSG_FORCE_CANCEL);
+            mHandler.removeMessages(MSG_FORCE_CANCEL);
         }
 
         /**
@@ -628,7 +643,8 @@ public final class RemotePrintDocument {
                         Log.i(LOG_TAG, "[FORCE CANCEL] queued");
                     }
                     mHandler.sendMessageDelayed(
-                            mHandler.obtainMessage(AsyncCommandHandler.MSG_FORCE_CANCEL),
+                            PooledLambda.obtainMessage(AsyncCommand::forceCancel, this)
+                                    .setWhat(MSG_FORCE_CANCEL),
                             FORCE_CANCEL_TIMEOUT);
                 }
 
@@ -698,34 +714,15 @@ public final class RemotePrintDocument {
             return mError;
         }
 
-        /**
-         * Handler for the async command.
-         */
-        private class AsyncCommandHandler extends Handler {
-            /** Message indicated the desire for to force cancel a command */
-            final static int MSG_FORCE_CANCEL = 0;
-
-            AsyncCommandHandler(@NonNull Looper looper) {
-                super(looper);
-            }
-
-            @Override
-            public void handleMessage(Message msg) {
-                switch (msg.what) {
-                    case MSG_FORCE_CANCEL:
-                        if (isCanceling()) {
-                            if (DEBUG) {
-                                Log.i(LOG_TAG, "[FORCE CANCEL] executed");
-                            }
-                            failed("Command did not respond to cancellation in "
-                                    + FORCE_CANCEL_TIMEOUT + " ms");
-
-                            mDoneCallback.onDone();
-                        }
-                        break;
-                    default:
-                        // not reached;
+        private void forceCancel() {
+            if (isCanceling()) {
+                if (DEBUG) {
+                    Log.i(LOG_TAG, "[FORCE CANCEL] executed");
                 }
+                failed("Command did not respond to cancellation in "
+                        + FORCE_CANCEL_TIMEOUT + " ms");
+
+                mDoneCallback.onDone();
             }
         }
     }

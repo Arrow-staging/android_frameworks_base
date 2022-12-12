@@ -19,45 +19,72 @@ package com.android.settingslib.widget;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.content.Context;
-import android.support.v7.preference.PreferenceViewHolder;
-import android.text.method.LinkMovementMethod;
 import android.view.LayoutInflater;
+import android.view.View;
 import android.widget.TextView;
 
+import androidx.preference.PreferenceViewHolder;
+
 import com.android.settingslib.R;
-import com.android.settingslib.SettingsLibRobolectricTestRunner;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.shadows.ShadowApplication;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 
-@RunWith(SettingsLibRobolectricTestRunner.class)
+@RunWith(RobolectricTestRunner.class)
 public class FooterPreferenceTest {
 
     private Context mContext;
+    private FooterPreference mFooterPreference;
 
     @Before
     public void setUp() {
-        mContext = ShadowApplication.getInstance().getApplicationContext();
+        mContext = RuntimeEnvironment.application;
+        mFooterPreference = new FooterPreference(mContext);
     }
 
     @Test
-    public void createNewPreference_shouldSetKeyAndOrder() {
-        final FooterPreference preference = new FooterPreference(mContext);
+    public void setSummary_summarySet_shouldSetAsTitle() {
+        mFooterPreference.setSummary("summary");
 
-        assertThat(preference.getKey()).isEqualTo(FooterPreference.KEY_FOOTER);
-        assertThat(preference.getOrder()).isEqualTo(FooterPreference.ORDER_FOOTER);
+        assertThat(mFooterPreference.getTitle()).isEqualTo("summary");
     }
 
     @Test
-    public void bindPreference_shouldLinkifyContent() {
-        final FooterPreference preference = new FooterPreference(mContext);
+    public void setLearnMoreText_shouldSetAsTextInLearnMore() {
         final PreferenceViewHolder holder = PreferenceViewHolder.createInstanceForTests(
                 LayoutInflater.from(mContext).inflate(R.layout.preference_footer, null));
+        mFooterPreference.setLearnMoreText("Custom learn more");
+        mFooterPreference.setLearnMoreAction(view -> { /* do nothing */ } /* listener */);
 
-        preference.onBindViewHolder(holder);
-        assertThat(((TextView) holder.findViewById(android.R.id.title)).getMovementMethod())
-                .isInstanceOf(LinkMovementMethod.class);
+        mFooterPreference.onBindViewHolder(holder);
+
+        assertThat(((TextView) holder.findViewById(
+                R.id.settingslib_learn_more)).getText().toString())
+                .isEqualTo("Custom learn more");
+    }
+
+    @Test
+    public void setContentDescription_contentSet_shouldGetSameContentDescription() {
+        mFooterPreference.setContentDescription("test");
+
+        assertThat(mFooterPreference.getContentDescription()).isEqualTo("test");
+    }
+
+    @Test
+    public void setLearnMoreAction_actionSet_shouldGetAction() {
+        mFooterPreference.setLearnMoreAction(v -> {
+        });
+
+        assertThat(mFooterPreference.mLearnMoreListener).isNotNull();
+    }
+
+    @Test
+    public void setIconVisibility_shouldReturnSameVisibilityType() {
+        mFooterPreference.setIconVisibility(View.GONE);
+
+        assertThat(mFooterPreference.mIconVisibility).isEqualTo(View.GONE);
     }
 }

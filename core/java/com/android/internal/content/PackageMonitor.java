@@ -16,7 +16,9 @@
 
 package com.android.internal.content;
 
+import android.annotation.NonNull;
 import android.app.Activity;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -25,16 +27,18 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.UserHandle;
 import android.util.Slog;
+
 import com.android.internal.os.BackgroundThread;
-import com.android.internal.util.Preconditions;
 
 import java.util.HashSet;
+import java.util.Objects;
 
 /**
  * Helper class for monitoring the state of packages: adding, removing,
  * updating, and disappearing and reappearing on the SD card.
  */
 public abstract class PackageMonitor extends android.content.BroadcastReceiver {
+    static final String TAG = "PackageMonitor";
     static final IntentFilter sPackageFilt = new IntentFilter();
     static final IntentFilter sNonDataFilt = new IntentFilter();
     static final IntentFilter sExternalFilt = new IntentFilter();
@@ -69,10 +73,16 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
 
     String[] mTempArray = new String[1];
 
+    @UnsupportedAppUsage
+    public PackageMonitor() {
+    }
+
+    @UnsupportedAppUsage
     public void register(Context context, Looper thread, boolean externalStorage) {
         register(context, thread, null, externalStorage);
     }
 
+    @UnsupportedAppUsage
     public void register(Context context, Looper thread, UserHandle user,
             boolean externalStorage) {
         register(context, user, externalStorage,
@@ -85,7 +95,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
             throw new IllegalStateException("Already registered");
         }
         mRegisteredContext = context;
-        mRegisteredHandler = Preconditions.checkNotNull(handler);
+        mRegisteredHandler = Objects.requireNonNull(handler);
         if (user != null) {
             context.registerReceiverAsUser(this, user, sPackageFilt, null, mRegisteredHandler);
             context.registerReceiverAsUser(this, user, sNonDataFilt, null, mRegisteredHandler);
@@ -106,6 +116,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
         return mRegisteredHandler;
     }
 
+    @UnsupportedAppUsage
     public void unregister() {
         if (mRegisteredContext == null) {
             throw new IllegalStateException("Not registered");
@@ -133,6 +144,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
     /**
      * Called when a package is really removed (and not replaced).
      */
+    @UnsupportedAppUsage
     public void onPackageRemoved(String packageName, int uid) {
     }
 
@@ -166,6 +178,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
      * default implementation returns true if this is a change to the entire
      * package.
      */
+    @UnsupportedAppUsage
     public boolean onPackageChanged(String packageName, int uid, String[] components) {
         if (components != null) {
             for (String name : components) {
@@ -219,7 +232,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
     /**
      * Called when an existing package is updated or its disabled state changes.
      */
-    public void onPackageModified(String packageName) {
+    public void onPackageModified(@NonNull String packageName) {
     }
     
     public boolean didSomePackagesChange() {
@@ -241,6 +254,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
         return mAppearingPackages != null;
     }
     
+    @UnsupportedAppUsage
     public int isPackageDisappearing(String packageName) {
         if (mDisappearingPackages != null) {
             for (int i=mDisappearingPackages.length-1; i>=0; i--) {
@@ -260,6 +274,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
         return mChangeType == PACKAGE_UPDATING;
     }
 
+    @UnsupportedAppUsage
     public boolean isPackageModified(String packageName) {
         if (mModifiedPackages != null) {
             for (int i=mModifiedPackages.length-1; i>=0; i--) {
@@ -291,6 +306,13 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
 
     public void onPackageDataCleared(String packageName, int uid) {
     }
+
+    /**
+     * Callback to indicate the package's state has changed.
+     * @param packageName Name of an installed package
+     * @param uid The UID the package runs under.
+     */
+    public void onPackageStateChanged(String packageName, int uid) {}
 
     public int getChangingUserId() {
         return mChangeUserId;
@@ -444,7 +466,7 @@ public abstract class PackageMonitor extends android.content.BroadcastReceiver {
         if (mSomePackagesChanged) {
             onSomePackagesChanged();
         }
-        
+
         onFinishPackageChanges();
         mChangeUserId = UserHandle.USER_NULL;
     }

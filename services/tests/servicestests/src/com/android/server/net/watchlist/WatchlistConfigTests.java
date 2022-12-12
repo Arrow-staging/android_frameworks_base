@@ -18,12 +18,14 @@ package com.android.server.net.watchlist;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.util.HexDump;
 
@@ -39,8 +41,6 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
-import java.util.Arrays;
-
 
 /**
  * runtest frameworks-services -c com.android.server.net.watchlist.WatchlistConfigTests
@@ -114,10 +114,16 @@ public class WatchlistConfigTests {
     }
 
     @Test
-    public void testWatchlistConfig_getWatchlistConfigHash() throws Exception {
+    public void testWatchlistConfig_getWatchlistConfigHash_hasConfig() throws Exception {
         copyWatchlistConfigXml(mContext, TEST_XML_1, mTestXmlFile);
         WatchlistConfig config = new WatchlistConfig(mTestXmlFile);
         assertEquals(TEST_XML_1_HASH, HexDump.toHexString(config.getWatchlistConfigHash()));
+    }
+
+    @Test
+    public void testWatchlistConfig_getWatchlistConfigHash_withoutConfig() throws Exception {
+        WatchlistConfig config = new WatchlistConfig(mTestXmlFile);
+        assertNull(config.getWatchlistConfigHash());
     }
 
     @Test

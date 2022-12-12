@@ -11,35 +11,38 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License
+ * limitations under the License.
  */
 
 package com.android.server.am;
 
+import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
+
 import static com.android.server.am.ActivityManagerService.Injector;
 
+import static com.google.common.truth.Truth.assertWithMessage;
+
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.when;
 
 import android.content.Context;
+import android.content.res.Resources;
 import android.os.Bundle;
 import android.os.Handler;
 import android.provider.Settings;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.test.mock.MockContentResolver;
 
+import androidx.test.filters.SmallTest;
+
 import com.android.internal.util.test.FakeSettingsProvider;
-import com.android.server.AppOpsService;
+import com.android.server.appop.AppOpsService;
 
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -48,20 +51,10 @@ import java.io.File;
 /**
  * Test class for {@link CoreSettingsObserver}.
  *
- * To run the tests, use
- *
- * runtest -c com.android.server.am.CoreSettingsObserverTest frameworks-services
- *
- * or the following steps:
- *
- * Build: m FrameworksServicesTests
- * Install: adb install -r \
- *     ${ANDROID_PRODUCT_OUT}/data/app/FrameworksServicesTests/FrameworksServicesTests.apk
- * Run: adb shell am instrument -e class com.android.server.am.CoreSettingsObserverTest -w \
- *     com.android.frameworks.servicestests/android.support.test.runner.AndroidJUnitRunner
+ * Build/Install/Run:
+ *  atest FrameworksServicesTests:CoreSettingsObserverTest
  */
 @SmallTest
-@RunWith(AndroidJUnit4.class)
 public class CoreSettingsObserverTest {
     private static final String TEST_SETTING_SECURE_INT = "secureInt";
     private static final String TEST_SETTING_GLOBAL_FLOAT = "globalFloat";
@@ -71,8 +64,11 @@ public class CoreSettingsObserverTest {
     private static final float TEST_FLOAT = 3.14f;
     private static final String TEST_STRING = "testString";
 
+    @Rule public ServiceThreadRule mServiceThreadRule = new ServiceThreadRule();
+
     private ActivityManagerService mAms;
     @Mock private Context mContext;
+    @Mock private Resources mResources;
 
     private MockContentResolver mContentResolver;
     private CoreSettingsObserver mCoreSettingsObserver;
@@ -94,13 +90,18 @@ public class CoreSettingsObserverTest {
     public void setUp() {
         MockitoAnnotations.initMocks(this);
 
-        final Context originalContext = InstrumentationRegistry.getContext();
+        final Context originalContext = getInstrumentation().getTargetContext();
         when(mContext.getApplicationInfo()).thenReturn(originalContext.getApplicationInfo());
         mContentResolver = new MockContentResolver(mContext);
         mContentResolver.addProvider(Settings.AUTHORITY, new FakeSettingsProvider());
         when(mContext.getContentResolver()).thenReturn(mContentResolver);
+        when(mContext.getResources()).thenReturn(mResources);
+        // To prevent NullPointerException at the constructor of ActivityManagerConstants.
+        when(mResources.getStringArray(anyInt())).thenReturn(new String[0]);
+        when(mResources.getIntArray(anyInt())).thenReturn(new int[0]);
 
-        mAms = new ActivityManagerService(new TestInjector());
+        mAms = new ActivityManagerService(new TestInjector(mContext),
+                mServiceThreadRule.getThread());
         mCoreSettingsObserver = new CoreSettingsObserver(mAms);
     }
 
@@ -124,38 +125,60 @@ public class CoreSettingsObserverTest {
     public void testPopulateSettings_settingNotSet() {
         final Bundle settingsBundle = getPopulatedBundle();
 
-        assertFalse("Bundle should not contain " + TEST_SETTING_SECURE_INT,
-                settingsBundle.containsKey(TEST_SETTING_SECURE_INT));
-        assertFalse("Bundle should not contain " + TEST_SETTING_GLOBAL_FLOAT,
-                settingsBundle.containsKey(TEST_SETTING_GLOBAL_FLOAT));
-        assertFalse("Bundle should not contain " + TEST_SETTING_SYSTEM_STRING,
-                settingsBundle.containsKey(TEST_SETTING_SYSTEM_STRING));
+        assertWithMessage("Bundle should not contain " + TEST_SETTING_SECURE_INT)
+                .that(settingsBundle.keySet()).doesNotContain(TEST_SETTING_SECURE_INT);
+        assertWithMessage("Bundle should not contain " + TEST_SETTING_GLOBAL_FLOAT)
+                .that(settingsBundle.keySet()).doesNotContain(TEST_SETTING_GLOBAL_FLOAT);
+        assertWithMessage("Bundle should not contain " + TEST_SETTING_SYSTEM_STRING)
+                .that(settingsBundle.keySet()).doesNotContain(TEST_SETTING_SYSTEM_STRING);
+    }
+
+    @Test
+    public void testPopulateSettings_settingDeleted() {
+        Settings.Secure.putInt(mContentResolver, TEST_SETTING_SECURE_INT, TEST_INT);
+        Settings.Global.putFloat(mContentResolver, TEST_SETTING_GLOBAL_FLOAT, TEST_FLOAT);
+        Settings.System.putString(mContentResolver, TEST_SETTING_SYSTEM_STRING, TEST_STRING);
+
+        Bundle settingsBundle = getPopulatedBundle();
+
+        assertEquals("Unexpected value of " + TEST_SETTING_SECURE_INT,
+                TEST_INT, settingsBundle.getInt(TEST_SETTING_SECURE_INT));
+        assertEquals("Unexpected value of " + TEST_SETTING_GLOBAL_FLOAT,
+                TEST_FLOAT, settingsBundle.getFloat(TEST_SETTING_GLOBAL_FLOAT), 0);
+        assertEquals("Unexpected value of " + TEST_SETTING_SYSTEM_STRING,
+                TEST_STRING, settingsBundle.getString(TEST_SETTING_SYSTEM_STRING));
+
+        Settings.Global.putString(mContentResolver, TEST_SETTING_GLOBAL_FLOAT, null);
+        settingsBundle = getPopulatedBundle();
+
+        assertWithMessage("Bundle should not contain " + TEST_SETTING_GLOBAL_FLOAT)
+                .that(settingsBundle.keySet()).doesNotContain(TEST_SETTING_GLOBAL_FLOAT);
+        assertEquals("Unexpected value of " + TEST_SETTING_SECURE_INT,
+                TEST_INT, settingsBundle.getInt(TEST_SETTING_SECURE_INT));
+        assertEquals("Unexpected value of " + TEST_SETTING_SYSTEM_STRING,
+                TEST_STRING, settingsBundle.getString(TEST_SETTING_SYSTEM_STRING));
+
     }
 
     private Bundle getPopulatedBundle() {
-        final Bundle settingsBundle = new Bundle();
-        mCoreSettingsObserver.populateSettings(settingsBundle,
-                CoreSettingsObserver.sGlobalSettingToTypeMap);
-        mCoreSettingsObserver.populateSettings(settingsBundle,
-                CoreSettingsObserver.sSecureSettingToTypeMap);
-        mCoreSettingsObserver.populateSettings(settingsBundle,
-                CoreSettingsObserver.sSystemSettingToTypeMap);
-        return settingsBundle;
+        mCoreSettingsObserver.onChange(false);
+        return mCoreSettingsObserver.getCoreSettingsLocked();
     }
 
     private class TestInjector extends Injector {
-        @Override
-        public Context getContext() {
-            return mContext;
+
+        TestInjector(Context context) {
+            super(context);
         }
 
+        @Override
         public AppOpsService getAppOpsService(File file, Handler handler) {
             return null;
         }
 
         @Override
         public Handler getUiHandler(ActivityManagerService service) {
-            return null;
+            return mServiceThreadRule.getThread().getThreadHandler();
         }
     }
 }

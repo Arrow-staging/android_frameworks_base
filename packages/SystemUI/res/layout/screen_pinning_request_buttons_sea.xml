@@ -39,7 +39,7 @@
         android:layout_height="@dimen/screen_pinning_request_button_width"
         android:layout_width="@dimen/screen_pinning_request_button_height"
         android:layout_weight="0"
-        android:theme="@*android:style/ThemeOverlay.DeviceDefault.Accent">
+        android:theme="@style/ScreenPinningRequestTheme">
 
         <ImageView
             android:id="@+id/screen_pinning_back_bg_light"
@@ -61,6 +61,7 @@
             android:src="@drawable/screen_pinning_bg_circ" />
 
         <ImageView
+            android:id="@+id/screen_pinning_back_icon"
             android:layout_height="match_parent"
             android:layout_width="match_parent"
             android:scaleType="center"
@@ -81,7 +82,7 @@
         android:layout_height="@dimen/screen_pinning_request_button_width"
         android:layout_width="@dimen/screen_pinning_request_button_height"
         android:layout_weight="0"
-        android:theme="@*android:style/ThemeOverlay.DeviceDefault.Accent" >
+        android:theme="@style/ScreenPinningRequestTheme" >
 
         <ImageView
             android:id="@+id/screen_pinning_home_bg_light"
@@ -103,6 +104,7 @@
             android:src="@drawable/screen_pinning_bg_circ" />
 
         <ImageView
+            android:id="@+id/screen_pinning_home_icon"
             android:layout_height="match_parent"
             android:layout_width="match_parent"
             android:scaleType="center"
@@ -123,7 +125,7 @@
         android:layout_height="@dimen/screen_pinning_request_button_width"
         android:layout_width="@dimen/screen_pinning_request_button_height"
         android:layout_weight="0"
-        android:theme="@*android:style/ThemeOverlay.DeviceDefault.Accent">
+        android:theme="@style/ScreenPinningRequestTheme">
 
         <ImageView
             android:id="@+id/screen_pinning_recents_bg_light"

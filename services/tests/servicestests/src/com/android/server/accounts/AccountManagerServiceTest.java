@@ -17,6 +17,7 @@
 package com.android.server.accounts;
 
 import static android.database.sqlite.SQLiteDatabase.deleteDatabase;
+
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Matchers.anyInt;
@@ -29,17 +30,19 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import android.accounts.AbstractAccountAuthenticator;
 import android.accounts.Account;
 import android.accounts.AccountManager;
 import android.accounts.AccountManagerInternal;
 import android.accounts.CantAddAccountActivity;
 import android.accounts.IAccountManagerResponse;
 import android.app.AppOpsManager;
+import android.app.PropertyInvalidatedCache;
+import android.app.INotificationManager;
+import android.app.PropertyInvalidatedCache;
 import android.app.admin.DevicePolicyManager;
 import android.app.admin.DevicePolicyManagerInternal;
-import android.app.INotificationManager;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -48,6 +51,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManagerInternal;
 import android.content.pm.ResolveInfo;
 import android.content.pm.Signature;
 import android.content.pm.UserInfo;
@@ -67,7 +71,6 @@ import android.test.mock.MockContext;
 import android.test.suitebuilder.annotation.SmallTest;
 import android.util.Log;
 
-import com.android.frameworks.servicestests.R;
 import com.android.server.LocalServices;
 
 import org.mockito.ArgumentCaptor;
@@ -90,7 +93,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-
 /**
  * Tests for {@link AccountManagerService}.
  * <p>Run with:<pre>
@@ -98,7 +100,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * adb install -r ${OUT}/data/app/FrameworksServicesTests/FrameworksServicesTests.apk
  * adb shell am instrument -w -e package com.android.server.accounts \
  * com.android.frameworks.servicestests\
- * /android.support.test.runner.AndroidJUnitRunner
+ * /androidx.test.runner.AndroidJUnitRunner
  * </pre>
  */
 public class AccountManagerServiceTest extends AndroidTestCase {
@@ -114,6 +116,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     @Mock private IAccountManagerResponse mMockAccountManagerResponse;
     @Mock private IBinder mMockBinder;
     @Mock private INotificationManager mMockNotificationManager;
+    @Mock private PackageManagerInternal mMockPackageManagerInternal;
 
     @Captor private ArgumentCaptor<Intent> mIntentCaptor;
     @Captor private ArgumentCaptor<Bundle> mBundleCaptor;
@@ -132,6 +135,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     @Override
     protected void setUp() throws Exception {
         MockitoAnnotations.initMocks(this);
+
+        PropertyInvalidatedCache.disableForTestMode();
 
         when(mMockPackageManager.checkSignatures(anyInt(), anyInt()))
                     .thenReturn(PackageManager.SIGNATURE_MATCH);
@@ -158,6 +163,9 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         when(mMockContext.getSystemService(Context.DEVICE_POLICY_SERVICE)).thenReturn(
                 mMockDevicePolicyManager);
         when(mMockAccountManagerResponse.asBinder()).thenReturn(mMockBinder);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(true);
+        LocalServices.addService(PackageManagerInternal.class, mMockPackageManagerInternal);
 
         Context realTestContext = getContext();
         MyMockContext mockContext = new MyMockContext(realTestContext, mMockContext);
@@ -177,6 +185,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             cdl.countDown();
         });
         cdl.await(1, TimeUnit.SECONDS);
+        LocalServices.removeServiceForTest(PackageManagerInternal.class);
         super.tearDown();
     }
 
@@ -200,16 +209,23 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         Account a12 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
         Account a22 = new Account("account2", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
         Account a32 = new Account("account3", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
-        mAms.addAccountExplicitly(a11, "p11", null);
-        mAms.addAccountExplicitly(a12, "p12", null);
-        mAms.addAccountExplicitly(a21, "p21", null);
-        mAms.addAccountExplicitly(a22, "p22", null);
-        mAms.addAccountExplicitly(a31, "p31", null);
-        mAms.addAccountExplicitly(a32, "p32", null);
+        mAms.addAccountExplicitly(
+                a11, /* password= */ "p11", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a12, /* password= */ "p12", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a21, /* password= */ "p21", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a22, /* password= */ "p22", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a31, /* password= */ "p31", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a32, /* password= */ "p32", /* extras= */ null, /* callerPackage= */ null);
 
         String[] list = new String[]{AccountManagerServiceTestFixtures.CALLER_PACKAGE};
         when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
-        Account[] accounts = mAms.getAccounts(null, mContext.getOpPackageName());
+        Account[] accounts = mAms.getAccountsAsUser(null,
+                UserHandle.getCallingUserId(), mContext.getOpPackageName());
         Arrays.sort(accounts, new AccountSorter());
         assertEquals(6, accounts.length);
         assertEquals(a11, accounts[0]);
@@ -219,8 +235,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         assertEquals(a22, accounts[4]);
         assertEquals(a32, accounts[5]);
 
-        accounts = mAms.getAccounts(AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
-                mContext.getOpPackageName());
+        accounts = mAms.getAccountsAsUser(AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
+                UserHandle.getCallingUserId(), mContext.getOpPackageName());
         Arrays.sort(accounts, new AccountSorter());
         assertEquals(3, accounts.length);
         assertEquals(a11, accounts[0]);
@@ -229,8 +245,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         mAms.removeAccountInternal(a21);
 
-        accounts = mAms.getAccounts(AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
-                mContext.getOpPackageName());
+        accounts = mAms.getAccountsAsUser(AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
+                UserHandle.getCallingUserId(), mContext.getOpPackageName());
         Arrays.sort(accounts, new AccountSorter());
         assertEquals(2, accounts.length);
         assertEquals(a11, accounts[0]);
@@ -238,12 +254,34 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     }
 
     @SmallTest
+    public void testCheckAddAccountLongName() throws Exception {
+        unlockSystemUser();
+        String longString = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                + "aaaaa";
+        Account a11 = new Account(longString, AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
+
+        mAms.addAccountExplicitly(
+                a11, /* password= */ "p11", /* extras= */ null, /* callerPackage= */ null);
+
+        String[] list = new String[]{AccountManagerServiceTestFixtures.CALLER_PACKAGE};
+        when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
+        Account[] accounts = mAms.getAccountsAsUser(null,
+                UserHandle.getCallingUserId(), mContext.getOpPackageName());
+        assertEquals(0, accounts.length);
+    }
+
+
+    @SmallTest
     public void testPasswords() throws Exception {
         unlockSystemUser();
         Account a11 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
         Account a12 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
-        mAms.addAccountExplicitly(a11, "p11", null);
-        mAms.addAccountExplicitly(a12, "p12", null);
+        mAms.addAccountExplicitly(
+                a11, /* password= */ "p11", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a12, /* password= */ "p12", /* extras= */ null, /* callerPackage= */ null);
 
         assertEquals("p11", mAms.getPassword(a11));
         assertEquals("p12", mAms.getPassword(a12));
@@ -267,8 +305,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         u12.putString("a", "a_a12");
         u12.putString("b", "b_a12");
         u12.putString("c", "c_a12");
-        mAms.addAccountExplicitly(a11, "p11", u11);
-        mAms.addAccountExplicitly(a12, "p12", u12);
+        mAms.addAccountExplicitly(a11, /* password= */ "p11", u11, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(a12, /* password= */ "p12", u12, /* callerPackage= */ null);
 
         assertEquals("a_a11", mAms.getUserData(a11, "a"));
         assertEquals("b_a11", mAms.getUserData(a11, "b"));
@@ -293,8 +331,10 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         unlockSystemUser();
         Account a11 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
         Account a12 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
-        mAms.addAccountExplicitly(a11, "p11", null);
-        mAms.addAccountExplicitly(a12, "p12", null);
+        mAms.addAccountExplicitly(
+                a11, /* password= */ "p11", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a12, /* password= */ "p12", /* extras= */ null, /* callerPackage= */ null);
 
         mAms.setAuthToken(a11, "att1", "a11_att1");
         mAms.setAuthToken(a11, "att2", "a11_att2");
@@ -330,8 +370,10 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         unlockSystemUser();
         Account a1 = new Account("account1", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
         Account a2 = new Account("account2", AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2);
-        mAms.addAccountExplicitly(a1, "p1", null);
-        mAms.addAccountExplicitly(a2, "p2", null);
+        mAms.addAccountExplicitly(
+                a1, /* password= */ "p1", /* extras= */ null, /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                a2, /* password= */ "p2", /* extras= */ null, /* callerPackage= */ null);
 
         Context originalContext = ((MyMockContext)getContext()).mTestContext;
         // create a separate instance of AMS. It initially assumes that user0 is locked
@@ -370,7 +412,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         unlockSystemUser();
         String[] list = new String[]{AccountManagerServiceTestFixtures.CALLER_PACKAGE};
         when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
-        Account[] accounts = mAms.getAccounts(null, mContext.getOpPackageName());
+        Account[] accounts = mAms.getAccountsAsUser(null, UserHandle.getCallingUserId(),
+                mContext.getOpPackageName());
         assertEquals("1 account should be migrated", 1, accounts.length);
         assertEquals(PreNTestDatabaseHelper.ACCOUNT_NAME, accounts[0].name);
         assertEquals(PreNTestDatabaseHelper.ACCOUNT_PASSWORD, mAms.getPassword(accounts[0]));
@@ -610,6 +653,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -626,7 +671,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         waitForLatch(latch);
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -792,6 +837,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -808,7 +855,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         waitForLatch(latch);
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -1058,7 +1105,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         waitForLatch(latch);
         // Verify notification is cancelled
-        verify(mMockNotificationManager).cancelNotificationWithTag(
+        verify(mMockNotificationManager).cancelNotificationWithTag(anyString(),
                 anyString(), nullable(String.class), anyInt(), anyInt());
 
         verify(mMockAccountManagerResponse).onResult(mBundleCaptor.capture());
@@ -1092,6 +1139,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -1106,7 +1155,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         waitForLatch(latch);
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -1352,6 +1401,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         unlockSystemUser();
         when(mMockPackageManager.checkSignatures(anyInt(), anyInt()))
                     .thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
         try {
             mAms.removeAccountAsUser(
                 mMockAccountManagerResponse, // response
@@ -1413,7 +1464,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
 
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p1", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p1",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         Account[] addedAccounts =
                 mAms.getAccounts(UserHandle.USER_SYSTEM, mContext.getOpPackageName());
         assertEquals(1, addedAccounts.length);
@@ -1495,9 +1550,17 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             AccountManager.VISIBILITY_USER_MANAGED_NOT_VISIBLE);
 
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "P11", null, visibility1);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "P11",
+                /* extras= */ null,
+                visibility1,
+                /* callerPackage= */ null);
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "P12", null, visibility2);
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "P12",
+                /* extras= */ null,
+                visibility2,
+                /* callerPackage= */ null);
 
         Account[] accounts = mAms.getAccountsByTypeForPackage(
             null, "otherPackageName",
@@ -1618,7 +1681,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         when(mMockContext.getPackageManager()).thenReturn(mMockPackageManager);
         String[] list = new String[]{AccountManagerServiceTestFixtures.CALLER_PACKAGE};
         when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         mAms.setAuthToken(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
                 "authTokenType", AccountManagerServiceTestFixtures.AUTH_TOKEN);
@@ -1654,13 +1721,14 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
+        long expiryEpochTimeInMillis = System.currentTimeMillis() + ONE_DAY_IN_MILLISECOND;
         mAms.getAuthToken(
                     response, // response
                     AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
                     "authTokenType", // authTokenType
                     true, // notifyOnAuthFailure
                     false, // expectActivityLaunch
-                    createGetAuthTokenOptions());
+                createGetAuthTokenOptionsWithExpiry(expiryEpochTimeInMillis));
         waitForLatch(latch);
 
         verify(mMockAccountManagerResponse).onResult(mBundleCaptor.capture());
@@ -1671,6 +1739,58 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 AccountManagerServiceTestFixtures.ACCOUNT_NAME_SUCCESS);
         assertEquals(result.getString(AccountManager.KEY_ACCOUNT_TYPE),
                 AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
+        assertEquals(result.getLong(AbstractAccountAuthenticator.KEY_CUSTOM_TOKEN_EXPIRY),
+                expiryEpochTimeInMillis);
+    }
+
+    @SmallTest
+    public void testGetAuthTokenCachedSuccess() throws Exception {
+        unlockSystemUser();
+        when(mMockContext.createPackageContextAsUser(
+                anyString(), anyInt(), any(UserHandle.class))).thenReturn(mMockContext);
+        when(mMockContext.getPackageManager()).thenReturn(mMockPackageManager);
+        String[] list = new String[]{AccountManagerServiceTestFixtures.CALLER_PACKAGE};
+        when(mMockPackageManager.getPackagesForUid(anyInt())).thenReturn(list);
+
+        final CountDownLatch latch = new CountDownLatch(1);
+        Response response = new Response(latch, mMockAccountManagerResponse);
+        long expiryEpochTimeInMillis = System.currentTimeMillis() + ONE_DAY_IN_MILLISECOND;
+        mAms.getAuthToken(
+                response, // response
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                "authTokenType", // authTokenType
+                true, // notifyOnAuthFailure
+                false, // expectActivityLaunch
+                createGetAuthTokenOptionsWithExpiry(expiryEpochTimeInMillis));
+        waitForLatch(latch);
+
+        // Make call for cached token.
+        mAms.getAuthToken(
+                response, // response
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                "authTokenType", // authTokenType
+                true, // notifyOnAuthFailure
+                false, // expectActivityLaunch
+                createGetAuthTokenOptionsWithExpiry(expiryEpochTimeInMillis + 10));
+        waitForLatch(latch);
+
+        verify(mMockAccountManagerResponse, times(2)).onResult(mBundleCaptor.capture());
+        List<Bundle> result = mBundleCaptor.getAllValues();
+        assertGetTokenResponse(result.get(0), expiryEpochTimeInMillis);
+        // cached token was returned with the same expiration time as first token.
+        assertGetTokenResponse(result.get(1), expiryEpochTimeInMillis);
+    }
+
+    private void assertGetTokenResponse(Bundle result, long expiryEpochTimeInMillis) {
+        assertEquals(result.getString(AccountManager.KEY_AUTHTOKEN),
+                AccountManagerServiceTestFixtures.AUTH_TOKEN);
+        assertEquals(result.getString(AccountManager.KEY_ACCOUNT_NAME),
+                AccountManagerServiceTestFixtures.ACCOUNT_NAME_SUCCESS);
+        assertEquals(result.getString(AccountManager.KEY_ACCOUNT_TYPE),
+                AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
+        assertEquals(result.getLong(AbstractAccountAuthenticator.KEY_CUSTOM_TOKEN_EXPIRY),
+                expiryEpochTimeInMillis);
+
     }
 
     @SmallTest
@@ -1688,6 +1808,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -1701,7 +1823,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         waitForLatch(latch);
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -1930,7 +2052,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 UserHandle.USER_SYSTEM);
         waitForLatch(latch);
         // Verify notification is cancelled
-        verify(mMockNotificationManager).cancelNotificationWithTag(
+        verify(mMockNotificationManager).cancelNotificationWithTag(anyString(),
                 anyString(), nullable(String.class), anyInt(), anyInt());
 
         verify(mMockAccountManagerResponse).onResult(mBundleCaptor.capture());
@@ -1959,6 +2081,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -1974,7 +2098,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         waitForLatch(latch);
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -2097,6 +2221,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2110,7 +2236,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -2230,6 +2356,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 any(Intent.class), anyInt(), anyInt())).thenReturn(resolveInfo);
         when(mMockPackageManager.checkSignatures(
                 anyInt(), anyInt())).thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2245,7 +2373,7 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         verify(mMockAccountManagerResponse, never()).onResult(any(Bundle.class));
         verify(mMockAccountManagerResponse).onError(
-                eq(AccountManager.ERROR_CODE_REMOTE_EXCEPTION), anyString());
+                eq(AccountManager.ERROR_CODE_INVALID_RESPONSE), anyString());
     }
 
     @SmallTest
@@ -2332,6 +2460,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         unlockSystemUser();
         when(mMockPackageManager.checkSignatures(anyInt(), anyInt()))
                     .thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
         try {
             mAms.editProperties(
                 mMockAccountManagerResponse, // response
@@ -2415,7 +2545,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountByTypeAndFeaturesWithNoFeaturesAndOneVisibleAccount()
         throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
             AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
@@ -2437,7 +2571,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         visibility.put(AccountManagerServiceTestFixtures.CALLER_PACKAGE,
             AccountManager.VISIBILITY_USER_MANAGED_NOT_VISIBLE);
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                visibility,
+                /* callerPackage= */ null);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
             AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1,
@@ -2453,8 +2591,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     @SmallTest
     public void testGetAccountByTypeAndFeaturesWithNoFeaturesAndTwoAccounts() throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
@@ -2496,7 +2642,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountByTypeAndFeaturesWithFeaturesAndNoQualifiedAccount()
         throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         final CountDownLatch latch = new CountDownLatch(1);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
@@ -2516,8 +2666,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountByTypeAndFeaturesWithFeaturesAndOneQualifiedAccount()
         throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         final CountDownLatch latch = new CountDownLatch(1);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
@@ -2541,7 +2699,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         visibility.put(AccountManagerServiceTestFixtures.CALLER_PACKAGE,
             AccountManager.VISIBILITY_USER_MANAGED_NOT_VISIBLE);
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                visibility,
+                /* callerPackage= */ null);
         final CountDownLatch latch = new CountDownLatch(1);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
@@ -2560,9 +2722,21 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountByTypeAndFeaturesWithFeaturesAndTwoQualifiedAccount()
         throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS_2, "p12", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p13", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS_2,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p13",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         final CountDownLatch latch = new CountDownLatch(1);
         mAms.getAccountByTypeAndFeatures(
             mMockAccountManagerResponse,
@@ -2621,6 +2795,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                 PackageManager.PERMISSION_DENIED);
         when(mMockPackageManager.checkSignatures(anyInt(), anyInt()))
                     .thenReturn(PackageManager.SIGNATURE_NO_MATCH);
+        when(mMockPackageManagerInternal.hasSignatureCapability(anyInt(), anyInt(), anyInt()))
+                .thenReturn(false);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2641,8 +2817,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountsByFeaturesNullFeatureReturnsAllAccounts() throws Exception {
         unlockSystemUser();
 
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2666,8 +2850,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     public void testGetAccountsByFeaturesReturnsAccountsWithFeaturesOnly() throws Exception {
         unlockSystemUser();
 
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2688,8 +2880,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     @SmallTest
     public void testGetAccountsByFeaturesError() throws Exception {
         unlockSystemUser();
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_ERROR, "p12", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_ERROR,
+                /* password= */ "p12",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         final CountDownLatch latch = new CountDownLatch(1);
         Response response = new Response(latch, mMockAccountManagerResponse);
@@ -2733,7 +2933,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             "testpackage"); // opPackageName
 
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         // Notification about new account
         updateBroadcastCounters(2);
         assertEquals(mVisibleAccountsChangedBroadcasts, 1);
@@ -2747,9 +2951,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_2},
             "testpackage"); // opPackageName
 
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
         mAms.addAccountExplicitly(
-            AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p11", null);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         // Notification about new account
 
         updateBroadcastCounters(2);
@@ -2769,14 +2980,21 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             AccountManagerServiceTestFixtures.CALLER_PACKAGE);
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null, visibility,
+                /* callerPackage= */ null);
         mAms.unregisterAccountListener(
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             AccountManagerServiceTestFixtures.CALLER_PACKAGE);
 
         addAccountRemovedReceiver(AccountManagerServiceTestFixtures.CALLER_PACKAGE);
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_INTERVENE,
+                /* password= */ "p11",
+                /* extras= */ null,
+                visibility,
+                /* callerPackage= */ null);
 
         updateBroadcastCounters(3);
         assertEquals(mVisibleAccountsChangedBroadcasts, 1);
@@ -2814,7 +3032,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             "testpackage3"); // opPackageName
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                visibility,
+                /* callerPackage= */ null);
         updateBroadcastCounters(4);
         assertEquals(mVisibleAccountsChangedBroadcasts, 3);
         assertEquals(mLoginAccountsChangedBroadcasts, 1);
@@ -2831,7 +3053,10 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         // Add account of another type.
         mAms.addAccountExplicitly(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS_TYPE_2, "p11", null);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS_TYPE_2,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
 
         updateBroadcastCounters(8);
         assertEquals(mVisibleAccountsChangedBroadcasts, 5);
@@ -2859,7 +3084,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             "testpackage3"); // opPackageName
         mAms.addAccountExplicitlyWithVisibility(
-            AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null, visibility);
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                visibility,
+                /* callerPackage= */ null);
 
         updateBroadcastCounters(2);
         assertEquals(mVisibleAccountsChangedBroadcasts, 1);
@@ -2879,7 +3108,11 @@ public class AccountManagerServiceTest extends AndroidTestCase {
         mAms.registerAccountListener(
             new String [] {AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1},
             "testpackage"); // opPackageName
-        mAms.addAccountExplicitly(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "p11", null);
+        mAms.addAccountExplicitly(
+                AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS,
+                /* password= */ "p11",
+                /* extras= */ null,
+                /* callerPackage= */ null);
         mAms.setPassword(AccountManagerServiceTestFixtures.ACCOUNT_SUCCESS, "pwd");
         updateBroadcastCounters(4);
         assertEquals(mVisibleAccountsChangedBroadcasts, 2);
@@ -2938,7 +3171,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         Account a1 = new Account("account1",
                 AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
-        mAms.addAccountExplicitly(a1, "p1", null);
+        mAms.addAccountExplicitly(
+                a1, /* password= */ "p1", /* extras= */ null, /* callerPackage= */ null);
         List<String> errors = Collections.synchronizedList(new ArrayList<>());
         int readerCount = 2;
         ExecutorService es = Executors.newFixedThreadPool(readerCount + 1);
@@ -2957,7 +3191,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                     Log.d(TAG, logPrefix + " getAccounts started");
                     long ti = System.currentTimeMillis();
                     try {
-                        Account[] accounts = mAms.getAccounts(null, mContext.getOpPackageName());
+                        Account[] accounts = mAms.getAccountsAsUser(null,
+                                UserHandle.getCallingUserId(), mContext.getOpPackageName());
                         if (accounts == null || accounts.length != 1
                                 || !AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1.equals(
                                 accounts[0].type)) {
@@ -3014,7 +3249,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
 
         Account a1 = new Account("account1",
                 AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1);
-        mAms.addAccountExplicitly(a1, "p1", null);
+        mAms.addAccountExplicitly(
+                a1, /* password= */ "p1", /* extras= */ null, /* callerPackage= */ null);
         List<String> errors = Collections.synchronizedList(new ArrayList<>());
         int readerCount = 2;
         ExecutorService es = Executors.newFixedThreadPool(readerCount + 1);
@@ -3028,7 +3264,8 @@ public class AccountManagerServiceTest extends AndroidTestCase {
                     Log.d(TAG, logPrefix + " getAccounts started");
                     long ti = System.currentTimeMillis();
                     try {
-                        Account[] accounts = mAms.getAccounts(null, mContext.getOpPackageName());
+                        Account[] accounts = mAms.getAccountsAsUser(null,
+                                UserHandle.getCallingUserId(), mContext.getOpPackageName());
                         if (accounts == null || accounts.length != 1
                                 || !AccountManagerServiceTestFixtures.ACCOUNT_TYPE_1.equals(
                                 accounts[0].type)) {
@@ -3080,11 +3317,16 @@ public class AccountManagerServiceTest extends AndroidTestCase {
     }
 
     private Bundle createGetAuthTokenOptions() {
+        return createGetAuthTokenOptionsWithExpiry(
+                System.currentTimeMillis() + ONE_DAY_IN_MILLISECOND);
+    }
+
+    private Bundle createGetAuthTokenOptionsWithExpiry(long expiryEpochTimeInMillis) {
         Bundle options = new Bundle();
         options.putString(AccountManager.KEY_ANDROID_PACKAGE_NAME,
                 AccountManagerServiceTestFixtures.CALLER_PACKAGE);
         options.putLong(AccountManagerServiceTestFixtures.KEY_TOKEN_EXPIRY,
-                System.currentTimeMillis() + ONE_DAY_IN_MILLISECOND);
+                expiryEpochTimeInMillis);
         return options;
     }
 

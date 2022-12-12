@@ -17,14 +17,15 @@
 package com.android.internal.view;
 
 import android.os.Bundle;
-import android.os.LocaleList;
 import android.view.KeyEvent;
 import android.view.inputmethod.CompletionInfo;
 import android.view.inputmethod.CorrectionInfo;
 import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputContentInfo;
+import android.view.inputmethod.TextAttribute;
 
-import com.android.internal.view.IInputContextCallback;
+import com.android.internal.infra.AndroidFuture;
+import com.android.internal.inputmethod.InputConnectionCommandHeader;
 
 /**
  * Interface from an input method to the application, allowing it to perform
@@ -32,53 +33,80 @@ import com.android.internal.view.IInputContextCallback;
  * {@hide}
  */
  oneway interface IInputContext {
-    void getTextBeforeCursor(int length, int flags, int seq, IInputContextCallback callback); 
+    void getTextBeforeCursor(in InputConnectionCommandHeader header, int length, int flags,
+            in AndroidFuture future /* T=CharSequence */);
 
-    void getTextAfterCursor(int length, int flags, int seq, IInputContextCallback callback);
-    
-    void getCursorCapsMode(int reqModes, int seq, IInputContextCallback callback);
-    
-    void getExtractedText(in ExtractedTextRequest request, int flags, int seq,
-            IInputContextCallback callback);
+    void getTextAfterCursor(in InputConnectionCommandHeader header, int length, int flags,
+            in AndroidFuture future /* T=CharSequence */);
 
-    void deleteSurroundingText(int beforeLength, int afterLength);
-    void deleteSurroundingTextInCodePoints(int beforeLength, int afterLength);
+    void getCursorCapsMode(in InputConnectionCommandHeader header, int reqModes,
+            in AndroidFuture future /* T=Integer */);
 
-    void setComposingText(CharSequence text, int newCursorPosition);
+    void getExtractedText(in InputConnectionCommandHeader header, in ExtractedTextRequest request,
+            int flags, in AndroidFuture future /* T=ExtractedText */);
 
-    void finishComposingText();
-    
-    void commitText(CharSequence text, int newCursorPosition);
+    void deleteSurroundingText(in InputConnectionCommandHeader header, int beforeLength,
+            int afterLength);
+    void deleteSurroundingTextInCodePoints(in InputConnectionCommandHeader header, int beforeLength,
+            int afterLength);
 
-    void commitCompletion(in CompletionInfo completion);
+    void setComposingText(in InputConnectionCommandHeader header, CharSequence text,
+            int newCursorPosition);
 
-    void commitCorrection(in CorrectionInfo correction);
+    void setComposingTextWithTextAttribute(in InputConnectionCommandHeader header,
+                CharSequence text, int newCursorPosition, in TextAttribute textAttribute);
 
-    void setSelection(int start, int end);
-    
-    void performEditorAction(int actionCode);
-    
-    void performContextMenuAction(int id);
-    
-    void beginBatchEdit();
-    
-    void endBatchEdit();
+    void finishComposingText(in InputConnectionCommandHeader header);
 
-    void sendKeyEvent(in KeyEvent event);
-    
-    void clearMetaKeyStates(int states);
-    
-    void performPrivateCommand(String action, in Bundle data);
+    void commitText(in InputConnectionCommandHeader header, CharSequence text,
+                int newCursorPosition);
 
-    void setComposingRegion(int start, int end);
+    void commitTextWithTextAttribute(in InputConnectionCommandHeader header, CharSequence text,
+            int newCursorPosition, in TextAttribute textAttribute);
 
-    void getSelectedText(int flags, int seq, IInputContextCallback callback);
+    void commitCompletion(in InputConnectionCommandHeader header, in CompletionInfo completion);
 
-    void requestUpdateCursorAnchorInfo(int cursorUpdateMode, int seq,
-            IInputContextCallback callback);
+    void commitCorrection(in InputConnectionCommandHeader header, in CorrectionInfo correction);
 
-    void commitContent(in InputContentInfo inputContentInfo, int flags, in Bundle opts, int sec,
-            IInputContextCallback callback);
+    void setSelection(in InputConnectionCommandHeader header, int start, int end);
 
-    void reportLanguageHint(in LocaleList languageHint);
+    void performEditorAction(in InputConnectionCommandHeader header, int actionCode);
+
+    void performContextMenuAction(in InputConnectionCommandHeader header, int id);
+
+    void beginBatchEdit(in InputConnectionCommandHeader header);
+
+    void endBatchEdit(in InputConnectionCommandHeader header);
+
+    void sendKeyEvent(in InputConnectionCommandHeader header, in KeyEvent event);
+
+    void clearMetaKeyStates(in InputConnectionCommandHeader header, int states);
+
+    void performSpellCheck(in InputConnectionCommandHeader header);
+
+    void performPrivateCommand(in InputConnectionCommandHeader header, String action,
+            in Bundle data);
+
+    void setComposingRegion(in InputConnectionCommandHeader header, int start, int end);
+
+    void setComposingRegionWithTextAttribute(in InputConnectionCommandHeader header, int start,
+            int end, in TextAttribute textAttribute);
+
+    void getSelectedText(in InputConnectionCommandHeader header, int flags,
+            in AndroidFuture future /* T=CharSequence */);
+
+    void requestCursorUpdates(in InputConnectionCommandHeader header, int cursorUpdateMode,
+            int imeDisplayId, in AndroidFuture future /* T=Boolean */);
+
+    void requestCursorUpdatesWithFilter(in InputConnectionCommandHeader header,
+                int cursorUpdateMode, int cursorUpdateFilter, int imeDisplayId,
+                 in AndroidFuture future /* T=Boolean */);
+
+    void commitContent(in InputConnectionCommandHeader header, in InputContentInfo inputContentInfo,
+            int flags, in Bundle opts, in AndroidFuture future /* T=Boolean */);
+
+    void getSurroundingText(in InputConnectionCommandHeader header, int beforeLength,
+            int afterLength, int flags, in AndroidFuture future /* T=SurroundingText */);
+
+    void setImeConsumesInput(in InputConnectionCommandHeader header, boolean imeConsumesInput);
 }

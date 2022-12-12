@@ -29,6 +29,7 @@
 using ::aapt::io::StringInputStream;
 using ::aapt::test::StrValueEq;
 using ::aapt::test::ValueEq;
+using ::android::ConfigDescription;
 using ::android::Res_value;
 using ::android::ResTable_map;
 using ::android::StringPiece;
@@ -39,6 +40,8 @@ using ::testing::NotNull;
 using ::testing::Pointee;
 using ::testing::SizeIs;
 using ::testing::StrEq;
+
+using PolicyFlags = android::ResTable_overlayable_policy_header::PolicyFlags;
 
 namespace aapt {
 
@@ -95,6 +98,16 @@ TEST_F(ResourceParserTest, ParseQuotedString) {
   ASSERT_THAT(str, NotNull());
   EXPECT_THAT(*str, StrValueEq("  hey there "));
   EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+
+  ASSERT_TRUE(TestParse(R"(<string name="bar">Isn\'t it cool?</string>)"));
+  str = test::GetValue<String>(&table_, "string/bar");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str, StrValueEq("Isn't it cool?"));
+
+  ASSERT_TRUE(TestParse(R"(<string name="baz">"Isn't it cool?"</string>)"));
+  str = test::GetValue<String>(&table_, "string/baz");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str, StrValueEq("Isn't it cool?"));
 }
 
 TEST_F(ResourceParserTest, ParseEscapedString) {
@@ -126,16 +139,16 @@ TEST_F(ResourceParserTest, ParseStyledString) {
   StyledString* str = test::GetValue<StyledString>(&table_, "string/foo");
   ASSERT_THAT(str, NotNull());
 
-  EXPECT_THAT(str->value->value, Eq("This is my aunt\u2019s fickle string"));
+  EXPECT_THAT(str->value->value, StrEq("This is my aunt\u2019s fickle string"));
   EXPECT_THAT(str->value->spans, SizeIs(2));
   EXPECT_THAT(str->untranslatable_sections, IsEmpty());
 
-  EXPECT_THAT(*str->value->spans[0].name, Eq("b"));
-  EXPECT_THAT(str->value->spans[0].first_char, Eq(17u));
+  EXPECT_THAT(*str->value->spans[0].name, StrEq("b"));
+  EXPECT_THAT(str->value->spans[0].first_char, Eq(18u));
   EXPECT_THAT(str->value->spans[0].last_char, Eq(30u));
 
-  EXPECT_THAT(*str->value->spans[1].name, Eq("small"));
-  EXPECT_THAT(str->value->spans[1].first_char, Eq(24u));
+  EXPECT_THAT(*str->value->spans[1].name, StrEq("small"));
+  EXPECT_THAT(str->value->spans[1].first_char, Eq(25u));
   EXPECT_THAT(str->value->spans[1].last_char, Eq(30u));
 }
 
@@ -144,7 +157,7 @@ TEST_F(ResourceParserTest, ParseStringWithWhitespace) {
 
   String* str = test::GetValue<String>(&table_, "string/foo");
   ASSERT_THAT(str, NotNull());
-  EXPECT_THAT(*str->value, Eq("This is what I think"));
+  EXPECT_THAT(*str->value, StrEq("This is what I think"));
   EXPECT_THAT(str->untranslatable_sections, IsEmpty());
 
   ASSERT_TRUE(TestParse(R"(<string name="foo2">"  This is what  I think  "</string>)"));
@@ -152,6 +165,81 @@ TEST_F(ResourceParserTest, ParseStringWithWhitespace) {
   str = test::GetValue<String>(&table_, "string/foo2");
   ASSERT_THAT(str, NotNull());
   EXPECT_THAT(*str, StrValueEq("  This is what  I think  "));
+}
+
+TEST_F(ResourceParserTest, ParseStringTruncateASCII) {
+  // Tuncate leading and trailing whitespace
+  EXPECT_TRUE(TestParse(R"(<string name="foo">&#32;Hello&#32;</string>)"));
+
+  String* str = test::GetValue<String>(&table_, "string/foo");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str->value, StrEq("Hello"));
+  EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+
+  // AAPT does not truncate unicode whitespace
+  EXPECT_TRUE(TestParse(R"(<string name="foo2">\u0020\Hello\u0020</string>)"));
+
+  str = test::GetValue<String>(&table_, "string/foo2");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str->value, StrEq(" Hello "));
+  EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+
+  // Preserve non-ASCII whitespace including extended ASCII characters
+  EXPECT_TRUE(TestParse(R"(<string name="foo3">&#160;Hello&#x202F;World&#160;</string>)"));
+
+  str = test::GetValue<String>(&table_, "string/foo3");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str->value, StrEq("\xC2\xA0Hello\xE2\x80\xAFWorld\xC2\xA0"));
+  EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+
+  EXPECT_TRUE(TestParse(R"(<string name="foo4">2005年6月1日</string>)"));
+
+  str = test::GetValue<String>(&table_, "string/foo4");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(*str->value, StrEq("2005年6月1日"));
+  EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+}
+
+TEST_F(ResourceParserTest, ParseStyledStringWithWhitespace) {
+  std::string input = R"(<string name="foo">  <b> My <i> favorite</i> string </b>  </string>)";
+  ASSERT_TRUE(TestParse(input));
+
+  StyledString* str = test::GetValue<StyledString>(&table_, "string/foo");
+  ASSERT_THAT(str, NotNull());
+  EXPECT_THAT(str->value->value, StrEq("  My  favorite string  "));
+  EXPECT_THAT(str->untranslatable_sections, IsEmpty());
+
+  ASSERT_THAT(str->value->spans, SizeIs(2u));
+  EXPECT_THAT(*str->value->spans[0].name, StrEq("b"));
+  EXPECT_THAT(str->value->spans[0].first_char, Eq(1u));
+  EXPECT_THAT(str->value->spans[0].last_char, Eq(21u));
+
+  EXPECT_THAT(*str->value->spans[1].name, StrEq("i"));
+  EXPECT_THAT(str->value->spans[1].first_char, Eq(5u));
+  EXPECT_THAT(str->value->spans[1].last_char, Eq(13u));
+}
+
+TEST_F(ResourceParserTest, ParseStringTranslatableAttribute) {
+  // If there is no translate attribute the default is 'true'
+  EXPECT_TRUE(TestParse(R"(<string name="foo1">Translate</string>)"));
+  String* str = test::GetValue<String>(&table_, "string/foo1");
+  ASSERT_THAT(str, NotNull());
+  ASSERT_TRUE(str->IsTranslatable());
+
+  // Explicit 'true' translate attribute
+  EXPECT_TRUE(TestParse(R"(<string name="foo2" translatable="true">Translate</string>)"));
+  str = test::GetValue<String>(&table_, "string/foo2");
+  ASSERT_THAT(str, NotNull());
+  ASSERT_TRUE(str->IsTranslatable());
+
+  // Explicit 'false' translate attribute
+  EXPECT_TRUE(TestParse(R"(<string name="foo3" translatable="false">Do not translate</string>)"));
+  str = test::GetValue<String>(&table_, "string/foo3");
+  ASSERT_THAT(str, NotNull());
+  ASSERT_FALSE(str->IsTranslatable());
+
+  // Invalid value for the translate attribute, should be boolean ('true' or 'false')
+  EXPECT_FALSE(TestParse(R"(<string name="foo4" translatable="yes">Translate</string>)"));
 }
 
 TEST_F(ResourceParserTest, IgnoreXliffTagsOtherThanG) {
@@ -182,12 +270,9 @@ TEST_F(ResourceParserTest, RecordUntranslateableXliffSectionsInString) {
   String* str = test::GetValue<String>(&table_, "string/foo");
   ASSERT_THAT(str, NotNull());
   EXPECT_THAT(*str, StrValueEq("There are %1$d apples"));
-  ASSERT_THAT(str->untranslatable_sections, SizeIs(1));
 
-  // We expect indices and lengths that span to include the whitespace
-  // before %1$d. This is due to how the StringBuilder withholds whitespace unless
-  // needed (to deal with line breaks, etc.).
-  EXPECT_THAT(str->untranslatable_sections[0].start, Eq(9u));
+  ASSERT_THAT(str->untranslatable_sections, SizeIs(1));
+  EXPECT_THAT(str->untranslatable_sections[0].start, Eq(10u));
   EXPECT_THAT(str->untranslatable_sections[0].end, Eq(14u));
 }
 
@@ -199,14 +284,16 @@ TEST_F(ResourceParserTest, RecordUntranslateableXliffSectionsInStyledString) {
 
   StyledString* str = test::GetValue<StyledString>(&table_, "string/foo");
   ASSERT_THAT(str, NotNull());
-  EXPECT_THAT(str->value->value, Eq("There are %1$d apples"));
-  ASSERT_THAT(str->untranslatable_sections, SizeIs(1));
+  EXPECT_THAT(str->value->value, Eq(" There are %1$d apples"));
 
-  // We expect indices and lengths that span to include the whitespace
-  // before %1$d. This is due to how the StringBuilder withholds whitespace unless
-  // needed (to deal with line breaks, etc.).
-  EXPECT_THAT(str->untranslatable_sections[0].start, Eq(9u));
-  EXPECT_THAT(str->untranslatable_sections[0].end, Eq(14u));
+  ASSERT_THAT(str->untranslatable_sections, SizeIs(1));
+  EXPECT_THAT(str->untranslatable_sections[0].start, Eq(11u));
+  EXPECT_THAT(str->untranslatable_sections[0].end, Eq(15u));
+
+  ASSERT_THAT(str->value->spans, SizeIs(1u));
+  EXPECT_THAT(*str->value->spans[0].name, StrEq("b"));
+  EXPECT_THAT(str->value->spans[0].first_char, Eq(11u));
+  EXPECT_THAT(str->value->spans[0].last_char, Eq(14u));
 }
 
 TEST_F(ResourceParserTest, ParseNull) {
@@ -249,6 +336,90 @@ TEST_F(ResourceParserTest, ParseAttr) {
   EXPECT_THAT(attr->type_mask, Eq(ResTable_map::TYPE_ANY));
 }
 
+TEST_F(ResourceParserTest, ParseMacro) {
+  std::string input = R"(<macro name="foo">12345</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("12345"));
+  EXPECT_THAT(macro->style_string.str, Eq("12345"));
+  EXPECT_THAT(macro->style_string.spans, IsEmpty());
+  EXPECT_THAT(macro->untranslatable_sections, IsEmpty());
+  EXPECT_THAT(macro->alias_namespaces, IsEmpty());
+}
+
+TEST_F(ResourceParserTest, ParseMacroUntranslatableSection) {
+  std::string input = R"(<macro name="foo" xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+This being <b><xliff:g>human</xliff:g></b> is a guest house.</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("\nThis being human is a guest house."));
+  EXPECT_THAT(macro->style_string.str, Eq(" This being human is a guest house."));
+  EXPECT_THAT(macro->style_string.spans.size(), Eq(1));
+  EXPECT_THAT(macro->style_string.spans[0].name, Eq("b"));
+  EXPECT_THAT(macro->style_string.spans[0].first_char, Eq(12));
+  EXPECT_THAT(macro->style_string.spans[0].last_char, Eq(16));
+  ASSERT_THAT(macro->untranslatable_sections.size(), Eq(1));
+  EXPECT_THAT(macro->untranslatable_sections[0].start, Eq(12));
+  EXPECT_THAT(macro->untranslatable_sections[0].end, Eq(17));
+  EXPECT_THAT(macro->alias_namespaces, IsEmpty());
+}
+
+TEST_F(ResourceParserTest, ParseMacroNamespaces) {
+  std::string input = R"(<macro name="foo" xmlns:app="http://schemas.android.com/apk/res/android">
+@app:string/foo</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("\n@app:string/foo"));
+  EXPECT_THAT(macro->style_string.str, Eq("@app:string/foo"));
+  EXPECT_THAT(macro->style_string.spans, IsEmpty());
+  EXPECT_THAT(macro->untranslatable_sections, IsEmpty());
+  EXPECT_THAT(macro->alias_namespaces.size(), Eq(1));
+  EXPECT_THAT(macro->alias_namespaces[0].alias, Eq("app"));
+  EXPECT_THAT(macro->alias_namespaces[0].package_name, Eq("android"));
+  EXPECT_THAT(macro->alias_namespaces[0].is_private, Eq(false));
+}
+
+TEST_F(ResourceParserTest, ParseMacroReference) {
+  std::string input = R"(<string name="res_string">@macro/foo</string>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Reference* macro = test::GetValue<Reference>(&table_, "string/res_string");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->type_flags, Eq(ResTable_map::TYPE_STRING));
+  EXPECT_THAT(macro->allow_raw, Eq(false));
+
+  input = R"(<style name="foo">
+               <item name="bar">@macro/foo</item>
+             </style>)";
+
+  ASSERT_TRUE(TestParse(input));
+  Style* style = test::GetValue<Style>(&table_, "style/foo");
+  ASSERT_THAT(style, NotNull());
+  EXPECT_THAT(style->entries.size(), Eq(1));
+
+  macro = ValueCast<Reference>(style->entries[0].value.get());
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->type_flags, Eq(0U));
+  EXPECT_THAT(macro->allow_raw, Eq(true));
+}
+
+TEST_F(ResourceParserTest, ParseMacroNoNameFail) {
+  std::string input = R"(<macro>12345</macro>)";
+  ASSERT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseMacroNonDefaultConfigurationFail) {
+  const ConfigDescription watch_config = test::ParseConfigOrDie("watch");
+  std::string input = R"(<macro name="foo">12345</macro>)";
+  ASSERT_FALSE(TestParse(input, watch_config));
+}
+
 // Old AAPT allowed attributes to be defined under different configurations, but ultimately
 // stored them with the default configuration. Check that we have the same behavior.
 TEST_F(ResourceParserTest, ParseAttrAndDeclareStyleableUnderConfigButRecordAsNoConfig) {
@@ -256,7 +427,7 @@ TEST_F(ResourceParserTest, ParseAttrAndDeclareStyleableUnderConfigButRecordAsNoC
   std::string input = R"(
       <attr name="foo" />
       <declare-styleable name="bar">
-        <attr name="baz" />
+        <attr name="baz" format="reference"/>
       </declare-styleable>)";
   ASSERT_TRUE(TestParse(input, watch_config));
 
@@ -316,7 +487,7 @@ TEST_F(ResourceParserTest, ParseEnumAttr) {
   std::string input = R"(
       <attr name="foo">
         <enum name="bar" value="0"/>
-        <enum name="bat" value="1"/>
+        <enum name="bat" value="0x1"/>
         <enum name="baz" value="2"/>
       </attr>)";
   ASSERT_TRUE(TestParse(input));
@@ -329,14 +500,17 @@ TEST_F(ResourceParserTest, ParseEnumAttr) {
   ASSERT_TRUE(enum_attr->symbols[0].symbol.name);
   EXPECT_THAT(enum_attr->symbols[0].symbol.name.value().entry, Eq("bar"));
   EXPECT_THAT(enum_attr->symbols[0].value, Eq(0u));
+  EXPECT_THAT(enum_attr->symbols[0].type, Eq(Res_value::TYPE_INT_DEC));
 
   ASSERT_TRUE(enum_attr->symbols[1].symbol.name);
   EXPECT_THAT(enum_attr->symbols[1].symbol.name.value().entry, Eq("bat"));
   EXPECT_THAT(enum_attr->symbols[1].value, Eq(1u));
+  EXPECT_THAT(enum_attr->symbols[1].type, Eq(Res_value::TYPE_INT_HEX));
 
   ASSERT_TRUE(enum_attr->symbols[2].symbol.name);
   EXPECT_THAT(enum_attr->symbols[2].symbol.name.value().entry, Eq("baz"));
   EXPECT_THAT(enum_attr->symbols[2].value, Eq(2u));
+  EXPECT_THAT(enum_attr->symbols[2].type, Eq(Res_value::TYPE_INT_DEC));
 }
 
 TEST_F(ResourceParserTest, ParseFlagAttr) {
@@ -393,12 +567,12 @@ TEST_F(ResourceParserTest, ParseStyle) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("style/fu"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("style/fu")));
   ASSERT_THAT(style->entries, SizeIs(3));
 
-  EXPECT_THAT(style->entries[0].key.name, Eq(make_value(test::ParseNameOrDie("attr/bar"))));
-  EXPECT_THAT(style->entries[1].key.name, Eq(make_value(test::ParseNameOrDie("attr/bat"))));
-  EXPECT_THAT(style->entries[2].key.name, Eq(make_value(test::ParseNameOrDie("attr/baz"))));
+  EXPECT_THAT(style->entries[0].key.name, Eq(test::ParseNameOrDie("attr/bar")));
+  EXPECT_THAT(style->entries[1].key.name, Eq(test::ParseNameOrDie("attr/bat")));
+  EXPECT_THAT(style->entries[2].key.name, Eq(test::ParseNameOrDie("attr/baz")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithShorthandParent) {
@@ -407,7 +581,7 @@ TEST_F(ResourceParserTest, ParseStyleWithShorthandParent) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("com.app:style/Theme"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("com.app:style/Theme")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedParent) {
@@ -420,7 +594,7 @@ TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedParent) {
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
   ASSERT_TRUE(style->parent.value().name);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("android:style/Theme"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("android:style/Theme")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedItems) {
@@ -433,8 +607,26 @@ TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedItems) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_THAT(style->entries, SizeIs(1));
-  EXPECT_THAT(style->entries[0].key.name, Eq(make_value(test::ParseNameOrDie("android:attr/bar"))));
+  EXPECT_THAT(style->entries[0].key.name, Eq(test::ParseNameOrDie("android:attr/bar")));
 }
+
+TEST_F(ResourceParserTest, ParseStyleWithRawStringItem) {
+  std::string input = R"(
+      <style name="foo">
+        <item name="bar">
+          com.helloworld.AppClass
+        </item>
+      </style>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Style* style = test::GetValue<Style>(&table_, "style/foo");
+  ASSERT_THAT(style, NotNull());
+  EXPECT_THAT(style->entries[0].value, NotNull());
+  RawString* value = ValueCast<RawString>(style->entries[0].value.get());
+  EXPECT_THAT(value, NotNull());
+  EXPECT_THAT(*value->value, StrEq(R"(com.helloworld.AppClass)"));
+}
+
 
 TEST_F(ResourceParserTest, ParseStyleWithInferredParent) {
   ASSERT_TRUE(TestParse(R"(<style name="foo.bar"/>)"));
@@ -442,7 +634,7 @@ TEST_F(ResourceParserTest, ParseStyleWithInferredParent) {
   Style* style = test::GetValue<Style>(&table_, "style/foo.bar");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("style/foo"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("style/foo")));
   EXPECT_TRUE(style->parent_inferred);
 }
 
@@ -480,14 +672,13 @@ TEST_F(ResourceParserTest, ParseAttributesDeclareStyleable) {
       </declare-styleable>)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("styleable/foo"));
   ASSERT_TRUE(result);
   EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
 
   Attribute* attr = test::GetValue<Attribute>(&table_, "attr/bar");
-  ASSERT_THAT(attr, NotNull());
-  EXPECT_TRUE(attr->IsWeak());
+  ASSERT_THAT(attr, IsNull());
 
   attr = test::GetValue<Attribute>(&table_, "attr/bat");
   ASSERT_THAT(attr, NotNull());
@@ -504,9 +695,35 @@ TEST_F(ResourceParserTest, ParseAttributesDeclareStyleable) {
   ASSERT_THAT(styleable, NotNull());
   ASSERT_THAT(styleable->entries, SizeIs(3));
 
-  EXPECT_THAT(styleable->entries[0].name, Eq(make_value(test::ParseNameOrDie("attr/bar"))));
-  EXPECT_THAT(styleable->entries[1].name, Eq(make_value(test::ParseNameOrDie("attr/bat"))));
-  EXPECT_THAT(styleable->entries[2].name, Eq(make_value(test::ParseNameOrDie("attr/baz"))));
+  EXPECT_THAT(styleable->entries[0].name, Eq(test::ParseNameOrDie("attr/bar")));
+  EXPECT_THAT(styleable->entries[1].name, Eq(test::ParseNameOrDie("attr/bat")));
+  EXPECT_THAT(styleable->entries[2].name, Eq(test::ParseNameOrDie("attr/baz")));
+}
+
+TEST_F(ResourceParserTest, ParseDeclareStyleablePreservingVisibility) {
+  StringInputStream input(R"(
+      <resources>
+        <declare-styleable name="foo">
+          <attr name="myattr" />
+        </declare-styleable>
+        <declare-styleable name="bar">
+          <attr name="myattr" />
+        </declare-styleable>
+        <public type="styleable" name="bar" />
+      </resources>)");
+  ResourceParser parser(context_->GetDiagnostics(), &table_, Source{"test"},
+                        ConfigDescription::DefaultConfig(),
+                        ResourceParserOptions{.preserve_visibility_of_styleables = true});
+
+  xml::XmlPullParser xml_parser(&input);
+  ASSERT_TRUE(parser.Parse(&xml_parser));
+
+  EXPECT_EQ(
+      table_.FindResource(test::ParseNameOrDie("styleable/foo")).value().entry->visibility.level,
+      Visibility::Level::kUndefined);
+  EXPECT_EQ(
+      table_.FindResource(test::ParseNameOrDie("styleable/bar")).value().entry->visibility.level,
+      Visibility::Level::kPublic);
 }
 
 TEST_F(ResourceParserTest, ParsePrivateAttributesDeclareStyleable) {
@@ -696,27 +913,42 @@ TEST_F(ResourceParserTest, AutoIncrementIdsInPublicGroup) {
       </public-group>)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result = table_.FindResource(test::ParseNameOrDie("attr/foo"));
+  std::optional<ResourceTable::SearchResult> result =
+      table_.FindResource(test::ParseNameOrDie("attr/foo"));
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().entry->id);
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01010040)));
+
+  result = table_.FindResource(test::ParseNameOrDie("attr/bar"));
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().entry->id);
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01010041)));
+}
+
+TEST_F(ResourceParserTest, StagingPublicGroup) {
+  std::string input = R"(
+      <staging-public-group type="attr" first-id="0x01ff0049">
+        <public name="foo" />
+        <public name="bar" />
+      </staging-public-group>)";
+  ASSERT_TRUE(TestParse(input));
+
+  std::optional<ResourceTable::SearchResult> result =
+      table_.FindResource(test::ParseNameOrDie("attr/foo"));
   ASSERT_TRUE(result);
 
-  ASSERT_TRUE(result.value().package->id);
-  ASSERT_TRUE(result.value().type->id);
   ASSERT_TRUE(result.value().entry->id);
-  ResourceId actual_id(result.value().package->id.value(),
-                       result.value().type->id.value(),
-                       result.value().entry->id.value());
-  EXPECT_THAT(actual_id, Eq(ResourceId(0x01010040)));
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01ff0049)));
+  EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
+  EXPECT_TRUE(result.value().entry->visibility.staged_api);
 
   result = table_.FindResource(test::ParseNameOrDie("attr/bar"));
   ASSERT_TRUE(result);
 
-  ASSERT_TRUE(result.value().package->id);
-  ASSERT_TRUE(result.value().type->id);
   ASSERT_TRUE(result.value().entry->id);
-  actual_id = ResourceId(result.value().package->id.value(),
-                         result.value().type->id.value(),
-                         result.value().entry->id.value());
-  EXPECT_THAT(actual_id, Eq(ResourceId(0x01010041)));
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01ff004a)));
+  EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
+  EXPECT_TRUE(result.value().entry->visibility.staged_api);
 }
 
 TEST_F(ResourceParserTest, StrongestSymbolVisibilityWins) {
@@ -729,7 +961,7 @@ TEST_F(ResourceParserTest, StrongestSymbolVisibilityWins) {
       <java-symbol type="string" name="foo" />)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("string/foo"));
   ASSERT_TRUE(result);
 
@@ -747,7 +979,7 @@ TEST_F(ResourceParserTest, ExternalTypesShouldOnlyBeReferences) {
 TEST_F(ResourceParserTest, AddResourcesElementShouldAddEntryWithUndefinedSymbol) {
   ASSERT_TRUE(TestParse(R"(<add-resource name="bar" type="string" />)"));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("string/bar"));
   ASSERT_TRUE(result);
   const ResourceEntry* entry = result.value().entry;
@@ -811,65 +1043,379 @@ TEST_F(ResourceParserTest, ParsePlatformIndependentNewline) {
   ASSERT_TRUE(TestParse(R"(<string name="foo">%1$s %n %2$s</string>)"));
 }
 
-TEST_F(ResourceParserTest, ParseOverlayableTagWithSystemPolicy) {
+TEST_F(ResourceParserTest, ParseOverlayable) {
   std::string input = R"(
-      <overlayable policy="illegal_policy">
-        <item type="string" name="foo" />
-      </overlayable>)";
-  EXPECT_FALSE(TestParse(input));
-
-  input = R"(
-      <overlayable policy="system">
-        <item name="foo" />
-      </overlayable>)";
-  EXPECT_FALSE(TestParse(input));
-
-  input = R"(
-      <overlayable policy="system">
-        <item type="attr" />
-      </overlayable>)";
-  EXPECT_FALSE(TestParse(input));
-
-  input = R"(
-      <overlayable policy="system">
-        <item type="bad_type" name="foo" />
-      </overlayable>)";
-  EXPECT_FALSE(TestParse(input));
-
-  input = R"(<overlayable policy="system" />)";
-  EXPECT_TRUE(TestParse(input));
-
-  input = R"(<overlayable />)";
-  EXPECT_TRUE(TestParse(input));
-
-  input = R"(
-      <overlayable policy="system">
-        <item type="string" name="foo" />
-        <item type="dimen" name="foo" />
+      <overlayable name="Name" actor="overlay://theme">
+          <policy type="signature">
+            <item type="string" name="foo" />
+            <item type="drawable" name="bar" />
+          </policy>
       </overlayable>)";
   ASSERT_TRUE(TestParse(input));
 
-  input = R"(
-      <overlayable>
-        <item type="string" name="bar" />
-      </overlayable>)";
-  ASSERT_TRUE(TestParse(input));
-
-  Maybe<ResourceTable::SearchResult> search_result =
-      table_.FindResource(test::ParseNameOrDie("string/bar"));
+  auto search_result = table_.FindResource(test::ParseNameOrDie("string/foo"));
   ASSERT_TRUE(search_result);
   ASSERT_THAT(search_result.value().entry, NotNull());
-  EXPECT_THAT(search_result.value().entry->visibility.level, Eq(Visibility::Level::kUndefined));
-  EXPECT_TRUE(search_result.value().entry->overlayable);
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  OverlayableItem& result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.overlayable->actor, Eq("overlay://theme"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::SIGNATURE));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("drawable/bar"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.overlayable->actor, Eq("overlay://theme"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::SIGNATURE));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayableRequiresName) {
+  EXPECT_FALSE(TestParse(R"(<overlayable actor="overlay://theme" />)"));
+  EXPECT_TRUE(TestParse(R"(<overlayable name="Name" />)"));
+  EXPECT_TRUE(TestParse(R"(<overlayable name="Name" actor="overlay://theme" />)"));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayableBadActorFail) {
+  EXPECT_FALSE(TestParse(R"(<overlayable name="Name" actor="overley://theme" />)"));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayablePolicy) {
+  std::string input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="bar" />
+        </policy>
+        <policy type="system">
+          <item type="string" name="fiz" />
+        </policy>
+        <policy type="vendor">
+          <item type="string" name="fuz" />
+        </policy>
+        <policy type="public">
+          <item type="string" name="faz" />
+        </policy>
+        <policy type="signature">
+          <item type="string" name="foz" />
+        </policy>
+        <policy type="odm">
+          <item type="string" name="biz" />
+        </policy>
+        <policy type="oem">
+          <item type="string" name="buz" />
+        </policy>
+        <policy type="actor">
+          <item type="string" name="actor" />
+        </policy>
+      </overlayable>)";
+  ASSERT_TRUE(TestParse(input));
+
+  auto search_result = table_.FindResource(test::ParseNameOrDie("string/bar"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  OverlayableItem result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::PRODUCT_PARTITION));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/fiz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::SYSTEM_PARTITION));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/fuz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::VENDOR_PARTITION));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/faz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::PUBLIC));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/foz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::SIGNATURE));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/biz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::ODM_PARTITION));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/buz"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::OEM_PARTITION));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/actor"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::ACTOR_SIGNATURE));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayableNoPolicyError) {
+  std::string input = R"(
+      <overlayable name="Name">
+        <item type="string" name="foo" />
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy>
+          <item name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayableBadPolicyError) {
+  std::string input = R"(
+      <overlayable name="Name">
+        <policy type="illegal_policy">
+          <item type="string" name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="vendor">
+          <item type="string" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseOverlayableMultiplePolicy) {
+  std::string input = R"(
+      <overlayable name="Name">
+        <policy type="vendor|public">
+          <item type="string" name="foo" />
+        </policy>
+        <policy type="product|system">
+          <item type="string" name="bar" />
+        </policy>
+      </overlayable>)";
+  ASSERT_TRUE(TestParse(input));
+
+  auto search_result = table_.FindResource(test::ParseNameOrDie("string/foo"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  OverlayableItem result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::VENDOR_PARTITION
+                                                   | PolicyFlags::PUBLIC));
+
+  search_result = table_.FindResource(test::ParseNameOrDie("string/bar"));
+  ASSERT_TRUE(search_result);
+  ASSERT_THAT(search_result.value().entry, NotNull());
+  ASSERT_TRUE(search_result.value().entry->overlayable_item);
+  result_overlayable_item = search_result.value().entry->overlayable_item.value();
+  EXPECT_THAT(result_overlayable_item.overlayable->name, Eq("Name"));
+  EXPECT_THAT(result_overlayable_item.policies, Eq(PolicyFlags::PRODUCT_PARTITION
+                                                   | PolicyFlags::SYSTEM_PARTITION));
 }
 
 TEST_F(ResourceParserTest, DuplicateOverlayableIsError) {
   std::string input = R"(
-      <overlayable>
+      <overlayable name="Name">
         <item type="string" name="foo" />
         <item type="string" name="foo" />
       </overlayable>)";
   EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <item type="string" name="foo" />
+      </overlayable>
+      <overlayable name="Name">
+        <item type="string" name="foo" />
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <item type="string" name="foo" />
+      </overlayable>
+      <overlayable name="Other">
+        <item type="string" name="foo" />
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name" actor="overlay://my.actor.one">
+        <item type="string" name="foo" />
+      </overlayable>
+      <overlayable name="Other" actor="overlay://my.actor.two">
+        <item type="string" name="foo" />
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="foo" />
+          <item type="string" name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="foo" />
+        </policy>
+        <item type="string" name="foo" />
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="foo" />
+        </policy>
+        <policy type="vendor">
+          <item type="string" name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+
+  input = R"(
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="foo" />
+        </policy>
+      </overlayable>
+
+      <overlayable name="Name">
+        <policy type="product">
+          <item type="string" name="foo" />
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, NestPolicyInOverlayableError) {
+  std::string input = R"(
+      <overlayable name="Name">
+        <policy type="vendor|product">
+          <policy type="public">
+            <item type="string" name="foo" />
+          </policy>
+        </policy>
+      </overlayable>)";
+  EXPECT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseIdItem) {
+  std::string input = R"(
+    <item name="foo" type="id">@id/bar</item>
+    <item name="bar" type="id"/>
+    <item name="baz" type="id"></item>)";
+  ASSERT_TRUE(TestParse(input));
+
+  ASSERT_THAT(test::GetValue<Reference>(&table_, "id/foo"), NotNull());
+  ASSERT_THAT(test::GetValue<Id>(&table_, "id/bar"), NotNull());
+  ASSERT_THAT(test::GetValue<Id>(&table_, "id/baz"), NotNull());
+
+  input = R"(
+    <id name="foo2">@id/bar</id>
+    <id name="bar2"/>
+    <id name="baz2"></id>)";
+  ASSERT_TRUE(TestParse(input));
+
+  ASSERT_THAT(test::GetValue<Reference>(&table_, "id/foo2"), NotNull());
+  ASSERT_THAT(test::GetValue<Id>(&table_, "id/bar2"), NotNull());
+  ASSERT_THAT(test::GetValue<Id>(&table_, "id/baz2"), NotNull());
+
+  // Reject attribute references
+  input = R"(<item name="foo3" type="id">?attr/bar"</item>)";
+  ASSERT_FALSE(TestParse(input));
+
+  // Reject non-references
+  input = R"(<item name="foo4" type="id">0x7f010001</item>)";
+  ASSERT_FALSE(TestParse(input));
+  input = R"(<item name="foo5" type="id">@drawable/my_image</item>)";
+  ASSERT_FALSE(TestParse(input));
+  input = R"(<item name="foo6" type="id"><string name="biz"></string></item>)";
+  ASSERT_FALSE(TestParse(input));
+
+  // Ids that reference other resource ids cannot be public
+  input = R"(<public name="foo7" type="id">@id/bar7</item>)";
+  ASSERT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseCData) {
+  // Double quotes should still change the state of whitespace processing
+  std::string input = R"(<string name="foo">Hello<![CDATA[ "</string>' ]]>      World</string>)";
+  ASSERT_TRUE(TestParse(input));
+  auto output = test::GetValue<String>(&table_, "string/foo");
+  ASSERT_THAT(output, NotNull());
+  EXPECT_THAT(*output, StrValueEq(std::string("Hello </string>'       World").data()));
+
+  input = R"(<string name="foo2"><![CDATA[Hello
+                                          World]]></string>)";
+  ASSERT_TRUE(TestParse(input));
+  output = test::GetValue<String>(&table_, "string/foo2");
+  ASSERT_THAT(output, NotNull());
+  EXPECT_THAT(*output, StrValueEq(std::string("Hello World").data()));
+
+  // Cdata blocks should have their whitespace trimmed
+  input = R"(<string name="foo3">     <![CDATA[ text ]]>     </string>)";
+  ASSERT_TRUE(TestParse(input));
+  output = test::GetValue<String>(&table_, "string/foo3");
+  ASSERT_THAT(output, NotNull());
+  EXPECT_THAT(*output, StrValueEq(std::string("text").data()));
+
+  input = R"(<string name="foo4">     <![CDATA[]]>     </string>)";
+  ASSERT_TRUE(TestParse(input));
+  output = test::GetValue<String>(&table_, "string/foo4");
+  ASSERT_THAT(output, NotNull());
+  EXPECT_THAT(*output, StrValueEq(std::string("").data()));
+
+  input = R"(<string name="foo5">     <![CDATA[    ]]>     </string>)";
+  ASSERT_TRUE(TestParse(input));
+  output = test::GetValue<String>(&table_, "string/foo5");
+  ASSERT_THAT(output, NotNull());
+  EXPECT_THAT(*output, StrValueEq(std::string("").data()));
+
+  // Single quotes must still be escaped
+  input = R"(<string name="foo6"><![CDATA[some text and ' apostrophe]]></string>)";
+  ASSERT_FALSE(TestParse(input));
 }
 
 }  // namespace aapt

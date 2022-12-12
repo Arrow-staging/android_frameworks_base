@@ -18,17 +18,22 @@ package com.android.server.pm;
 import android.annotation.NonNull;
 import android.annotation.UserIdInt;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManagerInternal;
 import android.content.pm.ShortcutInfo;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.LocalServices;
 import com.android.server.backup.BackupUtils;
 
 import libcore.util.HexEncoding;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -48,6 +53,7 @@ class ShortcutPackageInfo {
     private static final String ATTR_LAST_UPDATE_TIME = "last_udpate_time";
     private static final String ATTR_BACKUP_SOURCE_VERSION = "bk_src_version";
     private static final String ATTR_BACKUP_ALLOWED = "allow-backup";
+    private static final String ATTR_BACKUP_ALLOWED_INITIALIZED = "allow-backup-initialized";
     private static final String ATTR_BACKUP_SOURCE_BACKUP_ALLOWED = "bk_src_backup-allowed";
     private static final String ATTR_SHADOW = "shadow";
 
@@ -136,7 +142,8 @@ class ShortcutPackageInfo {
 
     //@DisabledReason
     public int canRestoreTo(ShortcutService s, PackageInfo currentPackage, boolean anyVersionOkay) {
-        if (!BackupUtils.signaturesMatch(mSigHashes, currentPackage)) {
+        PackageManagerInternal pmi = LocalServices.getService(PackageManagerInternal.class);
+        if (!BackupUtils.signaturesMatch(mSigHashes, currentPackage, pmi)) {
             Slog.w(TAG, "Can't restore: Package signature mismatch");
             return ShortcutInfo.DISABLED_REASON_SIGNATURE_MISMATCH;
         }
@@ -158,13 +165,16 @@ class ShortcutPackageInfo {
     public static ShortcutPackageInfo generateForInstalledPackageForTest(
             ShortcutService s, String packageName, @UserIdInt int packageUserId) {
         final PackageInfo pi = s.getPackageInfoWithSignatures(packageName, packageUserId);
-        if (pi.signatures == null || pi.signatures.length == 0) {
+        // retrieve the newest sigs
+        SigningInfo signingInfo = pi.signingInfo;
+        if (signingInfo == null) {
             Slog.e(TAG, "Can't get signatures: package=" + packageName);
             return null;
         }
+        // TODO (b/73988180) use entire signing history in case of rollbacks
+        Signature[] signatures = signingInfo.getApkContentsSigners();
         final ShortcutPackageInfo ret = new ShortcutPackageInfo(pi.getLongVersionCode(),
-                pi.lastUpdateTime, BackupUtils.hashSignatureArray(pi.signatures),
-                /* shadow=*/ false);
+                pi.lastUpdateTime, BackupUtils.hashSignatureArray(signatures), /* shadow=*/ false);
 
         ret.mBackupSourceBackupAllowed = s.shouldBackupApp(pi);
         ret.mBackupSourceVersionCode = pi.getLongVersionCode();
@@ -184,10 +194,23 @@ class ShortcutPackageInfo {
             Slog.w(TAG, "Package not found: " + pkg.getPackageName());
             return;
         }
-        mSigHashes = BackupUtils.hashSignatureArray(pi.signatures);
+        // retrieve the newest sigs
+        SigningInfo signingInfo = pi.signingInfo;
+        if (signingInfo == null) {
+            Slog.w(TAG, "Not refreshing signature for " + pkg.getPackageName()
+                    + " since it appears to have no signing info.");
+            return;
+        }
+        // TODO (b/73988180) use entire signing history in case of rollbacks
+        Signature[] signatures = signingInfo.getApkContentsSigners();
+        mSigHashes = BackupUtils.hashSignatureArray(signatures);
     }
 
-    public void saveToXml(XmlSerializer out, boolean forBackup) throws IOException {
+    public void saveToXml(ShortcutService s, TypedXmlSerializer out, boolean forBackup)
+            throws IOException {
+        if (forBackup && !mBackupAllowedInitialized) {
+            s.wtf("Backup happened before mBackupAllowed is initialized.");
+        }
 
         out.startTag(null, TAG_ROOT);
 
@@ -195,6 +218,10 @@ class ShortcutPackageInfo {
         ShortcutService.writeAttr(out, ATTR_LAST_UPDATE_TIME, mLastUpdateTime);
         ShortcutService.writeAttr(out, ATTR_SHADOW, mIsShadow);
         ShortcutService.writeAttr(out, ATTR_BACKUP_ALLOWED, mBackupAllowed);
+
+        // We don't need to save this field (we don't even read it back), but it'll show up
+        // in the dumpsys in the backup / restore payload.
+        ShortcutService.writeAttr(out, ATTR_BACKUP_ALLOWED_INITIALIZED, mBackupAllowedInitialized);
 
         ShortcutService.writeAttr(out, ATTR_BACKUP_SOURCE_VERSION, mBackupSourceVersionCode);
         ShortcutService.writeAttr(out,
@@ -210,9 +237,8 @@ class ShortcutPackageInfo {
         out.endTag(null, TAG_ROOT);
     }
 
-    public void loadFromXml(XmlPullParser parser, boolean fromBackup)
+    public void loadFromXml(TypedXmlPullParser parser, boolean fromBackup)
             throws IOException, XmlPullParserException {
-
         // Don't use the version code from the backup file.
         final long versionCode = ShortcutService.parseLongAttribute(parser, ATTR_VERSION,
                 ShortcutInfo.VERSION_CODE_UNKNOWN);

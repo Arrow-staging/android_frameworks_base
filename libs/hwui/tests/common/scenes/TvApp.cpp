@@ -17,6 +17,7 @@
 #include "SkBlendMode.h"
 #include "TestSceneBase.h"
 #include "tests/common/BitmapAllocationTestUtils.h"
+#include "hwui/Paint.h"
 
 class TvApp;
 class TvAppNoRoundedCorner;
@@ -48,7 +49,7 @@ static bool _TvAppNoRoundedCornerColorFilter(
 
 class TvApp : public TestScene {
 public:
-    TvApp(BitmapAllocationTestUtils::BitmapAllocator allocator)
+    explicit TvApp(BitmapAllocationTestUtils::BitmapAllocator allocator)
             : TestScene(), mAllocator(allocator) {}
 
     sp<RenderNode> mBg;
@@ -66,7 +67,7 @@ public:
         mBg = createBitmapNode(canvas, 0xFF9C27B0, 0, 0, width, height);
         canvas.drawRenderNode(mBg.get());
 
-        canvas.insertReorderBarrier(true);
+        canvas.enableZ(true);
         mSingleBitmap = mAllocator(dp(160), dp(120), kRGBA_8888_SkColorType,
                                    [](SkBitmap& skBitmap) { skBitmap.eraseColor(0xFF0000FF); });
 
@@ -79,7 +80,7 @@ public:
                 mCards.push_back(card);
             }
         }
-        canvas.insertReorderBarrier(false);
+        canvas.enableZ(false);
     }
 
     void doFrame(int frameNr) override {
@@ -116,13 +117,13 @@ private:
                                      [text, text2](RenderProperties& props, Canvas& canvas) {
                                          canvas.drawColor(0xFFFFEEEE, SkBlendMode::kSrcOver);
 
-                                         SkPaint paint;
+                                         Paint paint;
                                          paint.setAntiAlias(true);
-                                         paint.setTextSize(24);
+                                         paint.getSkFont().setSize(24);
 
                                          paint.setColor(Color::Black);
                                          TestUtils::drawUtf8ToCanvas(&canvas, text, paint, 10, 30);
-                                         paint.setTextSize(20);
+                                         paint.getSkFont().setSize(20);
                                          TestUtils::drawUtf8ToCanvas(&canvas, text2, paint, 10, 54);
 
                                      });
@@ -194,7 +195,8 @@ private:
 
         // re-recording card's canvas, not necessary but to add some burden to CPU
         std::unique_ptr<Canvas> cardcanvas(Canvas::create_recording_canvas(
-                card->stagingProperties().getWidth(), card->stagingProperties().getHeight()));
+                card->stagingProperties().getWidth(), card->stagingProperties().getHeight(),
+                card.get()));
         sp<RenderNode> image = mImages[ci];
         sp<RenderNode> infoArea = mInfoAreas[ci];
         cardcanvas->drawRenderNode(infoArea.get());
@@ -205,31 +207,33 @@ private:
             sp<RenderNode> overlay = mOverlays[ci];
             std::unique_ptr<Canvas> canvas(
                     Canvas::create_recording_canvas(overlay->stagingProperties().getWidth(),
-                                                    overlay->stagingProperties().getHeight()));
+                                                    overlay->stagingProperties().getHeight(),
+                                                    overlay.get()));
             canvas->drawColor((curFrame % 150) << 24, SkBlendMode::kSrcOver);
-            overlay->setStagingDisplayList(canvas->finishRecording());
+            canvas->finishRecording(overlay.get());
             cardcanvas->drawRenderNode(overlay.get());
         } else {
             // re-recording image node's canvas, animating ColorFilter
             std::unique_ptr<Canvas> canvas(Canvas::create_recording_canvas(
-                    image->stagingProperties().getWidth(), image->stagingProperties().getHeight()));
-            SkPaint paint;
+                    image->stagingProperties().getWidth(), image->stagingProperties().getHeight(),
+                    image.get()));
+            Paint paint;
             sk_sp<SkColorFilter> filter(
-                    SkColorFilter::MakeModeFilter((curFrame % 150) << 24, SkBlendMode::kSrcATop));
+                    SkColorFilters::Blend((curFrame % 150) << 24, SkBlendMode::kSrcATop));
             paint.setColorFilter(filter);
             sk_sp<Bitmap> bitmap = mCachedBitmaps[ci];
             canvas->drawBitmap(*bitmap, 0, 0, &paint);
-            image->setStagingDisplayList(canvas->finishRecording());
+            canvas->finishRecording(image.get());
             cardcanvas->drawRenderNode(image.get());
         }
 
-        card->setStagingDisplayList(cardcanvas->finishRecording());
+        cardcanvas->finishRecording(card.get());
     }
 };
 
 class TvAppNoRoundedCorner : public TvApp {
 public:
-    TvAppNoRoundedCorner(BitmapAllocationTestUtils::BitmapAllocator allocator) : TvApp(allocator) {}
+    explicit TvAppNoRoundedCorner(BitmapAllocationTestUtils::BitmapAllocator allocator) : TvApp(allocator) {}
 
 private:
     virtual float roundedCornerRadius() override { return dp(0); }
@@ -237,7 +241,7 @@ private:
 
 class TvAppColorFilter : public TvApp {
 public:
-    TvAppColorFilter(BitmapAllocationTestUtils::BitmapAllocator allocator) : TvApp(allocator) {}
+    explicit TvAppColorFilter(BitmapAllocationTestUtils::BitmapAllocator allocator) : TvApp(allocator) {}
 
 private:
     virtual bool useOverlay() override { return false; }
@@ -245,7 +249,7 @@ private:
 
 class TvAppNoRoundedCornerColorFilter : public TvApp {
 public:
-    TvAppNoRoundedCornerColorFilter(BitmapAllocationTestUtils::BitmapAllocator allocator)
+    explicit TvAppNoRoundedCornerColorFilter(BitmapAllocationTestUtils::BitmapAllocator allocator)
             : TvApp(allocator) {}
 
 private:

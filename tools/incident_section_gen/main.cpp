@@ -14,13 +14,16 @@
  * limitations under the License.
  */
 
-
 #include <frameworks/base/core/proto/android/os/incident.pb.h>
 
 #include <map>
 #include <set>
-#include <string>
 #include <sstream>
+#include <string>
+
+#ifndef FALLTHROUGH_INTENDED
+#define FALLTHROUGH_INTENDED [[fallthrough]]
+#endif
 
 using namespace android;
 using namespace android::os;
@@ -111,9 +114,7 @@ static bool generateIncidentSectionsCpp(Descriptor const* descriptor)
     N = descriptor->field_count();
     for (int i=0; i<N; i++) {
         const FieldDescriptor* field = descriptor->field(i);
-        if (field->type() == FieldDescriptor::TYPE_MESSAGE) {
-            sections[field->name()] = field;
-        }
+        sections[field->name()] = field;
     }
 
     printf("IncidentSection const INCIDENT_SECTIONS[] = {\n");
@@ -141,7 +142,7 @@ static void splitAndPrint(const string& args) {
     size_t base = 0;
     size_t found;
     while (true) {
-        found = args.find_first_of(" ", base);
+        found = args.find_first_of(' ', base);
         if (found != base) {
             string arg = args.substr(base, found - base);
             printf(" \"%s\",", arg.c_str());
@@ -203,6 +204,18 @@ static inline Destination getFieldDest(const FieldDescriptor* field) {
             getMessageDest(field->message_type(), fieldDest);
 }
 
+// Converts Destination to a string.
+static inline string getDestString(const Destination dest) {
+    switch (dest) {
+        case DEST_AUTOMATIC: return "AUTOMATIC";
+        case DEST_LOCAL: return "LOCAL";
+        case DEST_EXPLICIT: return "EXPLICIT";
+        // UNSET is considered EXPLICIT by default.
+        case DEST_UNSET: return "EXPLICIT";
+        default: return "UNKNOWN";
+    }
+}
+
 // Get Names ===========================================================================================
 static inline string getFieldName(const FieldDescriptor* field) {
     // replace . with double underscores to avoid name conflicts since fields use snake naming convention
@@ -218,7 +231,7 @@ static inline string getMessageName(const Descriptor* descriptor, const Destinat
 
 // IsDefault ============================================================================================
 // Returns true if a field is default. Default is defined as this field has same dest as its containing message.
-// For message fields, it only looks at its field tag and own default mesaage tag, doesn't recursively go deeper.
+// For message fields, it only looks at its field tag and own default message tag, doesn't recursively go deeper.
 static inline bool isDefaultField(const FieldDescriptor* field, const Destination containerDest) {
     Destination fieldDest = getFieldDest(field);
     if (field->type() != FieldDescriptor::TYPE_MESSAGE) {
@@ -249,8 +262,9 @@ static bool isDefaultMessageImpl(const Descriptor* descriptor, const Destination
                 return false;
             case FieldDescriptor::TYPE_STRING:
                 if (getPrivacyFlags(field).patterns_size() != 0) return false;
+                break;
             default:
-                continue;
+                break;
         }
     }
     parents->erase(descriptor->full_name());
@@ -346,6 +360,7 @@ static bool generatePrivacyFlags(const Descriptor* descriptor, const Destination
                     printPrivacy(fieldName, field, "NULL", fieldDest, fieldName + "_patterns");
                     break;
                 }
+                FALLTHROUGH_INTENDED;
                 // else treat string field as primitive field and goes to default
             default:
                 if (!hasDefaultFlags[i]) printPrivacy(fieldName, field, "NULL", fieldDest, "NULL");
@@ -353,10 +368,13 @@ static bool generatePrivacyFlags(const Descriptor* descriptor, const Destination
         // Don't generate a variable twice
         if (!hasDefaultFlags[i]) variableNames[fieldName] = false;
     }
+    // hasDefaultFlags[i] has been initialized in the above for-loop,
+    // but clang-tidy analyzer still report uninitized values.
+    // So we use NOLINT to suppress those false positives.
 
     bool allDefaults = true;
     for (size_t i=0; i<fieldsInOrder.size(); i++) {
-        allDefaults &= hasDefaultFlags[i];
+        allDefaults &= hasDefaultFlags[i];  // NOLINT(clang-analyzer-core.uninitialized.Assign)
     }
 
     parents->erase(messageName); // erase the message type name when exit the message.
@@ -369,7 +387,7 @@ static bool generatePrivacyFlags(const Descriptor* descriptor, const Destination
     printf("Privacy* %s[] = {\n", messageName.c_str());
     for (size_t i=0; i<fieldsInOrder.size(); i++) {
         const FieldDescriptor* field = fieldsInOrder[i];
-        if (hasDefaultFlags[i]) continue;
+        if (hasDefaultFlags[i]) continue; // NOLINT(clang-analyzer-core.uninitialized.Branch)
         printf("    &%s,\n", getFieldName(field).c_str());
         policyCount++;
     }
@@ -381,6 +399,11 @@ static bool generatePrivacyFlags(const Descriptor* descriptor, const Destination
 static bool generateSectionListCpp(Descriptor const* descriptor) {
     generateHead("section_list");
 
+    // generate namespaces
+    printf("namespace android {\n");
+    printf("namespace os {\n");
+    printf("namespace incidentd {\n");
+
     // generates SECTION_LIST
     printf("// Generate SECTION_LIST.\n\n");
 
@@ -388,10 +411,17 @@ static bool generateSectionListCpp(Descriptor const* descriptor) {
     for (int i=0; i<descriptor->field_count(); i++) {
         const FieldDescriptor* field = descriptor->field(i);
 
-        if (field->type() != FieldDescriptor::TYPE_MESSAGE) {
-            continue;
+        if (field->type() != FieldDescriptor::TYPE_MESSAGE &&
+            field->type() != FieldDescriptor::TYPE_STRING &&
+            field->type() != FieldDescriptor::TYPE_BYTES) {
+          continue;
         }
+
         const SectionFlags s = getSectionFlags(field);
+        if (s.userdebug_and_eng_only() || s.type() == SECTION_TEXT_DUMPSYS) {
+            printf("#if ALLOW_RESTRICTED_SECTIONS\n");
+        }
+
         switch (s.type()) {
             case SECTION_NONE:
                 continue;
@@ -404,13 +434,32 @@ static bool generateSectionListCpp(Descriptor const* descriptor) {
                 printf(" NULL),\n");
                 break;
             case SECTION_DUMPSYS:
-                printf("    new DumpsysSection(%d,", field->number());
+                printf("    new DumpsysSection(%d, ", field->number());
                 splitAndPrint(s.args());
                 printf(" NULL),\n");
                 break;
             case SECTION_LOG:
-                printf("    new LogSection(%d, %s),\n", field->number(), s.args().c_str());
+                printf("    new LogSection(%d, ", field->number());
+                splitAndPrint(s.args());
+                printf(" NULL),\n");
                 break;
+            case SECTION_GZIP:
+                printf("    new GZipSection(%d,", field->number());
+                splitAndPrint(s.args());
+                printf(" NULL),\n");
+                break;
+            case SECTION_TOMBSTONE:
+                printf("    new TombstoneSection(%d, \"%s\"),\n", field->number(),
+                        s.args().c_str());
+                break;
+            case SECTION_TEXT_DUMPSYS:
+                printf("    new TextDumpsysSection(%d, ", field->number());
+                splitAndPrint(s.args());
+                printf(" NULL),\n");
+                break;
+        }
+        if (s.userdebug_and_eng_only() || s.type() == SECTION_TEXT_DUMPSYS) {
+            printf("#endif\n");
         }
     }
     printf("    NULL };\n");
@@ -424,24 +473,27 @@ static bool generateSectionListCpp(Descriptor const* descriptor) {
     map<string, bool> variableNames;
     set<string> parents;
     vector<const FieldDescriptor*> fieldsInOrder = sortFields(descriptor);
-    bool skip[fieldsInOrder.size()];
+    vector<bool> skip(fieldsInOrder.size());
     const Destination incidentDest = getPrivacyFlags(descriptor).dest();
 
     for (size_t i=0; i<fieldsInOrder.size(); i++) {
         const FieldDescriptor* field = fieldsInOrder[i];
         const string fieldName = getFieldName(field);
         const Destination fieldDest = getFieldDest(field);
-        const string fieldMessageName = getMessageName(field->message_type(), fieldDest);
-
-        skip[i] = true;
-
+        printf("\n// Incident Report Section: %s (%d)\n", field->name().c_str(), field->number());
         if (field->type() != FieldDescriptor::TYPE_MESSAGE) {
+            printPrivacy(fieldName, field, "NULL", fieldDest, "NULL");
             continue;
         }
+
+        skip[i] = true;
+        const string fieldMessageName = getMessageName(field->message_type(), fieldDest);
         // generate privacy flags for each section.
-        if (generatePrivacyFlags(field->message_type(), fieldDest, variableNames, &parents)) {
+        if (generatePrivacyFlags(field->message_type(), incidentDest, variableNames, &parents)) {
             printPrivacy(fieldName, field, fieldMessageName, fieldDest, "NULL");
-        } else if (isDefaultField(field, incidentDest)) {
+        } else if (fieldDest == incidentDest) {
+            printf("// default %s: fieldDest=%d incidentDest=%d\n", fieldName.c_str(),
+                    getFieldDest(field), incidentDest);
             continue; // don't create a new privacy if the value is default.
         } else {
             printPrivacy(fieldName, field, "NULL", fieldDest, "NULL");
@@ -482,6 +534,10 @@ static bool generateSectionListCpp(Descriptor const* descriptor) {
         printf("const Privacy** PRIVACY_POLICY_LIST = createList();\n\n");
         printf("const int PRIVACY_POLICY_COUNT = %d;\n", policyCount);
     }
+
+    printf("}  // incidentd\n");
+    printf("}  // os\n");
+    printf("}  // android\n");
     return true;
 }
 
@@ -498,11 +554,12 @@ static string replace_string(const string& str, const char replace, const char w
     return result;
 }
 
-static void generateCsv(Descriptor const* descriptor, const string& indent, set<string>* parents) {
+static void generateCsv(Descriptor const* descriptor, const string& indent, set<string>* parents, const Destination containerDest = DEST_UNSET) {
     DebugStringOptions options;
     options.include_comments = true;
     for (int i=0; i<descriptor->field_count(); i++) {
         const FieldDescriptor* field = descriptor->field(i);
+        const Destination fieldDest = getFieldDest(field);
         stringstream text;
         if (field->type() == FieldDescriptor::TYPE_MESSAGE) {
             text << field->message_type()->name();
@@ -510,11 +567,18 @@ static void generateCsv(Descriptor const* descriptor, const string& indent, set<
             text << field->type_name();
         }
         text << " " << field->name();
+        text << " (PRIVACY=";
+        if (isDefaultField(field, containerDest)) {
+            text << getDestString(containerDest);
+        } else {
+            text << getDestString(fieldDest);
+        }
+        text << ")";
         printf("%s%s,\n", indent.c_str(), replace_string(text.str(), '\n', ' ').c_str());
         if (field->type() == FieldDescriptor::TYPE_MESSAGE &&
             parents->find(field->message_type()->full_name()) == parents->end()) {
             parents->insert(field->message_type()->full_name());
-            generateCsv(field->message_type(), indent + ",", parents);
+            generateCsv(field->message_type(), indent + ",", parents, fieldDest);
             parents->erase(field->message_type()->full_name());
         }
     }
@@ -543,7 +607,7 @@ int main(int argc, char const *argv[])
                 || field->number() == sectionId) {
                 set<string> parents;
                 printf("%s\n", field->name().c_str());
-                generateCsv(field->message_type(), "", &parents);
+                generateCsv(field->message_type(), "", &parents, getFieldDest(field));
                 break;
             }
         }

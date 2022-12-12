@@ -15,28 +15,33 @@
  */
 package com.android.server.autofill.ui;
 
+import static com.android.server.autofill.Helper.paramsToString;
 import static com.android.server.autofill.Helper.sDebug;
+import static com.android.server.autofill.Helper.sFullScreenMode;
 import static com.android.server.autofill.Helper.sVerbose;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.app.PendingIntent;
 import android.content.Context;
-import android.content.Intent;
 import android.content.IntentSender;
+import android.content.pm.PackageManager;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.service.autofill.Dataset;
 import android.service.autofill.Dataset.DatasetFieldFilter;
 import android.service.autofill.FillResponse;
 import android.text.TextUtils;
+import android.util.PluralsMessageFormatter;
 import android.util.Slog;
 import android.util.TypedValue;
+import android.view.ContextThemeWrapper;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.View.MeasureSpec;
 import android.view.ViewGroup;
+import android.view.ViewGroup.LayoutParams;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityManager;
 import android.view.autofill.AutofillId;
@@ -45,26 +50,34 @@ import android.view.autofill.IAutofillWindowPresenter;
 import android.widget.BaseAdapter;
 import android.widget.Filter;
 import android.widget.Filterable;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.RemoteViews;
+import android.widget.TextView;
 
 import com.android.internal.R;
 import com.android.server.UiThread;
+import com.android.server.autofill.AutofillManagerService;
 import com.android.server.autofill.Helper;
-
-import libcore.util.Objects;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 final class FillUi {
     private static final String TAG = "FillUi";
 
-    private static final int VISIBLE_OPTIONS_MAX_COUNT = 3;
+    private static final int THEME_ID_LIGHT =
+            com.android.internal.R.style.Theme_DeviceDefault_Light_Autofill;
+    private static final int THEME_ID_DARK =
+            com.android.internal.R.style.Theme_DeviceDefault_Autofill;
 
     private static final TypedValue sTempTypedValue = new TypedValue();
 
@@ -77,6 +90,8 @@ final class FillUi {
                 IAutofillWindowPresenter windowPresenter);
         void requestHideFillUi();
         void startIntentSender(IntentSender intentSender);
+        void dispatchUnhandledKey(KeyEvent keyEvent);
+        void cancelSession();
     }
 
     private final @NonNull Point mTempPoint = new Point();
@@ -90,7 +105,9 @@ final class FillUi {
 
     private final @NonNull Callback mCallback;
 
+    private final @Nullable View mHeader;
     private final @NonNull ListView mListView;
+    private final @Nullable View mFooter;
 
     private final @Nullable ItemsAdapter mAdapter;
 
@@ -98,97 +115,189 @@ final class FillUi {
 
     private @Nullable AnnounceFilterResult mAnnounceFilterResult;
 
+    private final boolean mFullScreen;
+    private final int mVisibleDatasetsMaxCount;
     private int mContentWidth;
     private int mContentHeight;
 
     private boolean mDestroyed;
 
+    private final int mThemeId;
+
+    public static boolean isFullScreen(Context context) {
+        if (sFullScreenMode != null) {
+            if (sVerbose) Slog.v(TAG, "forcing full-screen mode to " + sFullScreenMode);
+            return sFullScreenMode;
+        }
+        return context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+    }
+
     FillUi(@NonNull Context context, @NonNull FillResponse response,
-            @NonNull AutofillId focusedViewId, @NonNull @Nullable String filterText,
-            @NonNull OverlayControl overlayControl, @NonNull Callback callback) {
-        mContext = context;
+            @NonNull AutofillId focusedViewId, @Nullable String filterText,
+            @NonNull OverlayControl overlayControl, @NonNull CharSequence serviceLabel,
+            @NonNull Drawable serviceIcon, boolean nightMode, @NonNull Callback callback) {
+        if (sVerbose) Slog.v(TAG, "nightMode: " + nightMode);
+        mThemeId = nightMode ? THEME_ID_DARK : THEME_ID_LIGHT;
         mCallback = callback;
+        mFullScreen = isFullScreen(context);
+        mContext = new ContextThemeWrapper(context, mThemeId);
 
-        final LayoutInflater inflater = LayoutInflater.from(context);
+        final LayoutInflater inflater = LayoutInflater.from(mContext);
 
-        final ViewGroup decor = (ViewGroup) inflater.inflate(
-                R.layout.autofill_dataset_picker, null);
+        final RemoteViews headerPresentation = response.getHeader();
+        final RemoteViews footerPresentation = response.getFooter();
+        final ViewGroup decor;
+        if (mFullScreen) {
+            decor = (ViewGroup) inflater.inflate(R.layout.autofill_dataset_picker_fullscreen, null);
+        } else if (headerPresentation != null || footerPresentation != null) {
+            decor = (ViewGroup) inflater.inflate(R.layout.autofill_dataset_picker_header_footer,
+                    null);
+        } else {
+            decor = (ViewGroup) inflater.inflate(R.layout.autofill_dataset_picker, null);
+        }
+        decor.setClipToOutline(true);
+        final TextView titleView = decor.findViewById(R.id.autofill_dataset_title);
+        if (titleView != null) {
+            titleView.setText(mContext.getString(R.string.autofill_window_title, serviceLabel));
+        }
+        final ImageView iconView = decor.findViewById(R.id.autofill_dataset_icon);
+        if (iconView != null) {
+            iconView.setImageDrawable(serviceIcon);
+        }
 
-
-        final RemoteViews.OnClickHandler interceptionHandler = new RemoteViews.OnClickHandler() {
-            @Override
-            public boolean onClickHandler(View view, PendingIntent pendingIntent,
-                    Intent fillInIntent) {
-                if (pendingIntent != null) {
-                    mCallback.startIntentSender(pendingIntent.getIntentSender());
-                }
-                return true;
+        // In full screen we only initialize size once assuming screen size never changes
+        if (mFullScreen) {
+            final Point outPoint = mTempPoint;
+            mContext.getDisplayNoVerify().getSize(outPoint);
+            // full with of screen and half height of screen
+            mContentWidth = LayoutParams.MATCH_PARENT;
+            mContentHeight = outPoint.y / 2;
+            if (sVerbose) {
+                Slog.v(TAG, "initialized fillscreen LayoutParams "
+                        + mContentWidth + "," + mContentHeight);
             }
+        }
+
+        // Send unhandled keyevent to app window.
+        decor.addOnUnhandledKeyEventListener((View view, KeyEvent event) -> {
+            switch (event.getKeyCode() ) {
+                case KeyEvent.KEYCODE_BACK:
+                case KeyEvent.KEYCODE_ESCAPE:
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                case KeyEvent.KEYCODE_DPAD_UP:
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    return false;
+                default:
+                    mCallback.dispatchUnhandledKey(event);
+                    return true;
+            }
+        });
+
+        if (AutofillManagerService.getVisibleDatasetsMaxCount() > 0) {
+            mVisibleDatasetsMaxCount = AutofillManagerService.getVisibleDatasetsMaxCount();
+            if (sVerbose) {
+                Slog.v(TAG, "overriding maximum visible datasets to " + mVisibleDatasetsMaxCount);
+            }
+        } else {
+            mVisibleDatasetsMaxCount = mContext.getResources()
+                    .getInteger(com.android.internal.R.integer.autofill_max_visible_datasets);
+        }
+
+        final RemoteViews.InteractionHandler interceptionHandler = (view, pendingIntent, r) -> {
+            if (pendingIntent != null) {
+                mCallback.startIntentSender(pendingIntent.getIntentSender());
+            }
+            return true;
         };
 
         if (response.getAuthentication() != null) {
+            mHeader = null;
             mListView = null;
+            mFooter = null;
             mAdapter = null;
 
+            // insert authentication item under autofill_dataset_picker
+            ViewGroup container = decor.findViewById(R.id.autofill_dataset_picker);
             final View content;
             try {
-                content = response.getPresentation().apply(context, decor, interceptionHandler);
-                decor.addView(content);
+                content = response.getPresentation().applyWithTheme(
+                        mContext, decor, interceptionHandler, mThemeId);
+                container.addView(content);
             } catch (RuntimeException e) {
                 callback.onCanceled();
                 Slog.e(TAG, "Error inflating remote views", e);
                 mWindow = null;
                 return;
             }
+            container.setFocusable(true);
+            container.setOnClickListener(v -> mCallback.onResponsePicked(response));
 
-            Point maxSize = mTempPoint;
-            resolveMaxWindowSize(context, maxSize);
-            final int widthMeasureSpec = MeasureSpec.makeMeasureSpec(maxSize.x,
-                    MeasureSpec.AT_MOST);
-            final int heightMeasureSpec = MeasureSpec.makeMeasureSpec(maxSize.y,
-                    MeasureSpec.AT_MOST);
+            if (!mFullScreen) {
+                final Point maxSize = mTempPoint;
+                resolveMaxWindowSize(mContext, maxSize);
+                // fullScreen mode occupy the full width defined by autofill_dataset_picker_max_width
+                content.getLayoutParams().width = mFullScreen ? maxSize.x
+                        : ViewGroup.LayoutParams.WRAP_CONTENT;
+                content.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                final int widthMeasureSpec = MeasureSpec.makeMeasureSpec(maxSize.x,
+                        MeasureSpec.AT_MOST);
+                final int heightMeasureSpec = MeasureSpec.makeMeasureSpec(maxSize.y,
+                        MeasureSpec.AT_MOST);
 
-            decor.measure(widthMeasureSpec, heightMeasureSpec);
-            decor.setOnClickListener(v -> mCallback.onResponsePicked(response));
-            mContentWidth = content.getMeasuredWidth();
-            mContentHeight = content.getMeasuredHeight();
+                decor.measure(widthMeasureSpec, heightMeasureSpec);
+                mContentWidth = content.getMeasuredWidth();
+                mContentHeight = content.getMeasuredHeight();
+            }
 
             mWindow = new AnchoredWindow(decor, overlayControl);
-            mCallback.requestShowFillUi(mContentWidth, mContentHeight, mWindowPresenter);
+            requestShowFillUi();
         } else {
             final int datasetCount = response.getDatasets().size();
-
-            // Total items include the (optional) header and footer - we cannot use listview's
-            // addHeader() and addFooter() because it would complicate the scrolling logic.
-            int totalItems = datasetCount;
-
-            RemoteViews.OnClickHandler clickBlocker = null;
-            final RemoteViews headerPresentation = response.getHeader();
-            View header = null;
-            if (headerPresentation != null) {
-                clickBlocker = newClickBlocker();
-                header = headerPresentation.apply(context, null, clickBlocker);
-                totalItems++;
-            }
-
-            final RemoteViews footerPresentation = response.getFooter();
-            View footer = null;
-            if (footerPresentation != null) {
-                if (clickBlocker == null) { // already set for header
-                    clickBlocker = newClickBlocker();
-                }
-                footer = footerPresentation.apply(context, null, clickBlocker);
-                totalItems++;
-            }
             if (sVerbose) {
-                Slog.v(TAG, "Number datasets: " + datasetCount + " Total items: " + totalItems);
+                Slog.v(TAG, "Number datasets: " + datasetCount + " max visible: "
+                        + mVisibleDatasetsMaxCount);
             }
 
-            final ArrayList<ViewItem> items = new ArrayList<>(totalItems);
-            if (header != null) {
+            RemoteViews.InteractionHandler interactionBlocker = null;
+            if (headerPresentation != null) {
+                interactionBlocker = newInteractionBlocker();
+                mHeader = headerPresentation.applyWithTheme(
+                        mContext, null, interactionBlocker, mThemeId);
+                final LinearLayout headerContainer =
+                        decor.findViewById(R.id.autofill_dataset_header);
+                applyCancelAction(mHeader, response.getCancelIds());
                 if (sVerbose) Slog.v(TAG, "adding header");
-                items.add(new ViewItem(null, null, false, null, header));
+                headerContainer.addView(mHeader);
+                headerContainer.setVisibility(View.VISIBLE);
+            } else {
+                mHeader = null;
             }
+
+            if (footerPresentation != null) {
+                final LinearLayout footerContainer =
+                        decor.findViewById(R.id.autofill_dataset_footer);
+                if (footerContainer != null) {
+                    if (interactionBlocker == null) { // already set for header
+                        interactionBlocker = newInteractionBlocker();
+                    }
+                    mFooter = footerPresentation.applyWithTheme(
+                            mContext, null, interactionBlocker, mThemeId);
+                    applyCancelAction(mFooter, response.getCancelIds());
+                    // Footer not supported on some platform e.g. TV
+                    if (sVerbose) Slog.v(TAG, "adding footer");
+                    footerContainer.addView(mFooter);
+                    footerContainer.setVisibility(View.VISIBLE);
+                } else {
+                    mFooter = null;
+                }
+            } else {
+                mFooter = null;
+            }
+
+            final ArrayList<ViewItem> items = new ArrayList<>(datasetCount);
             for (int i = 0; i < datasetCount; i++) {
                 final Dataset dataset = response.getDatasets().get(i);
                 final int index = dataset.getFieldIds().indexOf(focusedViewId);
@@ -202,11 +311,14 @@ final class FillUi {
                     final View view;
                     try {
                         if (sVerbose) Slog.v(TAG, "setting remote view for " + focusedViewId);
-                        view = presentation.apply(context, null, interceptionHandler);
+                        view = presentation.applyWithTheme(
+                                mContext, null, interceptionHandler, mThemeId);
                     } catch (RuntimeException e) {
                         Slog.e(TAG, "Error inflating remote views", e);
                         continue;
                     }
+                    // TODO: Extract the shared filtering logic here and in FillUi to a common
+                    //  method.
                     final DatasetFieldFilter filter = dataset.getFilter(index);
                     Pattern filterPattern = null;
                     String valueText = null;
@@ -227,12 +339,9 @@ final class FillUi {
                         }
                     }
 
+                    applyCancelAction(view, response.getCancelIds());
                     items.add(new ViewItem(dataset, filterPattern, filterable, valueText, view));
                 }
-            }
-            if (footer != null) {
-                if (sVerbose) Slog.v(TAG, "adding footer");
-                items.add(new ViewItem(null, null, false, null, footer));
             }
 
             mAdapter = new ItemsAdapter(items);
@@ -242,11 +351,6 @@ final class FillUi {
             mListView.setVisibility(View.VISIBLE);
             mListView.setOnItemClickListener((adapter, view, position, id) -> {
                 final ViewItem vi = mAdapter.getItem(position);
-                if (vi.dataset == null) {
-                    // Clicked on header or footer; ignore.
-                    if (sDebug) Slog.d(TAG, "Ignoring click on item " + position + ": " + view);
-                    return;
-                }
                 mCallback.onDatasetPicked(vi.dataset);
             });
 
@@ -261,17 +365,48 @@ final class FillUi {
         }
     }
 
-    /**
-     * Creates a remoteview interceptor used to block clicks.
-     */
-    private RemoteViews.OnClickHandler newClickBlocker() {
-        return new RemoteViews.OnClickHandler() {
-            @Override
-            public boolean onClickHandler(View view, PendingIntent pendingIntent,
-                    Intent fillInIntent) {
-                if (sVerbose) Slog.v(TAG, "Ignoring click on " + view);
-                return true;
+    private void applyCancelAction(View rootView, int[] ids) {
+        if (ids == null) {
+            return;
+        }
+
+        if (sDebug) Slog.d(TAG, "fill UI has " + ids.length + " actions");
+        if (!(rootView instanceof ViewGroup)) {
+            Slog.w(TAG, "cannot apply actions because fill UI root is not a "
+                    + "ViewGroup: " + rootView);
+            return;
+        }
+
+        // Apply click actions.
+        final ViewGroup root = (ViewGroup) rootView;
+        for (int i = 0; i < ids.length; i++) {
+            final int id = ids[i];
+            final View child = root.findViewById(id);
+            if (child == null) {
+                Slog.w(TAG, "Ignoring cancel action for view " + id
+                        + " because it's not on " + root);
+                continue;
             }
+            child.setOnClickListener((v) -> {
+                if (sVerbose) {
+                    Slog.v(TAG, " Cancelling session after " + v + " clicked");
+                }
+                mCallback.cancelSession();
+            });
+        }
+    }
+
+    void requestShowFillUi() {
+        mCallback.requestShowFillUi(mContentWidth, mContentHeight, mWindowPresenter);
+    }
+
+    /**
+     * Creates a remoteview interceptor used to block clicks or other interactions.
+     */
+    private RemoteViews.InteractionHandler newInteractionBlocker() {
+        return (view, pendingIntent, response) -> {
+            if (sVerbose) Slog.v(TAG, "Ignoring click on " + view);
+            return true;
         };
     }
 
@@ -289,9 +424,9 @@ final class FillUi {
                 mCallback.requestHideFillUi();
             } else {
                 if (updateContentSize()) {
-                    mCallback.requestShowFillUi(mContentWidth, mContentHeight, mWindowPresenter);
+                    requestShowFillUi();
                 }
-                if (mAdapter.getCount() > VISIBLE_OPTIONS_MAX_COUNT) {
+                if (mAdapter.getCount() > mVisibleDatasetsMaxCount) {
                     mListView.setVerticalScrollBarEnabled(true);
                     mListView.onVisibilityAggregated(true);
                 } else {
@@ -310,7 +445,7 @@ final class FillUi {
             // ViewState doesn't not support filtering - typically when it's for an authenticated
             // FillResponse.
             if (TextUtils.isEmpty(filterText)) {
-                mCallback.requestShowFillUi(mContentWidth, mContentHeight, mWindowPresenter);
+                requestShowFillUi();
             } else {
                 mCallback.requestHideFillUi();
             }
@@ -323,7 +458,7 @@ final class FillUi {
             filterText = filterText.toLowerCase();
         }
 
-        if (Objects.equal(mFilterText, filterText)) {
+        if (Objects.equals(mFilterText, filterText)) {
             return;
         }
         mFilterText = filterText;
@@ -331,16 +466,25 @@ final class FillUi {
         applyNewFilterText();
     }
 
-    public void destroy() {
+    public void destroy(boolean notifyClient) {
         throwIfDestroyed();
+        if (mWindow != null) {
+            mWindow.hide(false);
+        }
         mCallback.onDestroy();
-        mCallback.requestHideFillUi();
+        if (notifyClient) {
+            mCallback.requestHideFillUi();
+        }
         mDestroyed = true;
     }
 
     private boolean updateContentSize() {
         if (mAdapter == null) {
             return false;
+        }
+        if (mFullScreen) {
+            // always request show fill window with fixed size for fullscreen
+            return true;
         }
         boolean changed = false;
         if (mAdapter.getCount() <= 0) {
@@ -366,24 +510,48 @@ final class FillUi {
         final int heightMeasureSpec = MeasureSpec.makeMeasureSpec(maxSize.y,
                 MeasureSpec.AT_MOST);
         final int itemCount = mAdapter.getCount();
+
+        if (mHeader != null) {
+            mHeader.measure(widthMeasureSpec, heightMeasureSpec);
+            changed |= updateWidth(mHeader, maxSize);
+            changed |= updateHeight(mHeader, maxSize);
+        }
+
         for (int i = 0; i < itemCount; i++) {
             final View view = mAdapter.getItem(i).view;
             view.measure(widthMeasureSpec, heightMeasureSpec);
-            final int clampedMeasuredWidth = Math.min(view.getMeasuredWidth(), maxSize.x);
-            final int newContentWidth = Math.max(mContentWidth, clampedMeasuredWidth);
-            if (newContentWidth != mContentWidth) {
-                mContentWidth = newContentWidth;
-                changed = true;
+            changed |= updateWidth(view, maxSize);
+            if (i < mVisibleDatasetsMaxCount) {
+                changed |= updateHeight(view, maxSize);
             }
-            // Update the width to fit only the first items up to max count
-            if (i < VISIBLE_OPTIONS_MAX_COUNT) {
-                final int clampedMeasuredHeight = Math.min(view.getMeasuredHeight(), maxSize.y);
-                final int newContentHeight = mContentHeight + clampedMeasuredHeight;
-                if (newContentHeight != mContentHeight) {
-                    mContentHeight = newContentHeight;
-                    changed = true;
-                }
-            }
+        }
+
+        if (mFooter != null) {
+            mFooter.measure(widthMeasureSpec, heightMeasureSpec);
+            changed |= updateWidth(mFooter, maxSize);
+            changed |= updateHeight(mFooter, maxSize);
+        }
+        return changed;
+    }
+
+    private boolean updateWidth(View view, Point maxSize) {
+        boolean changed = false;
+        final int clampedMeasuredWidth = Math.min(view.getMeasuredWidth(), maxSize.x);
+        final int newContentWidth = Math.max(mContentWidth, clampedMeasuredWidth);
+        if (newContentWidth != mContentWidth) {
+            mContentWidth = newContentWidth;
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean updateHeight(View view, Point maxSize) {
+        boolean changed = false;
+        final int clampedMeasuredHeight = Math.min(view.getMeasuredHeight(), maxSize.y);
+        final int newContentHeight = mContentHeight + clampedMeasuredHeight;
+        if (newContentHeight != mContentHeight) {
+            mContentHeight = newContentHeight;
+            changed = true;
         }
         return changed;
     }
@@ -395,8 +563,8 @@ final class FillUi {
     }
 
     private static void resolveMaxWindowSize(Context context, Point outPoint) {
-        context.getDisplay().getSize(outPoint);
-        TypedValue typedValue = sTempTypedValue;
+        context.getDisplayNoVerify().getSize(outPoint);
+        final TypedValue typedValue = sTempTypedValue;
         context.getTheme().resolveAttribute(R.attr.autofillDatasetPickerMaxWidth,
                 typedValue, true);
         outPoint.x = (int) typedValue.getFraction(outPoint.x, outPoint.x);
@@ -440,6 +608,7 @@ final class FillUi {
          * Returns whether this item matches the value input by the user so it can be included
          * in the filtered datasets.
          */
+        // TODO: Extract the shared filtering logic here and in FillUi to a common method.
         public boolean matches(CharSequence filterText) {
             if (TextUtils.isEmpty(filterText)) {
                 // Always show item when the user input is empty
@@ -463,12 +632,24 @@ final class FillUi {
 
         @Override
         public String toString() {
-            return "ViewItem: [dataset=" + (dataset == null ? "null" : dataset.getId())
-                    + ", value=" + (value == null ? "null" : value.length() + "_chars")
-                    + ", filterable=" + filterable
-                    + ", filter=" + (filter == null ? "null" : filter.pattern().length() + "_chars")
-                    + ", view=" + view.getAutofillId()
-                    + "]";
+            final StringBuilder builder = new StringBuilder("ViewItem:[view=")
+                    .append(view.getAutofillId());
+            final String datasetId = dataset == null ? null : dataset.getId();
+            if (datasetId != null) {
+                builder.append(", dataset=").append(datasetId);
+            }
+            if (value != null) {
+                // Cannot print value because it could contain PII
+                builder.append(", value=").append(value.length()).append("_chars");
+            }
+            if (filterable) {
+                builder.append(", filterable");
+            }
+            if (filter != null) {
+                // Filter should not have PII, but it could be a huge regexp
+                builder.append(", filter=").append(filter.pattern().length()).append("_chars");
+            }
+            return builder.append(']').toString();
         }
     }
 
@@ -478,8 +659,7 @@ final class FillUi {
                 boolean fitsSystemWindows, int layoutDirection) {
             if (sVerbose) {
                 Slog.v(TAG, "AutofillWindowPresenter.show(): fit=" + fitsSystemWindows
-                        + ", epicenter="+ transitionEpicenter + ", dir=" + layoutDirection
-                        + ", params=" + p);
+                        + ", params=" + paramsToString(p));
             }
             UiThread.getHandler().post(() -> mWindow.show(p));
         }
@@ -490,11 +670,13 @@ final class FillUi {
         }
     }
 
-    final class AnchoredWindow implements View.OnTouchListener {
+    final class AnchoredWindow {
         private final @NonNull OverlayControl mOverlayControl;
         private final WindowManager mWm;
         private final View mContentView;
         private boolean mShowing;
+        // Used on dump only
+        private WindowManager.LayoutParams mShowParams;
 
         /**
          * Constructor.
@@ -511,19 +693,17 @@ final class FillUi {
          * Shows the window.
          */
         public void show(WindowManager.LayoutParams params) {
-            if (sVerbose) Slog.v(TAG, "show(): showing=" + mShowing + ", params="+  params);
+            mShowParams = params;
+            if (sVerbose) {
+                Slog.v(TAG, "show(): showing=" + mShowing + ", params=" + paramsToString(params));
+            }
             try {
-                // Okay here is a bit of voodoo - we want to show the window as system
-                // controlled one so it covers app windows - adjust the params accordingly.
-                params.type = WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
-                params.token = null;
                 params.packageName = "android";
-                params.flags |= WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+                params.setTitle("Autofill UI"); // Title is set for debugging purposes
                 if (!mShowing) {
                     params.accessibilityTitle = mContentView.getContext()
                             .getString(R.string.autofill_picker_accessibility_title);
                     mWm.addView(mContentView, params);
-                    mContentView.setOnTouchListener(this);
                     mOverlayControl.hideOverlays();
                     mShowing = true;
                 } else {
@@ -536,7 +716,7 @@ final class FillUi {
                 // WM throws an ISE if mContentView was added twice; this should never happen -
                 // since show() and hide() are always called in the UIThread - but when it does,
                 // it should not crash the system.
-                Slog.e(TAG, "Exception showing window " + params, e);
+                Slog.wtf(TAG, "Exception showing window " + params, e);
                 mCallback.onDestroy();
             }
         }
@@ -545,9 +725,12 @@ final class FillUi {
          * Hides the window.
          */
         void hide() {
+            hide(true);
+        }
+
+        void hide(boolean destroyCallbackOnError) {
             try {
                 if (mShowing) {
-                    mContentView.setOnTouchListener(null);
                     mWm.removeView(mContentView);
                     mShowing = false;
                 }
@@ -556,40 +739,60 @@ final class FillUi {
                 // happen - since show() and hide() are always called in the UIThread - but if it
                 // does, it should not crash the system.
                 Slog.e(TAG, "Exception hiding window ", e);
-                mCallback.onDestroy();
+                if (destroyCallbackOnError) {
+                    mCallback.onDestroy();
+                }
             } finally {
                 mOverlayControl.showOverlays();
             }
-        }
-
-        @Override
-        public boolean onTouch(View view, MotionEvent event) {
-            // When the window is touched outside, hide the window.
-            if (view == mContentView && event.getAction() == MotionEvent.ACTION_OUTSIDE) {
-                mCallback.onCanceled();
-                return true;
-            }
-            return false;
         }
     }
 
     public void dump(PrintWriter pw, String prefix) {
         pw.print(prefix); pw.print("mCallback: "); pw.println(mCallback != null);
-        pw.print(prefix); pw.print("mListView: "); pw.println(mListView);
-        pw.print(prefix); pw.print("mAdapter: "); pw.println(mAdapter);
-        pw.print(prefix); pw.print("mFilterText: ");
-        Helper.printlnRedactedText(pw, mFilterText);
+        pw.print(prefix); pw.print("mFullScreen: "); pw.println(mFullScreen);
+        pw.print(prefix); pw.print("mVisibleDatasetsMaxCount: "); pw.println(
+                mVisibleDatasetsMaxCount);
+        if (mHeader != null) {
+            pw.print(prefix); pw.print("mHeader: "); pw.println(mHeader);
+        }
+        if (mListView != null) {
+            pw.print(prefix); pw.print("mListView: "); pw.println(mListView);
+        }
+        if (mFooter != null) {
+            pw.print(prefix); pw.print("mFooter: "); pw.println(mFooter);
+        }
+        if (mAdapter != null) {
+            pw.print(prefix); pw.print("mAdapter: "); pw.println(mAdapter);
+        }
+        if (mFilterText != null) {
+            pw.print(prefix); pw.print("mFilterText: ");
+            Helper.printlnRedactedText(pw, mFilterText);
+        }
         pw.print(prefix); pw.print("mContentWidth: "); pw.println(mContentWidth);
         pw.print(prefix); pw.print("mContentHeight: "); pw.println(mContentHeight);
         pw.print(prefix); pw.print("mDestroyed: "); pw.println(mDestroyed);
-        pw.print(prefix); pw.print("mWindow: ");
-        if (mWindow == null) {
-            pw.println("N/A");
-        } else {
+        pw.print(prefix); pw.print("theme id: "); pw.print(mThemeId);
+        switch (mThemeId) {
+            case THEME_ID_DARK:
+                pw.println(" (dark)");
+                break;
+            case THEME_ID_LIGHT:
+                pw.println(" (light)");
+                break;
+            default:
+                pw.println("(UNKNOWN_MODE)");
+                break;
+        }
+        if (mWindow != null) {
+            pw.print(prefix); pw.print("mWindow: ");
             final String prefix2 = prefix + "  ";
             pw.println();
             pw.print(prefix2); pw.print("showing: "); pw.println(mWindow.mShowing);
             pw.print(prefix2); pw.print("view: "); pw.println(mWindow.mContentView);
+            if (mWindow.mShowParams != null) {
+                pw.print(prefix2); pw.print("params: "); pw.println(mWindow.mShowParams);
+            }
             pw.print(prefix2); pw.print("screen coordinates: ");
             if (mWindow.mContentView == null) {
                 pw.println("N/A");
@@ -698,8 +901,11 @@ final class FillUi {
             if (count <= 0) {
                 text = mContext.getString(R.string.autofill_picker_no_suggestions);
             } else {
-                text = mContext.getResources().getQuantityString(
-                        R.plurals.autofill_picker_some_suggestions, count, count);
+                Map<String, Object> arguments = new HashMap<>();
+                arguments.put("count", count);
+                text = PluralsMessageFormatter.format(mContext.getResources(),
+                        arguments,
+                        R.string.autofill_picker_some_suggestions);
             }
             mListView.announceForAccessibility(text);
         }

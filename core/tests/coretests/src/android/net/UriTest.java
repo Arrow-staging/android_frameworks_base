@@ -18,11 +18,15 @@ package android.net;
 
 import android.content.ContentUris;
 import android.os.Parcel;
-import android.test.suitebuilder.annotation.SmallTest;
+
+import androidx.test.filters.SmallTest;
 
 import junit.framework.TestCase;
 
 import java.io.File;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
@@ -44,6 +48,7 @@ public class UriTest extends TestCase {
     public void testParcelling() {
         parcelAndUnparcel(Uri.parse("foo:bob%20lee"));
         parcelAndUnparcel(Uri.fromParts("foo", "bob lee", "fragment"));
+        parcelAndUnparcel(Uri.fromParts("https", "www.google.com", null));
         parcelAndUnparcel(new Uri.Builder()
             .scheme("http")
             .authority("crazybob.org")
@@ -132,6 +137,23 @@ public class UriTest extends TestCase {
         assertEquals(0, b.compareTo(b2));
     }
 
+    /**
+     * Check that {@link Uri#EMPTY} is properly initialized to guard against a
+     * regression based on a problematic initialization order (b/159907422).
+     *
+     * The problematic initialization order happened when {@code Uri$PathPart<clinit>}
+     * ran before {@code Uri.<clinit>}. De facto this test would probably never have
+     * failed on Android because {@code Uri.<clinit>} will almost certainly have run
+     * somewhere in the Zygote, but just in case and in case this test is ever run on
+     * a platform that doesn't perform Zygote initialization, this test attempts to
+     * trigger {@code Uri$PathPart<clinit>} prior to inspecting {@link Uri#EMPTY}.
+     */
+    @SmallTest
+    public void testEmpty_initializerOrder() {
+        new Uri.Builder().scheme("http").path("path").build();
+        assertEquals("", Uri.EMPTY.toString());
+    }
+
     @SmallTest
     public void testEqualsAndHashCode() {
 
@@ -181,8 +203,7 @@ public class UriTest extends TestCase {
 
         uri = Uri.parse("http://bob%40lee%3ajr@local%68ost:4%32");
         assertEquals("bob@lee:jr", uri.getUserInfo());
-        assertEquals("localhost", uri.getHost());
-        assertEquals(42, uri.getPort());
+        assertEquals("localhost:42", uri.getHost());
 
         uri = Uri.parse("http://localhost");
         assertEquals("localhost", uri.getHost());
@@ -816,6 +837,116 @@ public class UriTest extends TestCase {
                 Uri.parse("content://com.example/path%2Fpath")));
     }
 
+
+    /**
+     * Check that calling Part(String, String) with inconsistent Strings does not lead
+     * to the Part's encoded vs. decoded values being inconsistent.
+     */
+    public void testPart_consistentEncodedVsDecoded() throws Exception {
+        Object authority = createPart(Class.forName("android.net.Uri$Part"), "a.com", "b.com");
+        Object path = createPart(Class.forName("android.net.Uri$PathPart"), "/foo/a", "/foo/b");
+        Uri uri = makeHierarchicalUri(authority, path);
+        // In these cases, decoding/encoding the encoded/decoded representation yields the same
+        // String, so we can just assert equality.
+        // assertEquals(uri.getPath(), uri.getEncodedPath());
+        assertEquals(uri.getAuthority(), uri.getEncodedAuthority());
+
+        // When both encoded and decoded strings are given, the encoded one is preferred.
+        assertEquals("a.com", uri.getAuthority());
+        assertEquals("/foo/a", uri.getPath());
+    }
+
+    private Object createPart(Class partClass, String encoded, String decoded) throws Exception {
+        Constructor partConstructor = partClass.getDeclaredConstructor(String.class, String.class);
+        partConstructor.setAccessible(true);
+        return partConstructor.newInstance(encoded, decoded);
+    }
+
+    private static Uri makeHierarchicalUri(Object authority, Object path) throws Exception {
+        Class hierarchicalUriClass = Class.forName("android.net.Uri$HierarchicalUri");
+        Constructor hierarchicalUriConstructor = hierarchicalUriClass.getDeclaredConstructors()[0];
+        hierarchicalUriConstructor.setAccessible(true);
+        return (Uri) hierarchicalUriConstructor.newInstance("https", authority, path, null, null);
+    }
+
+    /** Attempting to unparcel a legacy parcel format of Uri.{,Path}Part should fail. */
+    public void testUnparcelLegacyPart_fails() throws Exception {
+        assertUnparcelLegacyPart_fails(Class.forName("android.net.Uri$Part"));
+        assertUnparcelLegacyPart_fails(Class.forName("android.net.Uri$PathPart"));
+    }
+
+    private static void assertUnparcelLegacyPart_fails(Class partClass) throws Exception {
+        Parcel parcel = Parcel.obtain();
+        parcel.writeInt(0 /* BOTH */);
+        parcel.writeString("encoded");
+        parcel.writeString("decoded");
+        parcel.setDataPosition(0);
+
+        Method readFromMethod = partClass.getDeclaredMethod("readFrom", Parcel.class);
+        readFromMethod.setAccessible(true);
+        try {
+            readFromMethod.invoke(null, parcel);
+            fail();
+        } catch (InvocationTargetException expected) {
+            Throwable targetException = expected.getTargetException();
+            // Check that the exception was thrown for the correct reason.
+            assertEquals("Unknown representation: 0", targetException.getMessage());
+        } finally {
+            parcel.recycle();
+        }
+    }
+
+    private Uri buildUriFromRawParcel(boolean argumentsEncoded,
+                                      String scheme,
+                                      String authority,
+                                      String path,
+                                      String query,
+                                      String fragment) {
+        // Representation value (from AbstractPart.REPRESENTATION_{ENCODED,DECODED}).
+        final int representation = argumentsEncoded ? 1 : 2;
+        Parcel parcel = Parcel.obtain();
+        try {
+            parcel.writeInt(3);  // hierarchical
+            parcel.writeString8(scheme);
+            parcel.writeInt(representation);
+            parcel.writeString8(authority);
+            parcel.writeInt(representation);
+            parcel.writeString8(path);
+            parcel.writeInt(representation);
+            parcel.writeString8(query);
+            parcel.writeInt(representation);
+            parcel.writeString8(fragment);
+            parcel.setDataPosition(0);
+            return Uri.CREATOR.createFromParcel(parcel);
+        } finally {
+            parcel.recycle();
+        }
+    }
+
+    public void testUnparcelMalformedPath() {
+        // Regression tests for b/171966843.
+
+        // Test cases with arguments encoded (covering testing `scheme` * `authority` options).
+        Uri uri0 = buildUriFromRawParcel(true, "https", "google.com", "@evil.com", null, null);
+        assertEquals("https://google.com/@evil.com", uri0.toString());
+        Uri uri1 = buildUriFromRawParcel(true, null, "google.com", "@evil.com", "name=spark", "x");
+        assertEquals("//google.com/@evil.com?name=spark#x", uri1.toString());
+        Uri uri2 = buildUriFromRawParcel(true, "http:", null, "@evil.com", null, null);
+        assertEquals("http::/@evil.com", uri2.toString());
+        Uri uri3 = buildUriFromRawParcel(true, null, null, "@evil.com", null, null);
+        assertEquals("@evil.com", uri3.toString());
+
+        // Test cases with arguments not encoded (covering testing `scheme` * `authority` options).
+        Uri uriA = buildUriFromRawParcel(false, "https", "google.com", "@evil.com", null, null);
+        assertEquals("https://google.com/%40evil.com", uriA.toString());
+        Uri uriB = buildUriFromRawParcel(false, null, "google.com", "@evil.com", null, null);
+        assertEquals("//google.com/%40evil.com", uriB.toString());
+        Uri uriC = buildUriFromRawParcel(false, "http:", null, "@evil.com", null, null);
+        assertEquals("http::/%40evil.com", uriC.toString());
+        Uri uriD = buildUriFromRawParcel(false, null, null, "@evil.com", "name=spark", "y");
+        assertEquals("%40evil.com?name%3Dspark#y", uriD.toString());
+    }
+
     public void testToSafeString() {
         checkToSafeString("tel:xxxxxx", "tel:Google");
         checkToSafeString("tel:xxxxxxxxxx", "tel:1234567890");
@@ -858,10 +989,14 @@ public class UriTest extends TestCase {
         checkToSafeString("ftp://ftp.android.com:2121/...",
                 "ftp://root:love@ftp.android.com:2121/");
 
-        checkToSafeString("unsupported://ajkakjah/askdha/secret?secret",
+        checkToSafeString("unsupported://ajkakjah/...",
                 "unsupported://ajkakjah/askdha/secret?secret");
-        checkToSafeString("unsupported:ajkakjah/askdha/secret?secret",
+        checkToSafeString("unsupported:",
                 "unsupported:ajkakjah/askdha/secret?secret");
+        checkToSafeString("unsupported:/...",
+                "unsupported:/ajkakjah/askdha/secret?secret");
+        checkToSafeString("file:///...",
+                "file:///path/to/secret.doc");
     }
 
     private void checkToSafeString(String expectedSafeString, String original) {

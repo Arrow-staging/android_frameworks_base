@@ -16,9 +16,20 @@
 
 package android.app.backup;
 
+import static android.app.backup.BackupManager.OperationType;
+
+import android.annotation.Nullable;
+import android.annotation.StringDef;
+import android.app.compat.CompatChanges;
+import android.compat.annotation.ChangeId;
+import android.compat.annotation.EnabledSince;
+import android.compat.annotation.Overridable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.XmlResourceParser;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.storage.StorageManager;
@@ -29,6 +40,7 @@ import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
+import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
 
@@ -40,6 +52,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -82,27 +96,87 @@ public class FullBackup {
     public static final String FULL_RESTORE_INTENT_ACTION = "fullrest";
     public static final String CONF_TOKEN_INTENT_EXTRA = "conftoken";
 
+    public static final String FLAG_REQUIRED_CLIENT_SIDE_ENCRYPTION = "clientSideEncryption";
+    public static final String FLAG_REQUIRED_DEVICE_TO_DEVICE_TRANSFER = "deviceToDeviceTransfer";
+    public static final String FLAG_REQUIRED_FAKE_CLIENT_SIDE_ENCRYPTION =
+            "fakeClientSideEncryption";
+    private static final String FLAG_DISABLE_IF_NO_ENCRYPTION_CAPABILITIES
+            = "disableIfNoEncryptionCapabilities";
+
+    /**
+     * When  this change is enabled, include / exclude rules specified via
+     * {@code android:fullBackupContent} are ignored during D2D transfers.
+     */
+    @ChangeId
+    @Overridable
+    @EnabledSince(targetSdkVersion = Build.VERSION_CODES.S)
+    private static final long IGNORE_FULL_BACKUP_CONTENT_IN_D2D = 180523564L;
+
+    @StringDef({
+        ConfigSection.CLOUD_BACKUP,
+        ConfigSection.DEVICE_TRANSFER
+    })
+    @interface ConfigSection {
+        String CLOUD_BACKUP = "cloud-backup";
+        String DEVICE_TRANSFER = "device-transfer";
+    }
+
+    /**
+     * Identify {@link BackupScheme} object by package and operation type
+     * (see {@link OperationType}) it corresponds to.
+     */
+    private static class BackupSchemeId {
+        final String mPackageName;
+        @OperationType final int mOperationType;
+
+        BackupSchemeId(String packageName, @OperationType int operationType) {
+            mPackageName = packageName;
+            mOperationType = operationType;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(mPackageName, mOperationType);
+        }
+
+        @Override
+        public boolean equals(@Nullable Object object) {
+            if (this == object) {
+                return true;
+            }
+            if (object == null || getClass() != object.getClass()) {
+                return false;
+            }
+            BackupSchemeId that = (BackupSchemeId) object;
+            return Objects.equals(mPackageName, that.mPackageName) &&
+                    Objects.equals(mOperationType, that.mOperationType);
+        }
+    }
+
     /**
      * @hide
      */
+    @UnsupportedAppUsage
     static public native int backupToTar(String packageName, String domain,
             String linkdomain, String rootpath, String path, FullBackupDataOutput output);
 
-    private static final Map<String, BackupScheme> kPackageBackupSchemeMap =
-            new ArrayMap<String, BackupScheme>();
+    private static final Map<BackupSchemeId, BackupScheme> kPackageBackupSchemeMap =
+            new ArrayMap<>();
 
-    static synchronized BackupScheme getBackupScheme(Context context) {
+    static synchronized BackupScheme getBackupScheme(Context context,
+            @OperationType int operationType) {
+        BackupSchemeId backupSchemeId = new BackupSchemeId(context.getPackageName(), operationType);
         BackupScheme backupSchemeForPackage =
-                kPackageBackupSchemeMap.get(context.getPackageName());
+                kPackageBackupSchemeMap.get(backupSchemeId);
         if (backupSchemeForPackage == null) {
-            backupSchemeForPackage = new BackupScheme(context);
-            kPackageBackupSchemeMap.put(context.getPackageName(), backupSchemeForPackage);
+            backupSchemeForPackage = new BackupScheme(context, operationType);
+            kPackageBackupSchemeMap.put(backupSchemeId, backupSchemeForPackage);
         }
         return backupSchemeForPackage;
     }
 
     public static BackupScheme getBackupSchemeForTest(Context context) {
-        BackupScheme testing = new BackupScheme(context);
+        BackupScheme testing = new BackupScheme(context, OperationType.BACKUP);
         testing.mExcludes = new ArraySet();
         testing.mIncludes = new ArrayMap();
         return testing;
@@ -224,13 +298,22 @@ public class FullBackup {
 
         private final File EXTERNAL_DIR;
 
+        private final static String TAG_INCLUDE = "include";
+        private final static String TAG_EXCLUDE = "exclude";
+
+        final int mDataExtractionRules;
         final int mFullBackupContent;
+        @OperationType final int mOperationType;
         final PackageManager mPackageManager;
         final StorageManager mStorageManager;
         final String mPackageName;
 
         // lazy initialized, only when needed
         private StorageVolume[] mVolumes = null;
+
+        // Properties the transport must have (e.g. encryption) for the operation to go ahead.
+        @Nullable private Integer mRequiredTransportFlags;
+        @Nullable private Boolean mIsUsingNewScheme;
 
         /**
          * Parse out the semantic domains into the correct physical location.
@@ -303,18 +386,52 @@ public class FullBackup {
         }
 
         /**
-        * A map of domain -> list of canonical file names in that domain that are to be included.
-        * We keep track of the domain so that we can go through the file system in order later on.
-        */
-        Map<String, Set<String>> mIncludes;
-        /**e
-         * List that will be populated with the canonical names of each file or directory that is
-         * to be excluded.
+         * Represents a path attribute specified in an <include /> rule along with optional
+         * transport flags required from the transport to include file(s) under that path as
+         * specified by requiredFlags attribute. If optional requiredFlags attribute is not
+         * provided, default requiredFlags to 0.
+         * Note: since our parsing codepaths were the same for <include /> and <exclude /> tags,
+         * this structure is also used for <exclude /> tags to preserve that, however you can expect
+         * the getRequiredFlags() to always return 0 for exclude rules.
          */
-        ArraySet<String> mExcludes;
+        public static class PathWithRequiredFlags {
+            private final String mPath;
+            private final int mRequiredFlags;
 
-        BackupScheme(Context context) {
-            mFullBackupContent = context.getApplicationInfo().fullBackupContent;
+            public PathWithRequiredFlags(String path, int requiredFlags) {
+                mPath = path;
+                mRequiredFlags = requiredFlags;
+            }
+
+            public String getPath() {
+                return mPath;
+            }
+
+            public int getRequiredFlags() {
+                return mRequiredFlags;
+            }
+        }
+
+        /**
+         * A map of domain -> set of pairs (canonical file; required transport flags) in that
+         * domain that are to be included if the transport has decared the required flags.
+         * We keep track of the domain so that we can go through the file system in order later on.
+         */
+        Map<String, Set<PathWithRequiredFlags>> mIncludes;
+
+        /**
+         * Set that will be populated with pairs (canonical file; requiredFlags=0) for each file or
+         * directory that is to be excluded. Note that for excludes, the requiredFlags attribute is
+         * ignored and the value should be always set to 0.
+         */
+        ArraySet<PathWithRequiredFlags> mExcludes;
+
+        BackupScheme(Context context, @OperationType int operationType) {
+            ApplicationInfo applicationInfo = context.getApplicationInfo();
+
+            mDataExtractionRules = applicationInfo.dataExtractionRulesRes;
+            mFullBackupContent = applicationInfo.fullBackupContent;
+            mOperationType = operationType;
             mStorageManager = (StorageManager) context.getSystemService(Context.STORAGE_SERVICE);
             mPackageManager = context.getPackageManager();
             mPackageName = context.getPackageName();
@@ -344,6 +461,35 @@ public class FullBackup {
             }
         }
 
+        boolean isFullBackupEnabled(int transportFlags) {
+            try {
+                if (isUsingNewScheme()) {
+                    int requiredTransportFlags = getRequiredTransportFlags();
+                    // All bits that are set in requiredTransportFlags must be set in
+                    // transportFlags.
+                    return (transportFlags & requiredTransportFlags) == requiredTransportFlags;
+                }
+            } catch (IOException | XmlPullParserException e) {
+                Slog.w(TAG, "Failed to interpret the backup scheme: " + e);
+                return false;
+            }
+
+            return isFullBackupContentEnabled();
+        }
+
+        boolean isFullRestoreEnabled() {
+            try {
+                if (isUsingNewScheme()) {
+                    return true;
+                }
+            } catch (IOException | XmlPullParserException e) {
+                Slog.w(TAG, "Failed to interpret the backup scheme: " + e);
+                return false;
+            }
+
+            return isFullBackupContentEnabled();
+        }
+
         boolean isFullBackupContentEnabled() {
             if (mFullBackupContent < 0) {
                 // android:fullBackupContent="false", bail.
@@ -356,13 +502,14 @@ public class FullBackup {
         }
 
         /**
-         * @return A mapping of domain -> canonical paths within that domain. Each of these paths
-         * specifies a file that the client has explicitly included in their backup set. If this
-         * map is empty we will back up the entire data directory (including managed external
-         * storage).
+         * @return A mapping of domain -> set of pairs (canonical file; required transport flags)
+         * in that domain that are to be included if the transport has decared the required flags.
+         * Each of these paths specifies a file that the client has explicitly included in their
+         * backup set. If this map is empty we will back up the entire data directory (including
+         * managed external storage).
          */
-        public synchronized Map<String, Set<String>> maybeParseAndGetCanonicalIncludePaths()
-                throws IOException, XmlPullParserException {
+        public synchronized Map<String, Set<PathWithRequiredFlags>>
+                maybeParseAndGetCanonicalIncludePaths() throws IOException, XmlPullParserException {
             if (mIncludes == null) {
                 maybeParseBackupSchemeLocked();
             }
@@ -370,9 +517,10 @@ public class FullBackup {
         }
 
         /**
-         * @return A set of canonical paths that are to be excluded from the backup/restore set.
+         * @return A set of (canonical paths; requiredFlags=0) that are to be excluded from the
+         * backup/restore set.
          */
-        public synchronized ArraySet<String> maybeParseAndGetCanonicalExcludePaths()
+        public synchronized ArraySet<PathWithRequiredFlags> maybeParseAndGetCanonicalExcludePaths()
                 throws IOException, XmlPullParserException {
             if (mExcludes == null) {
                 maybeParseBackupSchemeLocked();
@@ -380,69 +528,196 @@ public class FullBackup {
             return mExcludes;
         }
 
+        @VisibleForTesting
+        public synchronized int getRequiredTransportFlags()
+                throws IOException, XmlPullParserException {
+            if (mRequiredTransportFlags == null) {
+                maybeParseBackupSchemeLocked();
+            }
+
+            return mRequiredTransportFlags;
+        }
+
+        private synchronized boolean isUsingNewScheme()
+                throws IOException, XmlPullParserException {
+            if (mIsUsingNewScheme == null) {
+                maybeParseBackupSchemeLocked();
+            }
+
+            return mIsUsingNewScheme;
+        }
+
         private void maybeParseBackupSchemeLocked() throws IOException, XmlPullParserException {
             // This not being null is how we know that we've tried to parse the xml already.
-            mIncludes = new ArrayMap<String, Set<String>>();
-            mExcludes = new ArraySet<String>();
+            mIncludes = new ArrayMap<String, Set<PathWithRequiredFlags>>();
+            mExcludes = new ArraySet<PathWithRequiredFlags>();
+            mRequiredTransportFlags = 0;
+            mIsUsingNewScheme = false;
 
-            if (mFullBackupContent == 0) {
-                // android:fullBackupContent="true" which means that we'll do everything.
+            if (mFullBackupContent == 0 && mDataExtractionRules == 0) {
+                // No scheme specified via either new or legacy config, will copy everything.
                 if (Log.isLoggable(FullBackup.TAG_XML_PARSER, Log.VERBOSE)) {
                     Log.v(FullBackup.TAG_XML_PARSER, "android:fullBackupContent - \"true\"");
                 }
             } else {
-                // android:fullBackupContent="@xml/some_resource".
+                // Scheme is present.
                 if (Log.isLoggable(FullBackup.TAG_XML_PARSER, Log.VERBOSE)) {
-                    Log.v(FullBackup.TAG_XML_PARSER,
-                            "android:fullBackupContent - found xml resource");
+                    Log.v(FullBackup.TAG_XML_PARSER, "Found xml scheme: "
+                            + "android:fullBackupContent=" + mFullBackupContent
+                            + "; android:dataExtractionRules=" + mDataExtractionRules);
                 }
-                XmlResourceParser parser = null;
+
                 try {
-                    parser = mPackageManager
-                            .getResourcesForApplication(mPackageName)
-                            .getXml(mFullBackupContent);
-                    parseBackupSchemeFromXmlLocked(parser, mExcludes, mIncludes);
+                    parseSchemeForOperationType(mOperationType);
                 } catch (PackageManager.NameNotFoundException e) {
                     // Throw it as an IOException
                     throw new IOException(e);
-                } finally {
-                    if (parser != null) {
-                        parser.close();
-                    }
+                }
+            }
+        }
+
+        private void parseSchemeForOperationType(@OperationType int operationType)
+                throws PackageManager.NameNotFoundException, IOException, XmlPullParserException {
+            String configSection = getConfigSectionForOperationType(operationType);
+            if (configSection == null) {
+                Slog.w(TAG, "Given operation type isn't supported by backup scheme: "
+                        + operationType);
+                return;
+            }
+
+            if (mDataExtractionRules != 0) {
+                // New config is present. Use it if it has configuration for this operation
+                // type.
+                boolean isSectionPresent;
+                try (XmlResourceParser parser = getParserForResource(mDataExtractionRules)) {
+                    isSectionPresent = parseNewBackupSchemeFromXmlLocked(parser, configSection,
+                            mExcludes, mIncludes);
+                }
+                if (isSectionPresent) {
+                    // Found the relevant section in the new config, we will use it.
+                    mIsUsingNewScheme = true;
+                    return;
+                }
+            }
+
+            if (operationType == OperationType.MIGRATION
+                    && CompatChanges.isChangeEnabled(IGNORE_FULL_BACKUP_CONTENT_IN_D2D)) {
+                mIsUsingNewScheme = true;
+                return;
+            }
+
+            if (mFullBackupContent != 0) {
+                // Fall back to the old config.
+                try (XmlResourceParser parser = getParserForResource(mFullBackupContent)) {
+                    parseBackupSchemeFromXmlLocked(parser, mExcludes, mIncludes);
+                }
+            }
+        }
+
+        @Nullable
+        private String getConfigSectionForOperationType(@OperationType int operationType)  {
+            switch (operationType) {
+                case OperationType.BACKUP:
+                    return ConfigSection.CLOUD_BACKUP;
+                case OperationType.MIGRATION:
+                    return ConfigSection.DEVICE_TRANSFER;
+                default:
+                    return null;
+            }
+        }
+
+        private XmlResourceParser getParserForResource(int resourceId)
+                throws PackageManager.NameNotFoundException {
+            return mPackageManager
+                    .getResourcesForApplication(mPackageName)
+                    .getXml(resourceId);
+        }
+
+        @VisibleForTesting
+        public boolean parseNewBackupSchemeFromXmlLocked(XmlPullParser parser,
+                @ConfigSection  String configSection,
+                Set<PathWithRequiredFlags> excludes,
+                Map<String, Set<PathWithRequiredFlags>> includes)
+                throws IOException, XmlPullParserException {
+            verifyTopLevelTag(parser, "data-extraction-rules");
+
+            boolean isSectionPresent = false;
+
+            int event;
+            while ((event = parser.next()) != XmlPullParser.END_DOCUMENT) {
+                if (event != XmlPullParser.START_TAG || !configSection.equals(parser.getName())) {
+                    continue;
+                }
+
+                isSectionPresent = true;
+
+                parseRequiredTransportFlags(parser, configSection);
+                parseRules(parser, excludes, includes, Optional.of(0), configSection);
+            }
+
+            logParsingResults(excludes, includes);
+
+            return isSectionPresent;
+        }
+
+        private void parseRequiredTransportFlags(XmlPullParser parser,
+                @ConfigSection String configSection) {
+            if (ConfigSection.CLOUD_BACKUP.equals(configSection)) {
+                String encryptionAttribute = parser.getAttributeValue(/* namespace */ null,
+                        FLAG_DISABLE_IF_NO_ENCRYPTION_CAPABILITIES);
+                if ("true".equals(encryptionAttribute)) {
+                    mRequiredTransportFlags = BackupAgent.FLAG_CLIENT_SIDE_ENCRYPTION_ENABLED;
                 }
             }
         }
 
         @VisibleForTesting
         public void parseBackupSchemeFromXmlLocked(XmlPullParser parser,
-                                                   Set<String> excludes,
-                                                   Map<String, Set<String>> includes)
+                                                   Set<PathWithRequiredFlags> excludes,
+                                                   Map<String, Set<PathWithRequiredFlags>> includes)
                 throws IOException, XmlPullParserException {
+            verifyTopLevelTag(parser, "full-backup-content");
+
+            parseRules(parser, excludes, includes, Optional.empty(), "full-backup-content");
+
+            logParsingResults(excludes, includes);
+        }
+
+        private void verifyTopLevelTag(XmlPullParser parser, String tag)
+                throws XmlPullParserException, IOException {
             int event = parser.getEventType(); // START_DOCUMENT
             while (event != XmlPullParser.START_TAG) {
                 event = parser.next();
             }
 
-            if (!"full-backup-content".equals(parser.getName())) {
+            if (!tag.equals(parser.getName())) {
                 throw new XmlPullParserException("Xml file didn't start with correct tag" +
-                        " (<full-backup-content>). Found \"" + parser.getName() + "\"");
+                        " (" + tag + " ). Found \"" + parser.getName() + "\"");
             }
 
             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                 Log.v(TAG_XML_PARSER, "\n");
                 Log.v(TAG_XML_PARSER, "====================================================");
-                Log.v(TAG_XML_PARSER, "Found valid fullBackupContent; parsing xml resource.");
+                Log.v(TAG_XML_PARSER, "Found valid " + tag + "; parsing xml resource.");
                 Log.v(TAG_XML_PARSER, "====================================================");
                 Log.v(TAG_XML_PARSER, "");
             }
+        }
 
-            while ((event = parser.next()) != XmlPullParser.END_DOCUMENT) {
+        private void parseRules(XmlPullParser parser,
+                Set<PathWithRequiredFlags> excludes,
+                Map<String, Set<PathWithRequiredFlags>> includes,
+                Optional<Integer> maybeRequiredFlags,
+                String endingTag)
+                throws IOException, XmlPullParserException {
+            int event;
+            while ((event = parser.next()) != XmlPullParser.END_DOCUMENT
+                    && !parser.getName().equals(endingTag)) {
                 switch (event) {
                     case XmlPullParser.START_TAG:
                         validateInnerTagContents(parser);
                         final String domainFromXml = parser.getAttributeValue(null, "domain");
-                        final File domainDirectory =
-                                getDirectoryForCriteriaDomain(domainFromXml);
+                        final File domainDirectory = getDirectoryForCriteriaDomain(domainFromXml);
                         if (domainDirectory == null) {
                             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                                 Log.v(TAG_XML_PARSER, "...parsing \"" + parser.getName() + "\": "
@@ -457,12 +732,17 @@ public class FullBackup {
                             break;
                         }
 
-                        Set<String> activeSet = parseCurrentTagForDomain(
+                        int requiredFlags = getRequiredFlagsForRule(parser, maybeRequiredFlags);
+
+                        // retrieve the include/exclude set we'll be adding this rule to
+                        Set<PathWithRequiredFlags> activeSet = parseCurrentTagForDomain(
                                 parser, excludes, includes, domainFromXml);
-                        activeSet.add(canonicalFile.getCanonicalPath());
+                        activeSet.add(new PathWithRequiredFlags(canonicalFile.getCanonicalPath(),
+                                requiredFlags));
                         if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                             Log.v(TAG_XML_PARSER, "...parsed " + canonicalFile.getCanonicalPath()
-                                    + " for domain \"" + domainFromXml + "\"");
+                                    + " for domain \"" + domainFromXml + "\", requiredFlags + \""
+                                    + requiredFlags + "\"");
                         }
 
                         // Special case journal files (not dirs) for sqlite database. frowny-face.
@@ -472,14 +752,16 @@ public class FullBackup {
                         if ("database".equals(domainFromXml) && !canonicalFile.isDirectory()) {
                             final String canonicalJournalPath =
                                     canonicalFile.getCanonicalPath() + "-journal";
-                            activeSet.add(canonicalJournalPath);
+                            activeSet.add(new PathWithRequiredFlags(canonicalJournalPath,
+                                    requiredFlags));
                             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                                 Log.v(TAG_XML_PARSER, "...automatically generated "
                                         + canonicalJournalPath + ". Ignore if nonexistent.");
                             }
                             final String canonicalWalPath =
                                     canonicalFile.getCanonicalPath() + "-wal";
-                            activeSet.add(canonicalWalPath);
+                            activeSet.add(new PathWithRequiredFlags(canonicalWalPath,
+                                    requiredFlags));
                             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                                 Log.v(TAG_XML_PARSER, "...automatically generated "
                                         + canonicalWalPath + ". Ignore if nonexistent.");
@@ -488,10 +770,11 @@ public class FullBackup {
 
                         // Special case for sharedpref files (not dirs) also add ".xml" suffix file.
                         if ("sharedpref".equals(domainFromXml) && !canonicalFile.isDirectory() &&
-                            !canonicalFile.getCanonicalPath().endsWith(".xml")) {
+                                !canonicalFile.getCanonicalPath().endsWith(".xml")) {
                             final String canonicalXmlPath =
                                     canonicalFile.getCanonicalPath() + ".xml";
-                            activeSet.add(canonicalXmlPath);
+                            activeSet.add(new PathWithRequiredFlags(canonicalXmlPath,
+                                    requiredFlags));
                             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                                 Log.v(TAG_XML_PARSER, "...automatically generated "
                                         + canonicalXmlPath + ". Ignore if nonexistent.");
@@ -499,6 +782,10 @@ public class FullBackup {
                         }
                 }
             }
+        }
+
+        private void logParsingResults(Set<PathWithRequiredFlags> excludes,
+                Map<String, Set<PathWithRequiredFlags>> includes) {
             if (Log.isLoggable(TAG_XML_PARSER, Log.VERBOSE)) {
                 Log.v(TAG_XML_PARSER, "\n");
                 Log.v(TAG_XML_PARSER, "Xml resource parsing complete.");
@@ -508,10 +795,12 @@ public class FullBackup {
                     Log.v(TAG_XML_PARSER, "  ...nothing specified (This means the entirety of app"
                             + " data minus excludes)");
                 } else {
-                    for (Map.Entry<String, Set<String>> entry : includes.entrySet()) {
+                    for (Map.Entry<String, Set<PathWithRequiredFlags>> entry
+                            : includes.entrySet()) {
                         Log.v(TAG_XML_PARSER, "  domain=" + entry.getKey());
-                        for (String includeData : entry.getValue()) {
-                            Log.v(TAG_XML_PARSER, "  " + includeData);
+                        for (PathWithRequiredFlags includeData : entry.getValue()) {
+                            Log.v(TAG_XML_PARSER, " path: " + includeData.getPath()
+                                    + " requiredFlags: " + includeData.getRequiredFlags());
                         }
                     }
                 }
@@ -520,8 +809,9 @@ public class FullBackup {
                 if (excludes.isEmpty()) {
                     Log.v(TAG_XML_PARSER, "  ...nothing to exclude.");
                 } else {
-                    for (String excludeData : excludes) {
-                        Log.v(TAG_XML_PARSER, "  " + excludeData);
+                    for (PathWithRequiredFlags excludeData : excludes) {
+                        Log.v(TAG_XML_PARSER, " path: " + excludeData.getPath()
+                                + " requiredFlags: " + excludeData.getRequiredFlags());
                     }
                 }
 
@@ -531,20 +821,61 @@ public class FullBackup {
             }
         }
 
-        private Set<String> parseCurrentTagForDomain(XmlPullParser parser,
-                                                     Set<String> excludes,
-                                                     Map<String, Set<String>> includes,
-                                                     String domain)
+        private int getRequiredFlagsFromString(String requiredFlags) {
+            int flags = 0;
+            if (requiredFlags == null || requiredFlags.length() == 0) {
+                // requiredFlags attribute was missing or empty in <include /> tag
+                return flags;
+            }
+            String[] flagsStr = requiredFlags.split("\\|");
+            for (String f : flagsStr) {
+                switch (f) {
+                    case FLAG_REQUIRED_CLIENT_SIDE_ENCRYPTION:
+                        flags |= BackupAgent.FLAG_CLIENT_SIDE_ENCRYPTION_ENABLED;
+                        break;
+                    case FLAG_REQUIRED_DEVICE_TO_DEVICE_TRANSFER:
+                        flags |= BackupAgent.FLAG_DEVICE_TO_DEVICE_TRANSFER;
+                        break;
+                    case FLAG_REQUIRED_FAKE_CLIENT_SIDE_ENCRYPTION:
+                        flags |= BackupAgent.FLAG_FAKE_CLIENT_SIDE_ENCRYPTION_ENABLED;
+                    default:
+                        Log.w(TAG, "Unrecognized requiredFlag provided, value: \"" + f + "\"");
+                }
+            }
+            return flags;
+        }
+
+        private int getRequiredFlagsForRule(XmlPullParser parser,
+                Optional<Integer> maybeRequiredFlags) {
+            if (maybeRequiredFlags.isPresent()) {
+                // This is the new config format where required flags are specified for the whole
+                // section, not per rule.
+                return maybeRequiredFlags.get();
+            }
+
+            if (TAG_INCLUDE.equals(parser.getName())) {
+                // In the legacy config, requiredFlags are only supported for <include /> tag,
+                // for <exclude /> we should always leave them as the default = 0.
+                return getRequiredFlagsFromString(
+                        parser.getAttributeValue(null, "requireFlags"));
+            }
+
+            return 0;
+        }
+
+        private Set<PathWithRequiredFlags> parseCurrentTagForDomain(XmlPullParser parser,
+                Set<PathWithRequiredFlags> excludes,
+                Map<String, Set<PathWithRequiredFlags>> includes, String domain)
                 throws XmlPullParserException {
-            if ("include".equals(parser.getName())) {
+            if (TAG_INCLUDE.equals(parser.getName())) {
                 final String domainToken = getTokenForXmlDomain(domain);
-                Set<String> includeSet = includes.get(domainToken);
+                Set<PathWithRequiredFlags> includeSet = includes.get(domainToken);
                 if (includeSet == null) {
-                    includeSet = new ArraySet<String>();
+                    includeSet = new ArraySet<PathWithRequiredFlags>();
                     includes.put(domainToken, includeSet);
                 }
                 return includeSet;
-            } else if ("exclude".equals(parser.getName())) {
+            } else if (TAG_EXCLUDE.equals(parser.getName())) {
                 return excludes;
             } else {
                 // Unrecognised tag => hard failure.
@@ -589,8 +920,8 @@ public class FullBackup {
         /**
          *
          * @param domain Directory where the specified file should exist. Not null.
-         * @param filePathFromXml parsed from xml. Not sanitised before calling this function so may be
-         *                        null.
+         * @param filePathFromXml parsed from xml. Not sanitised before calling this function so may
+         *                        be null.
          * @return The canonical path of the file specified or null if no such file exists.
          */
         private File extractCanonicalFile(File domain, String filePathFromXml) {
@@ -650,15 +981,27 @@ public class FullBackup {
          * Let's be strict about the type of xml the client can write. If we see anything untoward,
          * throw an XmlPullParserException.
          */
-        private void validateInnerTagContents(XmlPullParser parser)
-                throws XmlPullParserException {
-            if (parser.getAttributeCount() > 2) {
-                throw new XmlPullParserException("At most 2 tag attributes allowed for \""
-                        + parser.getName() + "\" tag (\"domain\" & \"path\".");
+        private void validateInnerTagContents(XmlPullParser parser) throws XmlPullParserException {
+            if (parser == null) {
+                return;
             }
-            if (!"include".equals(parser.getName()) && !"exclude".equals(parser.getName())) {
-                throw new XmlPullParserException("A valid tag is one of \"<include/>\" or" +
-                        " \"<exclude/>. You provided \"" + parser.getName() + "\"");
+            switch (parser.getName()) {
+                case TAG_INCLUDE:
+                    if (parser.getAttributeCount() > 3) {
+                        throw new XmlPullParserException("At most 3 tag attributes allowed for "
+                                + "\"include\" tag (\"domain\" & \"path\""
+                                + " & optional \"requiredFlags\").");
+                    }
+                    break;
+                case TAG_EXCLUDE:
+                    if (parser.getAttributeCount() > 2) {
+                        throw new XmlPullParserException("At most 2 tag attributes allowed for "
+                                + "\"exclude\" tag (\"domain\" & \"path\".");
+                    }
+                    break;
+                default:
+                    throw new XmlPullParserException("A valid tag is one of \"<include/>\" or" +
+                            " \"<exclude/>. You provided \"" + parser.getName() + "\"");
             }
         }
     }

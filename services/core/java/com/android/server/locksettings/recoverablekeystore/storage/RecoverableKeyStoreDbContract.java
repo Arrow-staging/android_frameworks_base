@@ -20,6 +20,8 @@ import android.provider.BaseColumns;
 
 /**
  * Contract for recoverable key database. Describes the tables present.
+ *
+ * Make sure that {@code removeUserFromAllKnownTables} is updated, when new table is added.
  */
 class RecoverableKeyStoreDbContract {
     /**
@@ -64,9 +66,15 @@ class RecoverableKeyStoreDbContract {
         static final String COLUMN_NAME_LAST_SYNCED_AT = "last_synced_at";
 
         /**
-         * Status of the key sync {@code RecoveryManager#setRecoveryStatus}
+         * Status of the key sync {@code RecoveryController#setRecoveryStatus}
          */
         static final String COLUMN_NAME_RECOVERY_STATUS = "recovery_status";
+
+        /**
+         * Data blob that will be authenticated (but encrypted) together with the key when the key
+         * is uploaded to cloud.
+         */
+        static final String COLUMN_NAME_KEY_METADATA = "key_metadata";
     }
 
     /**
@@ -85,6 +93,11 @@ class RecoverableKeyStoreDbContract {
          * is used to wrap recoverable keys on disk.
          */
         static final String COLUMN_NAME_PLATFORM_KEY_GENERATION_ID = "platform_key_generation_id";
+
+        /**
+         * Serial number for the user which can not be reused. Default value is {@code -1}.
+         */
+        static final String COLUMN_NAME_USER_SERIAL_NUMBER = "user_serial_number";
     }
 
     /**
@@ -115,16 +128,19 @@ class RecoverableKeyStoreDbContract {
 
         /**
          * The public key of the recovery service.
+         * Deprecated.
          */
         static final String COLUMN_NAME_PUBLIC_KEY = "public_key";
 
         /**
          * The certificate path of the recovery service.
+         * Deprecated.
          */
         static final String COLUMN_NAME_CERT_PATH = "cert_path";
 
         /**
          * The serial number contained in the certificate XML file of the recovery service.
+         * Deprecated.
          */
         static final String COLUMN_NAME_CERT_SERIAL = "cert_serial";
 
@@ -142,5 +158,42 @@ class RecoverableKeyStoreDbContract {
          * The server parameters of the recovery service.
          */
         static final String COLUMN_NAME_SERVER_PARAMS = "server_params";
+
+        /**
+         * Active root of trust
+         */
+        static final String COLUMN_NAME_ACTIVE_ROOT_OF_TRUST = "active_root_of_trust";
+    }
+
+    /**
+     * Table data for given recovery agent and root of trust pair.
+     */
+    static class RootOfTrustEntry implements BaseColumns {
+        static final String TABLE_NAME = "root_of_trust";
+
+        /**
+         * The user id of the profile the application is running under.
+         */
+        static final String COLUMN_NAME_USER_ID = "user_id";
+
+        /**
+         * The uid of the application that initializes the local recovery components.
+         */
+        static final String COLUMN_NAME_UID = "uid";
+
+        /**
+         * Root of trust alias
+         */
+        static final String COLUMN_NAME_ROOT_ALIAS = "root_alias";
+
+        /**
+         * The certificate path of the recovery service.
+         */
+        static final String COLUMN_NAME_CERT_PATH = "cert_path";
+
+        /**
+         * The serial number contained in the certificate XML file of the recovery service.
+         */
+        static final String COLUMN_NAME_CERT_SERIAL = "cert_serial";
     }
 }

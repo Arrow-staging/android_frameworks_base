@@ -16,20 +16,25 @@
 
 package com.android.systemui.qs;
 
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import android.content.Context;
 import android.graphics.drawable.Drawable;
-import android.support.test.filters.SmallTest;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableLooper.RunWithLooper;
+
+import androidx.test.filters.SmallTest;
+
 import com.android.systemui.SysuiTestCase;
 import com.android.systemui.plugins.qs.QSTile.SlashState;
 import com.android.systemui.qs.tileimpl.SlashImageView;
+
 import org.junit.Test;
 import org.junit.runner.RunWith;
-
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.mock;
-
 
 @SmallTest
 @RunWith(AndroidTestingRunner.class)
@@ -80,13 +85,12 @@ public class SlashImageViewTest extends SysuiTestCase {
     public void testSetImageDrawableUsesDrawableLevel() {
         SlashImageView iv = new SlashImageView(mContext);
         Drawable mockDrawable = mock(Drawable.class);
-        mockDrawable.setLevel(2);
-        assertTrue(mockDrawable.getLevel() == 2);
+        when(mockDrawable.getLevel()).thenReturn(2);
 
         iv.setImageDrawable(mockDrawable);
 
         // Make sure setting the drawable didn't reset its level to 0
-        assertTrue(mockDrawable.getLevel() == 2);
+        verify(mockDrawable).setLevel(eq(2));
     }
 
     // Expose getSlashDrawable

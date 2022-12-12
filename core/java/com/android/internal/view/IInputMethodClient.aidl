@@ -16,18 +16,21 @@
 
 package com.android.internal.view;
 
-import com.android.internal.view.InputBindResult;
+import com.android.internal.inputmethod.InputBindResult;
 
 /**
  * Interface a client of the IInputMethodManager implements, to identify
  * itself and receive information about changes to the global manager state.
  */
 oneway interface IInputMethodClient {
-    void setUsingInputMethod(boolean state);
     void onBindMethod(in InputBindResult res);
-    // unbindReason corresponds to InputMethodClient.UnbindReason.
+    void onBindAccessibilityService(in InputBindResult res, int id);
     void onUnbindMethod(int sequence, int unbindReason);
-    void setActive(boolean active, boolean fullscreen);
-    void setUserActionNotificationSequenceNumber(int sequenceNumber);
+    void onUnbindAccessibilityService(int sequence, int id);
+    void setActive(boolean active, boolean fullscreen, boolean reportToImeController);
+    void scheduleStartInputIfNecessary(boolean fullscreen);
     void reportFullscreenMode(boolean fullscreen);
+    void updateVirtualDisplayToScreenMatrix(int bindSequence, in float[] matrixValues);
+    void setImeTraceEnabled(boolean enabled);
+    void throwExceptionFromSystem(String message);
 }

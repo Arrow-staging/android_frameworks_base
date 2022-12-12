@@ -16,7 +16,11 @@
 
 package android.os;
 
+import android.Manifest.permission;
+import android.annotation.RequiresPermission;
+import android.annotation.SystemApi;
 import android.annotation.SystemService;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
 import android.hardware.health.V1_0.Constants;
@@ -108,6 +112,7 @@ public class BatteryManager {
      * to the device.
      * {@hide}
      */
+    @UnsupportedAppUsage
     public static final String EXTRA_INVALID_CHARGER = "invalid_charger";
 
     /**
@@ -115,6 +120,7 @@ public class BatteryManager {
      * Int value set to the maximum charging current supported by the charger in micro amperes.
      * {@hide}
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final String EXTRA_MAX_CHARGING_CURRENT = "max_charging_current";
 
     /**
@@ -122,6 +128,7 @@ public class BatteryManager {
      * Int value set to the maximum charging voltage supported by the charger in micro volts.
      * {@hide}
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final String EXTRA_MAX_CHARGING_VOLTAGE = "max_charging_voltage";
 
     /**
@@ -129,6 +136,7 @@ public class BatteryManager {
      * integer containing the charge counter present in the battery.
      * {@hide}
      */
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
      public static final String EXTRA_CHARGE_COUNTER = "charge_counter";
 
     /**
@@ -137,6 +145,23 @@ public class BatteryManager {
      * {@hide}
      */
     public static final String EXTRA_SEQUENCE = "seq";
+
+    /**
+     * Extra for {@link android.content.Intent#ACTION_BATTERY_LEVEL_CHANGED}:
+     * Contains list of Bundles representing battery events
+     * @hide
+     */
+    @SystemApi
+    public static final String EXTRA_EVENTS = "android.os.extra.EVENTS";
+
+    /**
+     * Extra for event in {@link android.content.Intent#ACTION_BATTERY_LEVEL_CHANGED}:
+     * Long value representing time when event occurred as returned by
+     * {@link android.os.SystemClock#elapsedRealtime()}
+     * @hide
+     */
+    @SystemApi
+    public static final String EXTRA_EVENT_TIMESTAMP = "android.os.extra.EVENT_TIMESTAMP";
 
     // values for "status" field in the ACTION_BATTERY_CHANGED Intent
     public static final int BATTERY_STATUS_UNKNOWN = Constants.BATTERY_STATUS_UNKNOWN;
@@ -162,10 +187,13 @@ public class BatteryManager {
     public static final int BATTERY_PLUGGED_USB = OsProtoEnums.BATTERY_PLUGGED_USB; // = 2
     /** Power source is wireless. */
     public static final int BATTERY_PLUGGED_WIRELESS = OsProtoEnums.BATTERY_PLUGGED_WIRELESS; // = 4
+    /** Power source is dock. */
+    public static final int BATTERY_PLUGGED_DOCK = OsProtoEnums.BATTERY_PLUGGED_DOCK; // = 8
 
     /** @hide */
     public static final int BATTERY_PLUGGED_ANY =
-            BATTERY_PLUGGED_AC | BATTERY_PLUGGED_USB | BATTERY_PLUGGED_WIRELESS;
+            BATTERY_PLUGGED_AC | BATTERY_PLUGGED_USB | BATTERY_PLUGGED_WIRELESS
+                    | BATTERY_PLUGGED_DOCK;
 
     /**
      * Sent when the device's battery has started charging (or has reached full charge
@@ -334,5 +362,43 @@ public class BatteryManager {
      */
     public static boolean isPlugWired(int plugType) {
         return plugType == BATTERY_PLUGGED_USB || plugType == BATTERY_PLUGGED_AC;
+    }
+
+    /**
+     * Compute an approximation for how much time (in milliseconds) remains until the battery is
+     * fully charged. Returns -1 if no time can be computed: either there is not enough current
+     * data to make a decision or the battery is currently discharging.
+     *
+     * @return how much time is left, in milliseconds, until the battery is fully charged or -1 if
+     *         the computation fails
+     */
+    public long computeChargeTimeRemaining() {
+        try {
+            return mBatteryStats.computeChargeTimeRemaining();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets the delay for reporting battery state as charging after device is plugged in.
+     * This allows machine-learning or heuristics to delay the reporting and the corresponding
+     * broadcast, based on battery level, charging rate, and/or other parameters.
+     *
+     * @param delayMillis the delay in milliseconds, negative value to reset.
+     *
+     * @return True if the delay was set successfully.
+     *
+     * @see ACTION_CHARGING
+     * @hide
+     */
+    @RequiresPermission(permission.POWER_SAVER)
+    @SystemApi
+    public boolean setChargingStateUpdateDelayMillis(int delayMillis) {
+        try {
+            return mBatteryStats.setChargingStateUpdateDelayMillis(delayMillis);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
     }
 }

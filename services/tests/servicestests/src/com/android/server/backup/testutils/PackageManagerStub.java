@@ -32,6 +32,7 @@ import android.content.res.XmlResourceParser;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
+import android.os.PersistableBundle;
 import android.os.UserHandle;
 import android.os.storage.VolumeInfo;
 
@@ -47,11 +48,7 @@ public class PackageManagerStub extends PackageManager {
     @Override
     public PackageInfo getPackageInfo(String packageName, int flags)
             throws NameNotFoundException {
-        if (sPackageInfo == null) {
-            throw new NameNotFoundException();
-        }
-
-        return sPackageInfo;
+        return getPackageInfoAsUser(packageName, flags, UserHandle.USER_SYSTEM);
     }
 
     @Override
@@ -63,7 +60,11 @@ public class PackageManagerStub extends PackageManager {
     @Override
     public PackageInfo getPackageInfoAsUser(String packageName, int flags, int userId)
             throws NameNotFoundException {
-        return null;
+        if (sPackageInfo == null) {
+            throw new NameNotFoundException();
+        }
+
+        return sPackageInfo;
     }
 
     @Override
@@ -133,7 +134,12 @@ public class PackageManagerStub extends PackageManager {
     }
 
     @Override
-    public boolean isPermissionReviewModeEnabled() {
+    public boolean arePermissionsIndividuallyControlled() {
+        return false;
+    }
+
+    @Override
+    public boolean isWirelessConsentModeEnabled() {
         return false;
     }
 
@@ -433,6 +439,11 @@ public class PackageManagerStub extends PackageManager {
 
     @Override
     public ResolveInfo resolveService(Intent intent, int flags) {
+        return null;
+    }
+
+    @Override
+    public ResolveInfo resolveServiceAsUser(Intent intent, int flags, int userId) {
         return null;
     }
 
@@ -869,8 +880,8 @@ public class PackageManagerStub extends PackageManager {
     }
 
     @Override
-    public String[] setPackagesSuspendedAsUser(String[] packageNames, boolean suspended,
-            int userId) {
+    public String[] setPackagesSuspended(String[] packageNames, boolean suspended,
+            PersistableBundle appExtras, PersistableBundle launcherExtras, String dialogMessage) {
         return new String[0];
     }
 
@@ -936,6 +947,11 @@ public class PackageManagerStub extends PackageManager {
 
     @Override
     public boolean isUpgrade() {
+        return false;
+    }
+
+    @Override
+    public boolean isDeviceUpgrading() {
         return false;
     }
 

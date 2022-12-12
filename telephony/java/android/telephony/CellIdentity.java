@@ -17,56 +17,37 @@
 package android.telephony;
 
 import android.annotation.CallSuper;
-import android.annotation.IntDef;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.TextUtils;
 
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
+import com.android.telephony.Rlog;
+
+import java.util.Objects;
+import java.util.UUID;
 
 /**
  * CellIdentity represents the identity of a unique cell. This is the base class for
  * CellIdentityXxx which represents cell identity for specific network access technology.
  */
 public abstract class CellIdentity implements Parcelable {
-    /**
-     * Cell identity type
-     * @hide
-     */
-    @Retention(RetentionPolicy.SOURCE)
-    @IntDef(prefix = "TYPE_", value = {TYPE_GSM, TYPE_CDMA, TYPE_LTE, TYPE_WCDMA, TYPE_TDSCDMA})
-    public @interface Type {}
+
+    /** @hide */
+    public static final int INVALID_CHANNEL_NUMBER = Integer.MAX_VALUE;
 
     /**
-     * Unknown cell identity type
+     * parameters for validation
      * @hide
      */
-    public static final int TYPE_UNKNOWN        = 0;
-    /**
-     * GSM cell identity type
-     * @hide
-     */
-    public static final int TYPE_GSM            = 1;
-    /**
-     * CDMA cell identity type
-     * @hide
-     */
-    public static final int TYPE_CDMA           = 2;
-    /**
-     * LTE cell identity type
-     * @hide
-     */
-    public static final int TYPE_LTE            = 3;
-    /**
-     * WCDMA cell identity type
-     * @hide
-     */
-    public static final int TYPE_WCDMA          = 4;
-    /**
-     * TDS-CDMA cell identity type
-     * @hide
-     */
-    public static final int TYPE_TDSCDMA        = 5;
+    public static final int MCC_LENGTH = 3;
+
+    /** @hide */
+    public static final int MNC_MIN_LENGTH = 2;
+    /** @hide */
+    public static final int MNC_MAX_LENGTH = 3;
 
     // Log tag
     /** @hide */
@@ -81,13 +62,26 @@ public abstract class CellIdentity implements Parcelable {
     /** @hide */
     protected final String mMncStr;
 
+    // long alpha Operator Name String or Enhanced Operator Name String
     /** @hide */
-    protected CellIdentity(String tag, int type, String mcc, String mnc) {
+    protected String mAlphaLong;
+    // short alpha Operator Name String or Enhanced Operator Name String
+    /** @hide */
+    protected String mAlphaShort;
+
+    // Cell Global, 3GPP TS 23.003
+    /** @hide */
+    protected String mGlobalCellId;
+
+
+    /** @hide */
+    protected CellIdentity(@Nullable String tag, int type, @Nullable String mcc,
+            @Nullable String mnc, @Nullable String alphal, @Nullable String alphas) {
         mTag = tag;
         mType = type;
 
         // Only allow INT_MAX if unknown string mcc/mnc
-        if (mcc == null || mcc.matches("^[0-9]{3}$")) {
+        if (mcc == null || isMcc(mcc)) {
             mMccStr = mcc;
         } else if (mcc.isEmpty() || mcc.equals(String.valueOf(Integer.MAX_VALUE))) {
             // If the mccStr is empty or unknown, set it as null.
@@ -99,7 +93,7 @@ public abstract class CellIdentity implements Parcelable {
             log("invalid MCC format: " + mcc);
         }
 
-        if (mnc == null || mnc.matches("^[0-9]{2,3}$")) {
+        if (mnc == null || isMnc(mnc)) {
             mMncStr = mnc;
         } else if (mnc.isEmpty() || mnc.equals(String.valueOf(Integer.MAX_VALUE))) {
             // If the mncStr is empty or unknown, set it as null.
@@ -110,6 +104,15 @@ public abstract class CellIdentity implements Parcelable {
             mMncStr = null;
             log("invalid MNC format: " + mnc);
         }
+
+        if ((mMccStr != null && mMncStr == null) || (mMccStr == null && mMncStr != null)) {
+            AnomalyReporter.reportAnomaly(
+                    UUID.fromString("a3ab0b9d-f2aa-4baf-911d-7096c0d4645a"),
+                    "CellIdentity Missing Half of PLMN ID");
+        }
+
+        mAlphaLong = alphal;
+        mAlphaShort = alphas;
     }
 
     /** Implement the Parcelable interface */
@@ -122,7 +125,131 @@ public abstract class CellIdentity implements Parcelable {
      * @hide
      * @return The type of the cell identity
      */
-    public @Type int getType() { return mType; }
+    public @CellInfo.Type int getType() {
+        return mType;
+    }
+
+    /**
+     * @return MCC or null for CDMA
+     * @hide
+     */
+    public String getMccString() {
+        return mMccStr;
+    }
+
+    /**
+     * @return MNC or null for CDMA
+     * @hide
+     */
+    public String getMncString() {
+        return mMncStr;
+    }
+
+    /**
+     * Returns the channel number of the cell identity.
+     *
+     * @hide
+     * @return The channel number, or {@link #INVALID_CHANNEL_NUMBER} if not implemented
+     */
+    public int getChannelNumber() {
+        return INVALID_CHANNEL_NUMBER;
+    }
+
+    /**
+     * @return The long alpha tag associated with the current scan result (may be the operator
+     * name string or extended operator name string). May be null if unknown.
+     */
+    @Nullable
+    public CharSequence getOperatorAlphaLong() {
+        return mAlphaLong;
+    }
+
+    /**
+     * @hide
+     */
+    public void setOperatorAlphaLong(String alphaLong) {
+        mAlphaLong = alphaLong;
+    }
+
+    /**
+     * @return The short alpha tag associated with the current scan result (may be the operator
+     * name string or extended operator name string).  May be null if unknown.
+     */
+    @Nullable
+    public CharSequence getOperatorAlphaShort() {
+        return mAlphaShort;
+    }
+
+    /**
+     * @hide
+     */
+    public void setOperatorAlphaShort(String alphaShort) {
+        mAlphaShort = alphaShort;
+    }
+
+    /**
+     * @return Global Cell ID
+     * @hide
+     */
+    @Nullable
+    public String getGlobalCellId() {
+        return mGlobalCellId;
+    }
+
+    /**
+     * @param ci a CellIdentity to compare to the current CellIdentity.
+     * @return true if ci has the same technology and Global Cell ID; false, otherwise.
+     * @hide
+     */
+    public boolean isSameCell(@Nullable CellIdentity ci) {
+        if (ci == null) return false;
+        if (this.getClass() != ci.getClass()) return false;
+        return TextUtils.equals(this.getGlobalCellId(), ci.getGlobalCellId());
+    }
+
+    /** @hide */
+    public @Nullable String getPlmn() {
+        if (mMccStr == null || mMncStr == null) return null;
+        return mMccStr + mMncStr;
+    }
+
+    /** @hide */
+    protected abstract void updateGlobalCellId();
+
+    /**
+     * @return a CellLocation object for this CellIdentity
+     * @hide
+     */
+    @SystemApi
+    public abstract @NonNull CellLocation asCellLocation();
+
+    /**
+     * Create and a return a new instance of CellIdentity with location-identifying information
+     * removed.
+     *
+     * @hide
+     */
+    @SystemApi
+    public abstract @NonNull CellIdentity sanitizeLocationInfo();
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof CellIdentity)) {
+            return false;
+        }
+
+        CellIdentity o = (CellIdentity) other;
+        return mType == o.mType
+                && TextUtils.equals(mMccStr, o.mMccStr)
+                && TextUtils.equals(mMncStr, o.mMncStr)
+                && TextUtils.equals(mAlphaLong, o.mAlphaLong)
+                && TextUtils.equals(mAlphaShort, o.mAlphaShort);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(mAlphaLong, mAlphaShort, mMccStr, mMncStr, mType);
+    }
 
     /**
      * Used by child classes for parceling.
@@ -134,6 +261,19 @@ public abstract class CellIdentity implements Parcelable {
         dest.writeInt(type);
         dest.writeString(mMccStr);
         dest.writeString(mMncStr);
+        dest.writeString(mAlphaLong);
+        dest.writeString(mAlphaShort);
+    }
+
+    /** Used by phone interface manager to verify if a given string is valid MccMnc
+     * @hide
+     */
+    public static boolean isValidPlmn(@NonNull String plmn) {
+        if (plmn.length() < MCC_LENGTH + MNC_MIN_LENGTH
+                || plmn.length() > MCC_LENGTH + MNC_MAX_LENGTH) {
+            return false;
+        }
+        return (isMcc(plmn.substring(0, MCC_LENGTH)) && isMnc(plmn.substring(MCC_LENGTH)));
     }
 
     /**
@@ -141,21 +281,24 @@ public abstract class CellIdentity implements Parcelable {
      * @hide
      */
     protected CellIdentity(String tag, int type, Parcel source) {
-        this(tag, type, source.readString(), source.readString());
+        this(tag, type, source.readString(), source.readString(),
+                source.readString(), source.readString());
     }
 
     /** Implement the Parcelable interface */
-    public static final Creator<CellIdentity> CREATOR =
+    public static final @android.annotation.NonNull Creator<CellIdentity> CREATOR =
             new Creator<CellIdentity>() {
                 @Override
                 public CellIdentity createFromParcel(Parcel in) {
                     int type = in.readInt();
                     switch (type) {
-                        case TYPE_GSM: return CellIdentityGsm.createFromParcelBody(in);
-                        case TYPE_WCDMA: return CellIdentityWcdma.createFromParcelBody(in);
-                        case TYPE_CDMA: return CellIdentityCdma.createFromParcelBody(in);
-                        case TYPE_LTE: return CellIdentityLte.createFromParcelBody(in);
-                        case TYPE_TDSCDMA: return CellIdentityTdscdma.createFromParcelBody(in);
+                        case CellInfo.TYPE_GSM: return CellIdentityGsm.createFromParcelBody(in);
+                        case CellInfo.TYPE_WCDMA: return CellIdentityWcdma.createFromParcelBody(in);
+                        case CellInfo.TYPE_CDMA: return CellIdentityCdma.createFromParcelBody(in);
+                        case CellInfo.TYPE_LTE: return CellIdentityLte.createFromParcelBody(in);
+                        case CellInfo.TYPE_TDSCDMA:
+                            return CellIdentityTdscdma.createFromParcelBody(in);
+                        case CellInfo.TYPE_NR: return CellIdentityNr.createFromParcelBody(in);
                         default: throw new IllegalArgumentException("Bad Cell identity Parcel");
                     }
                 }
@@ -169,5 +312,50 @@ public abstract class CellIdentity implements Parcelable {
     /** @hide */
     protected void log(String s) {
         Rlog.w(mTag, s);
+    }
+
+    /** @hide */
+    protected static final int inRangeOrUnavailable(int value, int rangeMin, int rangeMax) {
+        if (value < rangeMin || value > rangeMax) return CellInfo.UNAVAILABLE;
+        return value;
+    }
+
+    /** @hide */
+    protected static final long inRangeOrUnavailable(long value, long rangeMin, long rangeMax) {
+        if (value < rangeMin || value > rangeMax) return CellInfo.UNAVAILABLE_LONG;
+        return value;
+    }
+
+    /** @hide */
+    protected static final int inRangeOrUnavailable(
+            int value, int rangeMin, int rangeMax, int special) {
+        if ((value < rangeMin || value > rangeMax) && value != special) return CellInfo.UNAVAILABLE;
+        return value;
+    }
+
+    /** @hide */
+    private static boolean isMcc(@NonNull String mcc) {
+        // ensure no out of bounds indexing
+        if (mcc.length() != MCC_LENGTH) return false;
+
+        // Character.isDigit allows all unicode digits, not just [0-9]
+        for (int i = 0; i < MCC_LENGTH; i++) {
+            if (mcc.charAt(i) < '0' || mcc.charAt(i) > '9') return false;
+        }
+
+        return true;
+    }
+
+    /** @hide */
+    private static boolean isMnc(@NonNull String mnc) {
+        // ensure no out of bounds indexing
+        if (mnc.length() < MNC_MIN_LENGTH || mnc.length() > MNC_MAX_LENGTH) return false;
+
+        // Character.isDigit allows all unicode digits, not just [0-9]
+        for (int i = 0; i < mnc.length(); i++) {
+            if (mnc.charAt(i) < '0' || mnc.charAt(i) > '9') return false;
+        }
+
+        return true;
     }
 }

@@ -20,11 +20,24 @@ package android.service;
 option java_multiple_files = true;
 option java_outer_classname = "GraphicsStatsServiceProto";
 
+import "frameworks/base/core/proto/android/privacy.proto";
+
+// This file is based on frameworks/base/libs/hwui/protos/graphicsstats.proto.
+// Please try to keep the two files in sync.
+
 message GraphicsStatsServiceDumpProto {
+    option (android.msg_privacy).dest = DEST_AUTOMATIC;
+
     repeated GraphicsStatsProto stats = 1;
 }
 
 message GraphicsStatsProto {
+    enum PipelineType {
+        UNKNOWN = 0;
+        GL = 1;
+        VULKAN = 2;
+    }
+    option (android.msg_privacy).dest = DEST_AUTOMATIC;
 
     // The package name of the app
     optional string package_name = 1;
@@ -38,14 +51,22 @@ message GraphicsStatsProto {
     optional int64 stats_start = 3;
     optional int64 stats_end = 4;
 
-    // The aggregated statistics for the package
+    // The aggregated statistics for the package.
     optional GraphicsStatsJankSummaryProto summary = 5;
 
-    // The frame time histogram for the package
+    // The frame time histogram for the package.
     repeated GraphicsStatsHistogramBucketProto histogram = 6;
+
+    // The gpu frame time histogram for the package
+    repeated GraphicsStatsHistogramBucketProto gpu_histogram = 7;
+
+    // HWUI renders pipeline type: GL or Vulkan
+    optional PipelineType pipeline = 8;
 }
 
 message GraphicsStatsJankSummaryProto {
+    option (android.msg_privacy).dest = DEST_AUTOMATIC;
+
     // Distinct frame count.
     optional int32 total_frames = 1;
 
@@ -56,7 +77,7 @@ message GraphicsStatsJankSummaryProto {
     // Number of "missed vsync" events.
     optional int32 missed_vsync_count = 3;
 
-    // Number of "high input latency" events.
+    // Number of frames in triple-buffering scenario (high input latency)
     optional int32 high_input_latency_count = 4;
 
     // Number of "slow UI thread" events.
@@ -67,9 +88,14 @@ message GraphicsStatsJankSummaryProto {
 
     // Number of "slow draw" events.
     optional int32 slow_draw_count = 7;
+
+    // Number of frames that missed their deadline (aka, visibly janked)
+    optional int32 missed_deadline_count = 8;
 }
 
 message GraphicsStatsHistogramBucketProto {
+    option (android.msg_privacy).dest = DEST_AUTOMATIC;
+
     // Lower bound of render time in milliseconds.
     optional int32 render_millis = 1;
     // Number of frames in the bucket.

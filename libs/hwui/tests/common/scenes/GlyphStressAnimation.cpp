@@ -44,16 +44,17 @@ public:
 
         std::unique_ptr<Canvas> canvas(
                 Canvas::create_recording_canvas(container->stagingProperties().getWidth(),
-                                                container->stagingProperties().getHeight()));
+                                                container->stagingProperties().getHeight(),
+                                                container.get()));
 
         Paint paint;
         paint.setAntiAlias(true);
         paint.setColor(Color::Black);
         for (int i = 0; i < 5; i++) {
-            paint.setTextSize(10 + (frameNr % 20) + i * 20);
+            paint.getSkFont().setSize(10 + (frameNr % 20) + i * 20);
             TestUtils::drawUtf8ToCanvas(canvas.get(), text, paint, 0, 100 * (i + 2));
         }
 
-        container->setStagingDisplayList(canvas->finishRecording());
+        canvas->finishRecording(container.get());
     }
 };

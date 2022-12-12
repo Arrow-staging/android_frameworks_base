@@ -17,9 +17,7 @@
 package android.app.servertransaction;
 
 import android.annotation.IntDef;
-import android.os.Parcel;
 
-import java.io.PrintWriter;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
@@ -27,8 +25,7 @@ import java.lang.annotation.RetentionPolicy;
  * Request for lifecycle state that an activity should reach.
  * @hide
  */
-public abstract class ActivityLifecycleItem extends ClientTransactionItem {
-    private String mDescription;
+public abstract class ActivityLifecycleItem extends ActivityTransactionItem {
 
     @IntDef(prefix = { "UNDEFINED", "PRE_", "ON_" }, value = {
             UNDEFINED,
@@ -57,38 +54,8 @@ public abstract class ActivityLifecycleItem extends ClientTransactionItem {
     @LifecycleState
     public abstract int getTargetState();
 
-
-    protected ActivityLifecycleItem() {
-    }
-
-    protected ActivityLifecycleItem(Parcel in) {
-        mDescription = in.readString();
-    }
-
+    /** Called by subclasses to make sure base implementation is cleaned up */
     @Override
-    public void writeToParcel(Parcel dest, int flags) {
-        dest.writeString(mDescription);
-    }
-
-    /**
-     * Sets a description that can be retrieved later for debugging purposes.
-     * @param description Description to set.
-     * @return The {@link ActivityLifecycleItem}.
-     */
-    public ActivityLifecycleItem setDescription(String description) {
-        mDescription = description;
-        return this;
-    }
-
-    /**
-     * Retrieves description if set through {@link #setDescription(String)}.
-     */
-    public String getDescription() {
-        return mDescription;
-    }
-
-    void dump(PrintWriter pw, String prefix) {
-        pw.println(prefix + "target state:" + getTargetState());
-        pw.println(prefix + "description: " + mDescription);
+    public void recycle() {
     }
 }

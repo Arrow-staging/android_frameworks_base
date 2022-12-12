@@ -19,11 +19,11 @@ package com.android.systemui.util.wakelock;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import android.content.Context;
+import android.os.Build;
 import android.os.PowerManager;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
 
@@ -36,13 +36,14 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 public class WakeLockTest extends SysuiTestCase {
 
+    private static final String WHY = "test";
     WakeLock mWakeLock;
     PowerManager.WakeLock mInner;
 
     @Before
     public void setUp() {
         mInner = WakeLock.createPartialInner(mContext, WakeLockTest.class.getName());
-        mWakeLock = WakeLock.wrap(mInner);
+        mWakeLock = WakeLock.wrap(mInner, 20000);
     }
 
     @After
@@ -58,23 +59,15 @@ public class WakeLockTest extends SysuiTestCase {
 
     @Test
     public void wakeLock_acquire() {
-        mWakeLock.acquire();
+        mWakeLock.acquire(WHY);
         assertTrue(mInner.isHeld());
     }
 
     @Test
     public void wakeLock_release() {
-        mWakeLock.acquire();
-        mWakeLock.release();
+        mWakeLock.acquire(WHY);
+        mWakeLock.release(WHY);
         assertFalse(mInner.isHeld());
-    }
-
-    @Test
-    public void wakeLock_refCounted() {
-        mWakeLock.acquire();
-        mWakeLock.acquire();
-        mWakeLock.release();
-        assertTrue(mInner.isHeld());
     }
 
     @Test
@@ -92,5 +85,15 @@ public class WakeLockTest extends SysuiTestCase {
 
         assertTrue(ran[0]);
         assertFalse(mInner.isHeld());
+    }
+
+    @Test
+    public void prodBuild_wakeLock_releaseWithoutAcquire_noThrow() {
+        if (Build.IS_ENG) {
+            return;
+        }
+
+        // shouldn't throw an exception on production builds
+        mWakeLock.release(WHY);
     }
 }

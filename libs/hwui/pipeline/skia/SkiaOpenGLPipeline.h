@@ -16,7 +16,11 @@
 
 #pragma once
 
+#include <EGL/egl.h>
+#include <system/window.h>
+
 #include "SkiaPipeline.h"
+#include "renderstate/RenderState.h"
 
 namespace android {
 
@@ -25,37 +29,40 @@ class Bitmap;
 namespace uirenderer {
 namespace skiapipeline {
 
-class SkiaOpenGLPipeline : public SkiaPipeline {
+class SkiaOpenGLPipeline : public SkiaPipeline, public IGpuContextCallback {
 public:
     SkiaOpenGLPipeline(renderthread::RenderThread& thread);
-    virtual ~SkiaOpenGLPipeline() {}
+    virtual ~SkiaOpenGLPipeline();
 
     renderthread::MakeCurrentResult makeCurrent() override;
     renderthread::Frame getFrame() override;
-    bool draw(const renderthread::Frame& frame, const SkRect& screenDirty, const SkRect& dirty,
-              const FrameBuilder::LightGeometry& lightGeometry, LayerUpdateQueue* layerUpdateQueue,
-              const Rect& contentDrawBounds, bool opaque, bool wideColorGamut,
-              const BakedOpRenderer::LightInfo& lightInfo,
-              const std::vector<sp<RenderNode> >& renderNodes,
-              FrameInfoVisualizer* profiler) override;
+    renderthread::IRenderPipeline::DrawResult draw(const renderthread::Frame& frame,
+                                                   const SkRect& screenDirty, const SkRect& dirty,
+                                                   const LightGeometry& lightGeometry,
+                                                   LayerUpdateQueue* layerUpdateQueue,
+                                                   const Rect& contentDrawBounds, bool opaque,
+                                                   const LightInfo& lightInfo,
+                                                   const std::vector<sp<RenderNode> >& renderNodes,
+                                                   FrameInfoVisualizer* profiler) override;
+    GrSurfaceOrigin getSurfaceOrigin() override { return kBottomLeft_GrSurfaceOrigin; }
     bool swapBuffers(const renderthread::Frame& frame, bool drew, const SkRect& screenDirty,
                      FrameInfo* currentFrameInfo, bool* requireSwap) override;
-    bool copyLayerInto(DeferredLayerUpdater* layer, SkBitmap* bitmap) override;
     DeferredLayerUpdater* createTextureLayer() override;
-    bool setSurface(Surface* window, renderthread::SwapBehavior swapBehavior,
-                    renderthread::ColorMode colorMode) override;
+    bool setSurface(ANativeWindow* surface, renderthread::SwapBehavior swapBehavior) override;
     void onStop() override;
     bool isSurfaceReady() override;
     bool isContextReady() override;
 
     static void invokeFunctor(const renderthread::RenderThread& thread, Functor* functor);
-    static sk_sp<Bitmap> allocateHardwareBitmap(renderthread::RenderThread& thread,
-                                                SkBitmap& skBitmap);
+
+protected:
+    void onContextDestroyed() override;
 
 private:
     renderthread::EglManager& mEglManager;
     EGLSurface mEglSurface = EGL_NO_SURFACE;
-    bool mBufferPreserved = false;
+    sp<ANativeWindow> mNativeWindow;
+    renderthread::SwapBehavior mSwapBehavior = renderthread::SwapBehavior::kSwap_discardBuffer;
 };
 
 } /* namespace skiapipeline */

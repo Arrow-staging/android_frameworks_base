@@ -18,13 +18,13 @@
 #include <gtest/gtest.h>
 
 #include <SkClipStack.h>
-#include <SkLiteRecorder.h>
 #include <SkSurface_Base.h>
 #include <string.h>
 #include "AnimationContext.h"
 #include "DamageAccumulator.h"
 #include "FatalTestCanvas.h"
 #include "IContextFactory.h"
+#include "hwui/Paint.h"
 #include "SkiaCanvas.h"
 #include "pipeline/skia/SkiaDisplayList.h"
 #include "pipeline/skia/SkiaPipeline.h"
@@ -45,7 +45,7 @@ static void testProperty(std::function<void(RenderProperties&)> propSetupCallbac
     static const int CANVAS_HEIGHT = 100;
     class PropertyTestCanvas : public TestCanvasBase {
     public:
-        PropertyTestCanvas(std::function<void(const SkCanvas&)> callback)
+        explicit PropertyTestCanvas(std::function<void(const SkCanvas&)> callback)
                 : TestCanvasBase(CANVAS_WIDTH, CANVAS_HEIGHT), mCallback(callback) {}
         void onDrawRect(const SkRect& rect, const SkPaint& paint) override {
             EXPECT_EQ(mDrawCounter++, 0);
@@ -61,7 +61,7 @@ static void testProperty(std::function<void(RenderProperties&)> propSetupCallbac
             0, 0, CANVAS_WIDTH, CANVAS_HEIGHT,
             [propSetupCallback](RenderProperties& props, SkiaRecordingCanvas& canvas) {
                 propSetupCallback(props);
-                SkPaint paint;
+                Paint paint;
                 paint.setColor(SK_ColorWHITE);
                 canvas.drawRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, paint);
             });
@@ -111,11 +111,11 @@ TEST(RenderNodeDrawable, renderPropTransform) {
             [](RenderProperties& properties) {
                 properties.setLeftTopRightBottom(10, 10, 110, 110);
 
-                SkMatrix staticMatrix = SkMatrix::MakeScale(1.2f, 1.2f);
+                SkMatrix staticMatrix = SkMatrix::Scale(1.2f, 1.2f);
                 properties.setStaticMatrix(&staticMatrix);
 
                 // ignored, since static overrides animation
-                SkMatrix animationMatrix = SkMatrix::MakeTrans(15, 15);
+                SkMatrix animationMatrix = SkMatrix::Translate(15, 15);
                 properties.setAnimationMatrix(&animationMatrix);
 
                 properties.setTranslationX(10);

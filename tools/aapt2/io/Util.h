@@ -19,7 +19,8 @@
 
 #include <string>
 
-#include "google/protobuf/message_lite.h"
+#include "google/protobuf/message.h"
+#include "google/protobuf/io/coded_stream.h"
 
 #include "format/Archive.h"
 #include "io/File.h"
@@ -38,7 +39,7 @@ bool CopyFileToArchive(IAaptContext* context, IFile* file, const std::string& ou
 bool CopyFileToArchivePreserveCompression(IAaptContext* context, IFile* file,
                                           const std::string& out_path, IArchiveWriter* writer);
 
-bool CopyProtoToArchive(IAaptContext* context, ::google::protobuf::MessageLite* proto_msg,
+bool CopyProtoToArchive(IAaptContext* context, ::google::protobuf::Message* proto_msg,
                         const std::string& out_path, uint32_t compression_flags,
                         IArchiveWriter* writer);
 
@@ -119,6 +120,23 @@ class ZeroCopyInputAdaptor : public ::google::protobuf::io::ZeroCopyInputStream 
  private:
   DISALLOW_COPY_AND_ASSIGN(ZeroCopyInputAdaptor);
 
+  io::InputStream* in_;
+};
+
+class ProtoInputStreamReader {
+ public:
+  explicit ProtoInputStreamReader(io::InputStream* in) : in_(in) { }
+
+  /** Deserializes a Message proto from the current position in the input stream.*/
+  template <typename T> bool ReadMessage(T *message) {
+    ZeroCopyInputAdaptor adapter(in_);
+    google::protobuf::io::CodedInputStream coded_stream(&adapter);
+    coded_stream.SetTotalBytesLimit(std::numeric_limits<int32_t>::max(),
+                                    coded_stream.BytesUntilTotalBytesLimit());
+    return message->ParseFromCodedStream(&coded_stream);
+  }
+
+ private:
   io::InputStream* in_;
 };
 

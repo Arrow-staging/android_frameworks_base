@@ -17,6 +17,7 @@
 package android.webkit;
 
 import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.net.ParseException;
 import android.net.Uri;
 import android.net.WebAddress;
@@ -39,7 +40,7 @@ public final class URLUtil {
     // "file:///android_res/drawable/bar.png". Use "drawable" to refer to
     // "drawable-hdpi" directory as well.
     static final String RESOURCE_BASE = "file:///android_res/";
-    static final String FILE_BASE = "file://";
+    static final String FILE_BASE = "file:";
     static final String PROXY_BASE = "file:///cookieless_proxy/";
     static final String CONTENT_BASE = "content:";
 
@@ -139,6 +140,7 @@ public final class URLUtil {
     /**
      * @return {@code true} if the url is correctly URL encoded
      */
+    @UnsupportedAppUsage
     static boolean verifyURLEncoding(String url) {
         int count = url.length();
         if (count == 0) {
@@ -181,6 +183,7 @@ public final class URLUtil {
      * @return {@code true} if the url is a resource file.
      * @hide
      */
+    @UnsupportedAppUsage
     public static boolean isResourceUrl(String url) {
         return (null != url) && url.startsWith(RESOURCE_BASE);
     }
@@ -307,7 +310,7 @@ public final class URLUtil {
         String extension = null;
 
         // If we couldn't do anything with the hint, move toward the content disposition
-        if (filename == null && contentDisposition != null) {
+        if (contentDisposition != null) {
             filename = parseContentDisposition(contentDisposition);
             if (filename != null) {
                 int index = filename.lastIndexOf('/') + 1;
@@ -398,6 +401,7 @@ public final class URLUtil {
      * Unfortunately some servers do not quote the value so to maintain
      * consistent behaviour with other browsers, we allow unquoted values too.
      */
+    @UnsupportedAppUsage
     static String parseContentDisposition(String contentDisposition) {
         try {
             Matcher m = CONTENT_DISPOSITION_PATTERN.matcher(contentDisposition);

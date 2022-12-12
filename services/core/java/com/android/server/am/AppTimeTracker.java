@@ -28,8 +28,6 @@ import android.util.TimeUtils;
 import android.util.proto.ProtoOutputStream;
 import android.util.proto.ProtoUtils;
 
-import com.android.server.am.proto.AppTimeTrackerProto;
-
 import java.io.PrintWriter;
 
 /**
@@ -124,7 +122,7 @@ public class AppTimeTracker {
         }
     }
 
-    void writeToProto(ProtoOutputStream proto, long fieldId, boolean details) {
+    public void dumpDebug(ProtoOutputStream proto, long fieldId, boolean details) {
         final long token = proto.start(fieldId);
         proto.write(AppTimeTrackerProto.RECEIVER, mReceiver.toString());
         proto.write(AppTimeTrackerProto.TOTAL_DURATION_MS, mTotalTime);

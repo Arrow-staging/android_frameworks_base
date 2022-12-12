@@ -16,116 +16,151 @@
 
 package com.android.systemui;
 
-import android.annotation.UserIdInt;
-import android.app.Notification;
-import android.app.NotificationManager;
-import android.os.Bundle;
-import android.os.UserHandle;
-import android.service.notification.StatusBarNotification;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
-import com.android.internal.messages.nano.SystemMessageProto;
+import static android.service.notification.NotificationListenerService.REASON_APP_CANCEL;
 
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import static junit.framework.Assert.assertEquals;
+import static junit.framework.Assert.assertNull;
+import static junit.framework.TestCase.fail;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@SmallTest
-@RunWith(AndroidJUnit4.class)
-public class ForegroundServiceControllerTest extends SysuiTestCase {
-    public static @UserIdInt int USERID_ONE = 10; // UserManagerService.MIN_USER_ID;
-    public static @UserIdInt int USERID_TWO = USERID_ONE + 1;
+import android.annotation.UserIdInt;
+import android.app.AppOpsManager;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.UserHandle;
+import android.service.notification.StatusBarNotification;
+import android.testing.AndroidTestingRunner;
+import android.testing.TestableLooper;
+import android.widget.RemoteViews;
 
-    private ForegroundServiceController fsc;
+import androidx.test.filters.SmallTest;
+
+import com.android.internal.messages.nano.SystemMessageProto;
+import com.android.systemui.appops.AppOpsController;
+import com.android.systemui.statusbar.notification.collection.NotifPipeline;
+import com.android.systemui.statusbar.notification.collection.NotificationEntry;
+import com.android.systemui.statusbar.notification.collection.NotificationEntryBuilder;
+import com.android.systemui.statusbar.notification.collection.notifcollection.NotifCollectionListener;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+@SmallTest
+@RunWith(AndroidTestingRunner.class)
+@TestableLooper.RunWithLooper
+public class ForegroundServiceControllerTest extends SysuiTestCase {
+    private ForegroundServiceController mFsc;
+    private ForegroundServiceNotificationListener mListener;
+    private NotifCollectionListener mCollectionListener;
+    @Mock private AppOpsController mAppOpsController;
+    @Mock private Handler mMainHandler;
+    @Mock private NotifPipeline mNotifPipeline;
 
     @Before
     public void setUp() throws Exception {
-        fsc = new ForegroundServiceControllerImpl(mContext);
+        // allow the TestLooper to be asserted as the main thread these tests
+        allowTestableLooperAsMainThread();
+
+        MockitoAnnotations.initMocks(this);
+        mFsc = new ForegroundServiceController(mAppOpsController, mMainHandler);
+        mListener = new ForegroundServiceNotificationListener(
+                mContext, mFsc, mNotifPipeline);
+        mListener.init();
+        ArgumentCaptor<NotifCollectionListener> entryListenerCaptor =
+                ArgumentCaptor.forClass(NotifCollectionListener.class);
+        verify(mNotifPipeline).addCollectionListener(
+                entryListenerCaptor.capture());
+        mCollectionListener = entryListenerCaptor.getValue();
     }
 
     @Test
-    public void testNotificationCRUD() {
-        StatusBarNotification sbn_user1_app1_fg = makeMockFgSBN(USERID_ONE, "com.example.app1");
-        StatusBarNotification sbn_user2_app2_fg = makeMockFgSBN(USERID_TWO, "com.example.app2");
-        StatusBarNotification sbn_user1_app3_fg = makeMockFgSBN(USERID_ONE, "com.example.app3");
-        StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, "com.example.app1",
-                5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
-        StatusBarNotification sbn_user2_app1 = makeMockSBN(USERID_TWO, "com.example.app1",
-                5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
+    public void testAppOpsChangedCalledFromBgThread() {
+        try {
+            // WHEN onAppOpChanged is called from a different thread than the MainLooper
+            disallowTestableLooperAsMainThread();
+            NotificationEntry entry = createFgEntry();
+            mFsc.onAppOpChanged(
+                    AppOpsManager.OP_CAMERA,
+                    entry.getSbn().getUid(),
+                    entry.getSbn().getPackageName(),
+                    true);
 
-        assertFalse(fsc.removeNotification(sbn_user1_app3_fg));
-        assertFalse(fsc.removeNotification(sbn_user2_app2_fg));
-        assertFalse(fsc.removeNotification(sbn_user1_app1_fg));
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-        assertFalse(fsc.removeNotification(sbn_user2_app1));
-
-        fsc.addNotification(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.addNotification(sbn_user2_app2_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.addNotification(sbn_user1_app3_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.addNotification(sbn_user2_app1, NotificationManager.IMPORTANCE_DEFAULT);
-
-        // these are never added to the tracker
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-        assertFalse(fsc.removeNotification(sbn_user2_app1));
-
-        fsc.updateNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.updateNotification(sbn_user2_app1, NotificationManager.IMPORTANCE_DEFAULT);
-        // should still not be there
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-        assertFalse(fsc.removeNotification(sbn_user2_app1));
-
-        fsc.updateNotification(sbn_user2_app2_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.updateNotification(sbn_user1_app3_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.updateNotification(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
-
-        assertTrue(fsc.removeNotification(sbn_user1_app3_fg));
-        assertFalse(fsc.removeNotification(sbn_user1_app3_fg));
-
-        assertTrue(fsc.removeNotification(sbn_user2_app2_fg));
-        assertFalse(fsc.removeNotification(sbn_user2_app2_fg));
-
-        assertTrue(fsc.removeNotification(sbn_user1_app1_fg));
-        assertFalse(fsc.removeNotification(sbn_user1_app1_fg));
-
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-        assertFalse(fsc.removeNotification(sbn_user2_app1));
+            // This test is run on the TestableLooper, which is not the MainLooper, so
+            // we expect an exception to be thrown
+            fail("onAppOpChanged shouldn't be allowed to be called from a bg thread.");
+        } catch (IllegalStateException e) {
+            // THEN expect an exception
+        }
     }
 
     @Test
-    public void testDungeonPredicate() {
+    public void testAppOpsCRUD() {
+        // no crash on remove that doesn't exist
+        mFsc.onAppOpChanged(9, 1000, "pkg1", false);
+        assertNull(mFsc.getAppOps(0, "pkg1"));
+
+        // multiuser & multipackage
+        mFsc.onAppOpChanged(8, 50, "pkg1", true);
+        mFsc.onAppOpChanged(1, 60, "pkg3", true);
+        mFsc.onAppOpChanged(7, 500000, "pkg2", true);
+
+        assertEquals(1, mFsc.getAppOps(0, "pkg1").size());
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(8));
+
+        assertEquals(1, mFsc.getAppOps(UserHandle.getUserId(500000), "pkg2").size());
+        assertTrue(mFsc.getAppOps(UserHandle.getUserId(500000), "pkg2").contains(7));
+
+        assertEquals(1, mFsc.getAppOps(0, "pkg3").size());
+        assertTrue(mFsc.getAppOps(0, "pkg3").contains(1));
+
+        // multiple ops for the same package
+        mFsc.onAppOpChanged(9, 50, "pkg1", true);
+        mFsc.onAppOpChanged(5, 50, "pkg1", true);
+
+        assertEquals(3, mFsc.getAppOps(0, "pkg1").size());
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(8));
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(9));
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(5));
+
+        assertEquals(1, mFsc.getAppOps(UserHandle.getUserId(500000), "pkg2").size());
+        assertTrue(mFsc.getAppOps(UserHandle.getUserId(500000), "pkg2").contains(7));
+
+        // remove one of the multiples
+        mFsc.onAppOpChanged(9, 50, "pkg1", false);
+        assertEquals(2, mFsc.getAppOps(0, "pkg1").size());
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(8));
+        assertTrue(mFsc.getAppOps(0, "pkg1").contains(5));
+
+        // remove last op
+        mFsc.onAppOpChanged(1, 60, "pkg3", false);
+        assertNull(mFsc.getAppOps(0, "pkg3"));
+    }
+
+    @Test
+    public void testDisclosurePredicate() {
         StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, "com.example.app1",
                 5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
-        StatusBarNotification sbn_user1_dungeon = makeMockSBN(USERID_ONE, "android",
+        StatusBarNotification sbn_user1_disclosure = makeMockSBN(USERID_ONE, "android",
                 SystemMessageProto.SystemMessage.NOTE_FOREGROUND_SERVICES,
                 null, Notification.FLAG_NO_CLEAR);
 
-        assertTrue(fsc.isDungeonNotification(sbn_user1_dungeon));
-        assertFalse(fsc.isDungeonNotification(sbn_user1_app1));
+        assertTrue(mFsc.isDisclosureNotification(sbn_user1_disclosure));
+        assertFalse(mFsc.isDisclosureNotification(sbn_user1_app1));
     }
 
     @Test
-    public void testDungeonCRUD() {
-        StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, "com.example.app1",
-                5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
-        StatusBarNotification sbn_user1_dungeon = makeMockSBN(USERID_ONE, "android",
-                SystemMessageProto.SystemMessage.NOTE_FOREGROUND_SERVICES,
-                null, Notification.FLAG_NO_CLEAR);
-
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
-        fsc.addNotification(sbn_user1_dungeon, NotificationManager.IMPORTANCE_DEFAULT);
-
-        fsc.removeNotification(sbn_user1_dungeon);
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-    }
-
-    @Test
-    public void testNeedsDungeonAfterRemovingUnrelatedNotification() {
+    public void testNeedsDisclosureAfterRemovingUnrelatedNotification() {
         final String PKG1 = "com.example.app100";
 
         StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, PKG1,
@@ -133,21 +168,21 @@ public class ForegroundServiceControllerTest extends SysuiTestCase {
         StatusBarNotification sbn_user1_app1_fg = makeMockFgSBN(USERID_ONE, PKG1);
 
         // first add a normal notification
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
+        entryAdded(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
         // nothing required yet
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
         // now the app starts a fg service
-        fsc.addNotification(makeMockDungeon(USERID_ONE, new String[]{ PKG1 }),
+        entryAdded(makeMockDisclosure(USERID_ONE, new String[]{PKG1}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
         // add the fg notification
-        fsc.addNotification(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE)); // app1 has got it covered
+        entryAdded(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE)); // app1 has got it covered
         // remove the boring notification
-        fsc.removeNotification(sbn_user1_app1);
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE)); // app1 has STILL got it covered
-        assertTrue(fsc.removeNotification(sbn_user1_app1_fg));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
+        entryRemoved(sbn_user1_app1);
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE)); // app1 has STILL got it covered
+        entryRemoved(sbn_user1_app1_fg);
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
     }
 
     @Test
@@ -157,131 +192,245 @@ public class ForegroundServiceControllerTest extends SysuiTestCase {
 
         StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, PKG1,
                 5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
+        entryAdded(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
 
         // no services are "running"
-        fsc.addNotification(makeMockDungeon(USERID_ONE, null),
+        entryAdded(makeMockDisclosure(USERID_ONE, null),
                 NotificationManager.IMPORTANCE_DEFAULT);
 
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
-        fsc.updateNotification(makeMockDungeon(USERID_ONE, new String[]{PKG1}),
+        entryUpdated(makeMockDisclosure(USERID_ONE, new String[]{PKG1}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
         // switch to different package
-        fsc.updateNotification(makeMockDungeon(USERID_ONE, new String[]{PKG2}),
+        entryUpdated(makeMockDisclosure(USERID_ONE, new String[]{PKG2}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
-        fsc.updateNotification(makeMockDungeon(USERID_TWO, new String[]{PKG1}),
+        entryUpdated(makeMockDisclosure(USERID_TWO, new String[]{PKG1}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_TWO)); // finally user2 needs one too
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_TWO)); // finally user2 needs one too
 
-        fsc.updateNotification(makeMockDungeon(USERID_ONE, new String[]{PKG2, PKG1}),
+        entryUpdated(makeMockDisclosure(USERID_ONE, new String[]{PKG2, PKG1}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
-        fsc.removeNotification(makeMockDungeon(USERID_ONE, null /*unused*/));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryRemoved(makeMockDisclosure(USERID_ONE, null /*unused*/));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
-        fsc.removeNotification(makeMockDungeon(USERID_TWO, null /*unused*/));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryRemoved(makeMockDisclosure(USERID_TWO, null /*unused*/));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
     }
 
     @Test
-    public void testDungeonBasic() {
+    public void testDisclosureBasic() {
         final String PKG1 = "com.example.app0";
 
         StatusBarNotification sbn_user1_app1 = makeMockSBN(USERID_ONE, PKG1,
                 5000, "monkeys", Notification.FLAG_AUTO_CANCEL);
         StatusBarNotification sbn_user1_app1_fg = makeMockFgSBN(USERID_ONE, PKG1);
 
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT); // not fg
-        fsc.addNotification(makeMockDungeon(USERID_ONE, new String[]{ PKG1 }),
+        entryAdded(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT); // not fg
+        entryAdded(makeMockDisclosure(USERID_ONE, new String[]{PKG1}),
                 NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
-        fsc.addNotification(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE)); // app1 has got it covered
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
+        entryAdded(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE)); // app1 has got it covered
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
         // let's take out the other notification and see what happens.
 
-        fsc.removeNotification(sbn_user1_app1);
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE)); // still covered by sbn_user1_app1_fg
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryRemoved(sbn_user1_app1);
+        assertFalse(
+                mFsc.isDisclosureNeededForUser(USERID_ONE)); // still covered by sbn_user1_app1_fg
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
         // let's attempt to downgrade the notification from FLAG_FOREGROUND and see what we get
         StatusBarNotification sbn_user1_app1_fg_sneaky = makeMockFgSBN(USERID_ONE, PKG1);
         sbn_user1_app1_fg_sneaky.getNotification().flags = 0;
-        fsc.updateNotification(sbn_user1_app1_fg_sneaky, NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryUpdated(sbn_user1_app1_fg_sneaky,
+                NotificationManager.IMPORTANCE_DEFAULT);
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
         // ok, ok, we'll put it back
         sbn_user1_app1_fg_sneaky.getNotification().flags = Notification.FLAG_FOREGROUND_SERVICE;
-        fsc.updateNotification(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryUpdated(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_DEFAULT);
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
-        assertTrue(fsc.removeNotification(sbn_user1_app1_fg_sneaky));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE)); // should be required!
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryRemoved(sbn_user1_app1_fg_sneaky);
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE)); // should be required!
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
 
         // now let's test an upgrade
-        fsc.addNotification(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        entryAdded(sbn_user1_app1, NotificationManager.IMPORTANCE_DEFAULT);
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
         sbn_user1_app1.getNotification().flags |= Notification.FLAG_FOREGROUND_SERVICE;
-        fsc.updateNotification(sbn_user1_app1,
+        entryUpdated(sbn_user1_app1,
                 NotificationManager.IMPORTANCE_DEFAULT); // this is now a fg notification
 
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
 
         // remove it, make sure we're out of compliance again
-        assertTrue(fsc.removeNotification(sbn_user1_app1)); // was fg, should return true
-        assertFalse(fsc.removeNotification(sbn_user1_app1));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
-        assertTrue(fsc.isDungeonNeededForUser(USERID_ONE));
+        entryRemoved(sbn_user1_app1); // was fg, should return true
+        entryRemoved(sbn_user1_app1);
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+
+        // importance upgrade
+        entryAdded(sbn_user1_app1_fg, NotificationManager.IMPORTANCE_MIN);
+        assertTrue(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
+        sbn_user1_app1.getNotification().flags |= Notification.FLAG_FOREGROUND_SERVICE;
+        entryUpdated(sbn_user1_app1_fg,
+                NotificationManager.IMPORTANCE_DEFAULT); // this is now a fg notification
 
         // finally, let's turn off the service
-        fsc.addNotification(makeMockDungeon(USERID_ONE, null),
+        entryAdded(makeMockDisclosure(USERID_ONE, null),
                 NotificationManager.IMPORTANCE_DEFAULT);
 
-        assertFalse(fsc.isDungeonNeededForUser(USERID_ONE));
-        assertFalse(fsc.isDungeonNeededForUser(USERID_TWO));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_ONE));
+        assertFalse(mFsc.isDisclosureNeededForUser(USERID_TWO));
     }
 
-    private StatusBarNotification makeMockSBN(int userid, String pkg, int id, String tag,
+    @Test
+    public void testNoNotifsNorAppOps_noSystemAlertWarningRequired() {
+        // no notifications nor app op signals that this package/userId requires system alert
+        // warning
+        assertFalse(mFsc.isSystemAlertWarningNeeded(USERID_ONE, "any"));
+    }
+
+    @Test
+    public void testCustomLayouts_systemAlertWarningRequired() {
+        // GIVEN a notification with a custom layout
+        final String pkg = "com.example.app0";
+        StatusBarNotification customLayoutNotif = makeMockSBN(USERID_ONE, pkg, 0,
+                false);
+
+        // WHEN the custom layout entry is added
+        entryAdded(customLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+
+        // THEN a system alert warning is required since there aren't any notifications that can
+        // display the app ops
+        assertTrue(mFsc.isSystemAlertWarningNeeded(USERID_ONE, pkg));
+    }
+
+    @Test
+    public void testStandardLayoutExists_noSystemAlertWarningRequired() {
+        // GIVEN two notifications (one with a custom layout, the other with a standard layout)
+        final String pkg = "com.example.app0";
+        StatusBarNotification customLayoutNotif = makeMockSBN(USERID_ONE, pkg, 0,
+                false);
+        StatusBarNotification standardLayoutNotif = makeMockSBN(USERID_ONE, pkg, 1, true);
+
+        // WHEN the entries are added
+        entryAdded(customLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+        entryAdded(standardLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+
+        // THEN no system alert warning is required, since there is at least one notification
+        // with a standard layout that can display the app ops on the notification
+        assertFalse(mFsc.isSystemAlertWarningNeeded(USERID_ONE, pkg));
+    }
+
+    @Test
+    public void testStandardLayoutRemoved_systemAlertWarningRequired() {
+        // GIVEN two notifications (one with a custom layout, the other with a standard layout)
+        final String pkg = "com.example.app0";
+        StatusBarNotification customLayoutNotif = makeMockSBN(USERID_ONE, pkg, 0,
+                false);
+        StatusBarNotification standardLayoutNotif = makeMockSBN(USERID_ONE, pkg, 1, true);
+
+        // WHEN the entries are added and then the standard layout notification is removed
+        entryAdded(customLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+        entryAdded(standardLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+        entryRemoved(standardLayoutNotif);
+
+        // THEN a system alert warning is required since there aren't any notifications that can
+        // display the app ops
+        assertTrue(mFsc.isSystemAlertWarningNeeded(USERID_ONE, pkg));
+    }
+
+    @Test
+    public void testStandardLayoutUpdatedToCustomLayout_systemAlertWarningRequired() {
+        // GIVEN a standard layout notification and then an updated version with a customLayout
+        final String pkg = "com.example.app0";
+        StatusBarNotification standardLayoutNotif = makeMockSBN(USERID_ONE, pkg, 1, true);
+        StatusBarNotification updatedToCustomLayoutNotif = makeMockSBN(USERID_ONE, pkg, 1, false);
+
+        // WHEN the entries is added and then updated to a custom layout
+        entryAdded(standardLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+        entryUpdated(updatedToCustomLayoutNotif, NotificationManager.IMPORTANCE_MIN);
+
+        // THEN a system alert warning is required since there aren't any notifications that can
+        // display the app ops
+        assertTrue(mFsc.isSystemAlertWarningNeeded(USERID_ONE, pkg));
+    }
+
+    private StatusBarNotification makeMockSBN(int userId, String pkg, int id, String tag,
             int flags) {
         final Notification n = mock(Notification.class);
+        n.extras = new Bundle();
         n.flags = flags;
-        return makeMockSBN(userid, pkg, id, tag, n);
+        return makeMockSBN(userId, pkg, id, tag, n);
     }
+
     private StatusBarNotification makeMockSBN(int userid, String pkg, int id, String tag,
             Notification n) {
         final StatusBarNotification sbn = mock(StatusBarNotification.class);
         when(sbn.getNotification()).thenReturn(n);
         when(sbn.getId()).thenReturn(id);
         when(sbn.getPackageName()).thenReturn(pkg);
-        when(sbn.getTag()).thenReturn(null);
+        when(sbn.getTag()).thenReturn(tag);
         when(sbn.getUserId()).thenReturn(userid);
         when(sbn.getUser()).thenReturn(new UserHandle(userid));
         when(sbn.getKey()).thenReturn("MOCK:"+userid+"|"+pkg+"|"+id+"|"+tag);
         return sbn;
     }
-    private StatusBarNotification makeMockFgSBN(int userid, String pkg) {
-        return makeMockSBN(userid, pkg, 1000, "foo", Notification.FLAG_FOREGROUND_SERVICE);
+
+    private StatusBarNotification makeMockSBN(int uid, String pkg, int id,
+            boolean usesStdLayout) {
+        StatusBarNotification sbn = makeMockSBN(uid, pkg, id, "foo", 0);
+        if (usesStdLayout) {
+            sbn.getNotification().contentView = null;
+            sbn.getNotification().headsUpContentView = null;
+            sbn.getNotification().bigContentView = null;
+        } else {
+            sbn.getNotification().contentView = mock(RemoteViews.class);
+        }
+        return sbn;
     }
-    private StatusBarNotification makeMockDungeon(int userid, String[] pkgs) {
+
+    private StatusBarNotification makeMockFgSBN(int uid, String pkg, int id,
+            boolean usesStdLayout) {
+        StatusBarNotification sbn =
+                makeMockSBN(uid, pkg, id, "foo", Notification.FLAG_FOREGROUND_SERVICE);
+        if (usesStdLayout) {
+            sbn.getNotification().contentView = null;
+            sbn.getNotification().headsUpContentView = null;
+            sbn.getNotification().bigContentView = null;
+        } else {
+            sbn.getNotification().contentView = mock(RemoteViews.class);
+        }
+        return sbn;
+    }
+
+    private StatusBarNotification makeMockFgSBN(int uid, String pkg) {
+        return makeMockSBN(uid, pkg, 1000, "foo", Notification.FLAG_FOREGROUND_SERVICE);
+    }
+
+    private StatusBarNotification makeMockDisclosure(int userid, String[] pkgs) {
         final Notification n = mock(Notification.class);
         n.flags = Notification.FLAG_ONGOING_EVENT;
         final Bundle extras = new Bundle();
@@ -294,4 +443,45 @@ public class ForegroundServiceControllerTest extends SysuiTestCase {
         sbn.getNotification().extras = extras;
         return sbn;
     }
+
+    private NotificationEntry addFgEntry() {
+        NotificationEntry entry = createFgEntry();
+        mCollectionListener.onEntryAdded(entry);
+        return entry;
+    }
+
+    private NotificationEntry createFgEntry() {
+        return new NotificationEntryBuilder()
+                .setSbn(makeMockFgSBN(0, TEST_PACKAGE_NAME, 1000, true))
+                .setImportance(NotificationManager.IMPORTANCE_DEFAULT)
+                .build();
+    }
+
+    private void entryRemoved(StatusBarNotification notification) {
+        mCollectionListener.onEntryRemoved(
+                new NotificationEntryBuilder()
+                        .setSbn(notification)
+                        .build(),
+                REASON_APP_CANCEL);
+    }
+
+    private void entryAdded(StatusBarNotification notification, int importance) {
+        NotificationEntry entry = new NotificationEntryBuilder()
+                .setSbn(notification)
+                .setImportance(importance)
+                .build();
+        mCollectionListener.onEntryAdded(entry);
+    }
+
+    private void entryUpdated(StatusBarNotification notification, int importance) {
+        NotificationEntry entry = new NotificationEntryBuilder()
+                .setSbn(notification)
+                .setImportance(importance)
+                .build();
+        mCollectionListener.onEntryUpdated(entry);
+    }
+
+    @UserIdInt private static final int USERID_ONE = 10; // UserManagerService.MIN_USER_ID;
+    @UserIdInt private static final int USERID_TWO = USERID_ONE + 1;
+    private static final String TEST_PACKAGE_NAME = "test";
 }

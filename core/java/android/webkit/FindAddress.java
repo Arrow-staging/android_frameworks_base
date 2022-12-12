@@ -154,7 +154,7 @@ class FindAddress {
 
     // A house number component is "one" or a number, optionally
     // followed by a single alphabetic character, or
-    private static final String HOUSE_COMPONENT = "(?:one|\\d+([a-z](?=[^a-z]|$)|st|nd|rd|th)?)";
+    private static final String HOUSE_COMPONENT = "(?:one|[0-9]+([a-z](?=[^a-z]|$)|st|nd|rd|th)?)";
 
     // House numbers are a repetition of |HOUSE_COMPONENT|, separated by -, and followed by
     // a delimiter character.
@@ -253,10 +253,10 @@ class FindAddress {
             Pattern.CASE_INSENSITIVE);
 
     private static final Pattern sSuffixedNumberRe =
-            Pattern.compile("(\\d+)(st|nd|rd|th)", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("([0-9]+)(st|nd|rd|th)", Pattern.CASE_INSENSITIVE);
 
     private static final Pattern sZipCodeRe =
-            Pattern.compile("(?:\\d{5}(?:-\\d{4})?)" + WORD_END, Pattern.CASE_INSENSITIVE);
+            Pattern.compile("(?:[0-9]{5}(?:-[0-9]{4})?)" + WORD_END, Pattern.CASE_INSENSITIVE);
 
     private static boolean checkHouseNumber(String houseNumber) {
         // Make sure that there are at most 5 digits.
@@ -429,20 +429,21 @@ class FindAddress {
 
                     // At this point we've matched a state; try to match a zip code after it.
                     Matcher zipMatcher = sWordRe.matcher(content);
-                    if (zipMatcher.find(stateMatch.end())
-                            && isValidZipCode(zipMatcher.group(0), stateMatch)) {
-                        return zipMatcher.end();
+                    if (zipMatcher.find(stateMatch.end())) {
+                        if (isValidZipCode(zipMatcher.group(0), stateMatch)) {
+                            return zipMatcher.end();
+                        }
+                    } else {
+                        // The content ends with a state but no zip
+                        // code. This is a legal match according to the
+                        // documentation. N.B. This is equivalent to the
+                        // original c++ implementation, which only allowed
+                        // the zip code to be optional at the end of the
+                        // string, which presumably is a bug.  We tried
+                        // relaxing this to work in other places but it
+                        // caused too many false positives.
+                        nonZipMatch = stateMatch.end();
                     }
-                    // The content ends with a state but no zip
-                    // code. This is a legal match according to the
-                    // documentation. N.B. This differs from the
-                    // original c++ implementation, which only allowed
-                    // the zip code to be optional at the end of the
-                    // string, which presumably is a bug.  Now we
-                    // prefer to find a match with a zip code, but
-                    // remember non-zip matches and return them if
-                    // necessary.
-                    nonZipMatch = stateMatch.end();
                 }
             }
         }

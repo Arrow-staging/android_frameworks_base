@@ -16,16 +16,32 @@
 
 #include "androidfw/LoadedArsc.h"
 
+#include "android-base/file.h"
+#include "androidfw/ResourceUtils.h"
+
 #include "TestHelpers.h"
 #include "data/basic/R.h"
 #include "data/libclient/R.h"
+#include "data/overlayable/R.h"
 #include "data/sparse/R.h"
 #include "data/styles/R.h"
+#include "data/system/R.h"
 
 namespace app = com::android::app;
 namespace basic = com::android::basic;
 namespace libclient = com::android::libclient;
+namespace overlayable = com::android::overlayable;
 namespace sparse = com::android::sparse;
+
+using ::android::base::ReadFileToString;
+using ::testing::Eq;
+using ::testing::Ge;
+using ::testing::IsNull;
+using ::testing::NotNull;
+using ::testing::SizeIs;
+using ::testing::StrEq;
+
+using PolicyFlags = android::ResTable_overlayable_policy_header::PolicyFlags;
 
 namespace android {
 
@@ -34,40 +50,25 @@ TEST(LoadedArscTest, LoadSinglePackageArsc) {
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/styles/styles.apk", "resources.arsc",
                                       &contents));
 
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
+  auto loaded_arsc = LoadedArsc::Load(reinterpret_cast<const void*>(contents.data()),
+                                                                    contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
-  const std::vector<std::unique_ptr<const LoadedPackage>>& packages = loaded_arsc->GetPackages();
-  ASSERT_EQ(1u, packages.size());
-  EXPECT_EQ(std::string("com.android.app"), packages[0]->GetPackageName());
-  EXPECT_EQ(0x7f, packages[0]->GetPackageId());
+  const LoadedPackage* package =
+      loaded_arsc->GetPackageById(get_package_id(app::R::string::string_one));
+  ASSERT_THAT(package, NotNull());
+  EXPECT_THAT(package->GetPackageName(), StrEq("com.android.app"));
+  EXPECT_THAT(package->GetPackageId(), Eq(0x7f));
 
-  ResTable_config config;
-  memset(&config, 0, sizeof(config));
-  config.sdkVersion = 24;
+  const uint8_t type_index = get_type_id(app::R::string::string_one) - 1;
+  const uint16_t entry_index = get_entry_id(app::R::string::string_one);
 
-  FindEntryResult entry;
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(type_index);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
 
-  ASSERT_TRUE(loaded_arsc->FindEntry(app::R::string::string_one, config, &entry));
-  ASSERT_NE(nullptr, entry.entry);
-}
-
-TEST(LoadedArscTest, FindDefaultEntry) {
-  std::string contents;
-  ASSERT_TRUE(
-      ReadFileFromZipToString(GetTestDataPath() + "/basic/basic.apk", "resources.arsc", &contents));
-
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
-
-  ResTable_config desired_config;
-  memset(&desired_config, 0, sizeof(desired_config));
-  desired_config.language[0] = 'd';
-  desired_config.language[1] = 'e';
-
-  FindEntryResult entry;
-  ASSERT_TRUE(loaded_arsc->FindEntry(basic::R::string::test1, desired_config, &entry));
-  ASSERT_NE(nullptr, entry.entry);
+  auto type = type_spec->type_entries[0];
+  ASSERT_TRUE(LoadedPackage::GetEntry(type.type, entry_index).has_value());
 }
 
 TEST(LoadedArscTest, LoadSparseEntryApp) {
@@ -75,16 +76,55 @@ TEST(LoadedArscTest, LoadSparseEntryApp) {
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/sparse/sparse.apk", "resources.arsc",
                                       &contents));
 
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
-  ResTable_config config;
-  memset(&config, 0, sizeof(config));
-  config.sdkVersion = 26;
+  const LoadedPackage* package =
+      loaded_arsc->GetPackageById(get_package_id(sparse::R::integer::foo_9));
+  ASSERT_THAT(package, NotNull());
 
-  FindEntryResult entry;
-  ASSERT_TRUE(loaded_arsc->FindEntry(sparse::R::integer::foo_9, config, &entry));
-  ASSERT_NE(nullptr, entry.entry);
+  const uint8_t type_index = get_type_id(sparse::R::integer::foo_9) - 1;
+  const uint16_t entry_index = get_entry_id(sparse::R::integer::foo_9);
+
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(type_index);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
+
+  auto type = type_spec->type_entries[0];
+  ASSERT_TRUE(LoadedPackage::GetEntry(type.type, entry_index).has_value());
+}
+
+TEST(LoadedArscTest, FindSparseEntryApp) {
+  std::string contents;
+  ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/sparse/sparse.apk", "resources.arsc",
+                                      &contents));
+
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
+
+  const LoadedPackage* package =
+      loaded_arsc->GetPackageById(get_package_id(sparse::R::string::only_v26));
+  ASSERT_THAT(package, NotNull());
+
+  const uint8_t type_index = get_type_id(sparse::R::string::only_v26) - 1;
+  const uint16_t entry_index = get_entry_id(sparse::R::string::only_v26);
+
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(type_index);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
+
+  // Ensure that AAPT2 sparsely encoded the v26 config as expected.
+  auto type_entry = std::find_if(
+    type_spec->type_entries.begin(), type_spec->type_entries.end(),
+    [](const TypeSpec::TypeEntry& x) { return x.config.sdkVersion == 26; });
+  ASSERT_NE(type_entry, type_spec->type_entries.end());
+  ASSERT_NE(type_entry->type->flags & ResTable_type::FLAG_SPARSE, 0);
+
+  // Test fetching a resource with only sparsely encoded configs by name.
+  auto id = package->FindEntryByName(u"string", u"only_v26");
+  ASSERT_EQ(id.value(), fix_package_id(sparse::R::string::only_v26, 0));
 }
 
 TEST(LoadedArscTest, LoadSharedLibrary) {
@@ -92,15 +132,15 @@ TEST(LoadedArscTest, LoadSharedLibrary) {
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/lib_one/lib_one.apk", "resources.arsc",
                                       &contents));
 
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
   const auto& packages = loaded_arsc->GetPackages();
-  ASSERT_EQ(1u, packages.size());
-
+  ASSERT_THAT(packages, SizeIs(1u));
   EXPECT_TRUE(packages[0]->IsDynamic());
-  EXPECT_EQ(std::string("com.android.lib_one"), packages[0]->GetPackageName());
-  EXPECT_EQ(0, packages[0]->GetPackageId());
+  EXPECT_THAT(packages[0]->GetPackageName(), StrEq("com.android.lib_one"));
+  EXPECT_THAT(packages[0]->GetPackageId(), Eq(0));
 
   const auto& dynamic_pkg_map = packages[0]->GetDynamicPackageMap();
 
@@ -113,26 +153,25 @@ TEST(LoadedArscTest, LoadAppLinkedAgainstSharedLibrary) {
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/libclient/libclient.apk",
                                       "resources.arsc", &contents));
 
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
   const auto& packages = loaded_arsc->GetPackages();
-  ASSERT_EQ(1u, packages.size());
-
+  ASSERT_THAT(packages, SizeIs(1u));
   EXPECT_FALSE(packages[0]->IsDynamic());
-  EXPECT_EQ(std::string("com.android.libclient"), packages[0]->GetPackageName());
-  EXPECT_EQ(0x7f, packages[0]->GetPackageId());
+  EXPECT_THAT(packages[0]->GetPackageName(), StrEq("com.android.libclient"));
+  EXPECT_THAT(packages[0]->GetPackageId(), Eq(0x7f));
 
   const auto& dynamic_pkg_map = packages[0]->GetDynamicPackageMap();
 
   // The library has two dependencies.
-  ASSERT_EQ(2u, dynamic_pkg_map.size());
+  ASSERT_THAT(dynamic_pkg_map, SizeIs(2u));
+  EXPECT_THAT(dynamic_pkg_map[0].package_name, StrEq("com.android.lib_one"));
+  EXPECT_THAT(dynamic_pkg_map[0].package_id, Eq(0x02));
 
-  EXPECT_EQ(std::string("com.android.lib_one"), dynamic_pkg_map[0].package_name);
-  EXPECT_EQ(0x02, dynamic_pkg_map[0].package_id);
-
-  EXPECT_EQ(std::string("com.android.lib_two"), dynamic_pkg_map[1].package_name);
-  EXPECT_EQ(0x03, dynamic_pkg_map[1].package_id);
+  EXPECT_THAT(dynamic_pkg_map[1].package_name, StrEq("com.android.lib_two"));
+  EXPECT_THAT(dynamic_pkg_map[1].package_id, Eq(0x03));
 }
 
 TEST(LoadedArscTest, LoadAppAsSharedLibrary) {
@@ -140,87 +179,229 @@ TEST(LoadedArscTest, LoadAppAsSharedLibrary) {
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/appaslib/appaslib.apk",
                                       "resources.arsc", &contents));
 
-  std::unique_ptr<const LoadedArsc> loaded_arsc =
-      LoadedArsc::Load(StringPiece(contents), nullptr /*loaded_idmap*/, false /*system*/,
-                       true /*load_as_shared_library*/);
-  ASSERT_NE(nullptr, loaded_arsc);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length(),
+                                                                   nullptr /* loaded_idmap */,
+                                                                   PROPERTY_DYNAMIC);
+  ASSERT_THAT(loaded_arsc, NotNull());
 
   const auto& packages = loaded_arsc->GetPackages();
-  ASSERT_EQ(1u, packages.size());
-
+  ASSERT_THAT(packages, SizeIs(1u));
   EXPECT_TRUE(packages[0]->IsDynamic());
-  EXPECT_EQ(0x7f, packages[0]->GetPackageId());
+  EXPECT_THAT(packages[0]->GetPackageId(), Eq(0x7f));
 }
 
 TEST(LoadedArscTest, LoadFeatureSplit) {
   std::string contents;
   ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/feature/feature.apk", "resources.arsc",
                                       &contents));
-  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(StringPiece(contents));
-  ASSERT_NE(nullptr, loaded_arsc);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
-  ResTable_config desired_config;
-  memset(&desired_config, 0, sizeof(desired_config));
+  const LoadedPackage* package =
+      loaded_arsc->GetPackageById(get_package_id(basic::R::string::test3));
+  ASSERT_THAT(package, NotNull());
 
-  FindEntryResult entry;
-  ASSERT_TRUE(loaded_arsc->FindEntry(basic::R::string::test3, desired_config, &entry));
+  uint8_t type_index = get_type_id(basic::R::string::test3) - 1;
+  uint8_t entry_index = get_entry_id(basic::R::string::test3);
 
-  size_t len;
-  const char16_t* type_name16 = entry.type_string_ref.string16(&len);
-  ASSERT_NE(nullptr, type_name16);
-  ASSERT_NE(0u, len);
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(type_index);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
 
-  std::string type_name = util::Utf16ToUtf8(StringPiece16(type_name16, len));
-  EXPECT_EQ(std::string("string"), type_name);
+  auto type_name16 = package->GetTypeStringPool()->stringAt(type_spec->type_spec->id - 1);
+  ASSERT_TRUE(type_name16.has_value());
+  EXPECT_THAT(util::Utf16ToUtf8(*type_name16), StrEq("string"));
+
+  ASSERT_TRUE(LoadedPackage::GetEntry(type_spec->type_entries[0].type, entry_index).has_value());
 }
 
-class MockLoadedIdmap : public LoadedIdmap {
- public:
-  MockLoadedIdmap() : LoadedIdmap() {
-    local_header_.magic = kIdmapMagic;
-    local_header_.version = kIdmapCurrentVersion;
-    local_header_.target_package_id = 0x08;
-    local_header_.type_count = 1;
-    header_ = &local_header_;
+// AAPT(2) generates resource tables with chunks in a certain order. The rule is that
+// a RES_TABLE_TYPE_TYPE with id `i` must always be preceded by a RES_TABLE_TYPE_SPEC_TYPE with
+// id `i`. The RES_TABLE_TYPE_SPEC_TYPE does not need to be directly preceding, however.
+//
+// AAPT(2) generates something like:
+//   RES_TABLE_TYPE_SPEC_TYPE id=1
+//   RES_TABLE_TYPE_TYPE id=1
+//   RES_TABLE_TYPE_SPEC_TYPE id=2
+//   RES_TABLE_TYPE_TYPE id=2
+//
+// But the following is valid too:
+//   RES_TABLE_TYPE_SPEC_TYPE id=1
+//   RES_TABLE_TYPE_SPEC_TYPE id=2
+//   RES_TABLE_TYPE_TYPE id=1
+//   RES_TABLE_TYPE_TYPE id=2
+//
+TEST(LoadedArscTest, LoadOutOfOrderTypeSpecs) {
+  std::string contents;
+  ASSERT_TRUE(
+      ReadFileFromZipToString(GetTestDataPath() + "/out_of_order_types/out_of_order_types.apk",
+                              "resources.arsc", &contents));
 
-    entry_header = util::unique_cptr<IdmapEntry_header>(
-        (IdmapEntry_header*)::malloc(sizeof(IdmapEntry_header) + sizeof(uint32_t)));
-    entry_header->target_type_id = 0x03;
-    entry_header->overlay_type_id = 0x02;
-    entry_header->entry_id_offset = 1;
-    entry_header->entry_count = 1;
-    entry_header->entries[0] = 0x00000000u;
-    type_map_[entry_header->overlay_type_id] = entry_header.get();
-  }
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_THAT(loaded_arsc, NotNull());
 
- private:
-  Idmap_header local_header_;
-  util::unique_cptr<IdmapEntry_header> entry_header;
-};
+  ASSERT_THAT(loaded_arsc->GetPackages(), SizeIs(1u));
+  const auto& package = loaded_arsc->GetPackages()[0];
+  ASSERT_THAT(package, NotNull());
 
-TEST(LoadedArscTest, LoadOverlay) {
-  std::string contents, overlay_contents;
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(0);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
+
+  type_spec = package->GetTypeSpecByTypeIndex(1);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
+}
+
+TEST(LoadedArscTest, LoadOverlayable) {
+  std::string contents;
+  ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/overlayable/overlayable.apk",
+                                      "resources.arsc", &contents));
+
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+
+  ASSERT_THAT(loaded_arsc, NotNull());
+  const LoadedPackage* package = loaded_arsc->GetPackageById(
+      get_package_id(overlayable::R::string::not_overlayable));
+
+  const OverlayableInfo* info = package->GetOverlayableInfo(
+      overlayable::R::string::not_overlayable);
+  ASSERT_THAT(info, IsNull());
+
+  info = package->GetOverlayableInfo(overlayable::R::string::overlayable1);
+  ASSERT_THAT(info, NotNull());
+  EXPECT_THAT(info->name, Eq("OverlayableResources1"));
+  EXPECT_THAT(info->actor, Eq("overlay://theme"));
+  EXPECT_THAT(info->policy_flags, Eq(PolicyFlags::PUBLIC));
+
+  info = package->GetOverlayableInfo(overlayable::R::string::overlayable2);
+  ASSERT_THAT(info, NotNull());
+  EXPECT_THAT(info->name, Eq("OverlayableResources1"));
+  EXPECT_THAT(info->actor, Eq("overlay://theme"));
+  EXPECT_THAT(info->policy_flags,
+              Eq(PolicyFlags::SYSTEM_PARTITION
+                 | PolicyFlags::PRODUCT_PARTITION));
+
+  info = package->GetOverlayableInfo(overlayable::R::string::overlayable3);
+  ASSERT_THAT(info, NotNull());
+  EXPECT_THAT(info->name, Eq("OverlayableResources2"));
+  EXPECT_THAT(info->actor, Eq("overlay://com.android.overlayable"));
+  EXPECT_THAT(info->policy_flags,
+              Eq(PolicyFlags::VENDOR_PARTITION
+                 | PolicyFlags::PRODUCT_PARTITION));
+
+  info = package->GetOverlayableInfo(overlayable::R::string::overlayable4);
+  EXPECT_THAT(info->name, Eq("OverlayableResources1"));
+  EXPECT_THAT(info->actor, Eq("overlay://theme"));
+  ASSERT_THAT(info, NotNull());
+  EXPECT_THAT(info->policy_flags, Eq(PolicyFlags::PUBLIC));
+}
+
+TEST(LoadedArscTest, ResourceIdentifierIterator) {
+  std::string contents;
   ASSERT_TRUE(
       ReadFileFromZipToString(GetTestDataPath() + "/basic/basic.apk", "resources.arsc", &contents));
-  ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/overlay/overlay.apk", "resources.arsc",
-                                      &overlay_contents));
 
-  MockLoadedIdmap loaded_idmap;
-
-  std::unique_ptr<const LoadedArsc> loaded_arsc =
-      LoadedArsc::Load(StringPiece(overlay_contents), &loaded_idmap);
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
   ASSERT_NE(nullptr, loaded_arsc);
 
-  ResTable_config desired_config;
-  memset(&desired_config, 0, sizeof(desired_config));
+  const std::vector<std::unique_ptr<const LoadedPackage>>& packages = loaded_arsc->GetPackages();
+  ASSERT_EQ(1u, packages.size());
+  ASSERT_EQ(std::string("com.android.basic"), packages[0]->GetPackageName());
 
-  FindEntryResult entry;
-  ASSERT_TRUE(loaded_arsc->FindEntry(0x08030001u, desired_config, &entry));
+  const auto& loaded_package = packages[0];
+  auto iter = loaded_package->begin();
+  auto end = loaded_package->end();
+
+  ASSERT_NE(end, iter);
+  ASSERT_EQ(0x7f010000u, *iter++);
+  ASSERT_EQ(0x7f010001u, *iter++);
+  ASSERT_EQ(0x7f020000u, *iter++);
+  ASSERT_EQ(0x7f020001u, *iter++);
+  ASSERT_EQ(0x7f030000u, *iter++);
+  ASSERT_EQ(0x7f030001u, *iter++);
+  ASSERT_EQ(0x7f030002u, *iter++);  // note: string without default, excluded by aapt2 dump
+  ASSERT_EQ(0x7f040000u, *iter++);
+  ASSERT_EQ(0x7f040001u, *iter++);
+  ASSERT_EQ(0x7f040002u, *iter++);
+  ASSERT_EQ(0x7f040003u, *iter++);
+  ASSERT_EQ(0x7f040004u, *iter++);
+  ASSERT_EQ(0x7f040005u, *iter++);
+  ASSERT_EQ(0x7f040006u, *iter++);
+  ASSERT_EQ(0x7f040007u, *iter++);
+  ASSERT_EQ(0x7f040008u, *iter++);
+  ASSERT_EQ(0x7f040009u, *iter++);
+  ASSERT_EQ(0x7f04000au, *iter++);
+  ASSERT_EQ(0x7f04000bu, *iter++);
+  ASSERT_EQ(0x7f04000cu, *iter++);
+  ASSERT_EQ(0x7f04000du, *iter++);
+  ASSERT_EQ(0x7f050000u, *iter++);
+  ASSERT_EQ(0x7f050001u, *iter++);
+  ASSERT_EQ(0x7f060000u, *iter++);
+  ASSERT_EQ(0x7f070000u, *iter++);
+  ASSERT_EQ(0x7f070001u, *iter++);
+  ASSERT_EQ(0x7f070002u, *iter++);
+  ASSERT_EQ(0x7f070003u, *iter++);
+  ASSERT_EQ(end, iter);
+}
+
+TEST(LoadedArscTest, GetOverlayableMap) {
+  std::string contents;
+  ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/overlayable/overlayable.apk",
+                                      "resources.arsc", &contents));
+
+  std::unique_ptr<const LoadedArsc> loaded_arsc = LoadedArsc::Load(contents.data(),
+                                                                   contents.length());
+  ASSERT_NE(nullptr, loaded_arsc);
+
+  const std::vector<std::unique_ptr<const LoadedPackage>>& packages = loaded_arsc->GetPackages();
+  ASSERT_EQ(1u, packages.size());
+  ASSERT_EQ(std::string("com.android.overlayable"), packages[0]->GetPackageName());
+
+  const auto map = packages[0]->GetOverlayableMap();
+  ASSERT_EQ(3, map.size());
+  ASSERT_EQ(map.at("OverlayableResources1"), "overlay://theme");
+  ASSERT_EQ(map.at("OverlayableResources2"), "overlay://com.android.overlayable");
+  ASSERT_EQ(map.at("OverlayableResources3"), "");
+}
+
+TEST(LoadedArscTest, LoadCustomLoader) {
+  auto asset = AssetsProvider::CreateAssetFromFile(GetTestDataPath() + "/loader/resources.arsc");
+  ASSERT_THAT(asset, NotNull());
+
+  const StringPiece data(
+      reinterpret_cast<const char*>(asset->getBuffer(true /*wordAligned*/)),
+      asset->getLength());
+
+  std::unique_ptr<const LoadedArsc> loaded_arsc =
+      LoadedArsc::Load(data.data(), data.length(), nullptr, PROPERTY_LOADER);
+  ASSERT_THAT(loaded_arsc, NotNull());
+
+  const LoadedPackage* package =
+      loaded_arsc->GetPackageById(get_package_id(overlayable::R::string::overlayable11));
+  ASSERT_THAT(package, NotNull());
+  EXPECT_THAT(package->GetPackageName(), StrEq("com.android.loader"));
+  EXPECT_THAT(package->GetPackageId(), Eq(0x7f));
+
+  const uint8_t type_index = get_type_id(overlayable::R::string::overlayable11) - 1;
+  const uint16_t entry_index = get_entry_id(overlayable::R::string::overlayable11);
+
+  const TypeSpec* type_spec = package->GetTypeSpecByTypeIndex(type_index);
+  ASSERT_THAT(type_spec, NotNull());
+  ASSERT_THAT(type_spec->type_entries.size(), Ge(1u));
+
+  auto type = type_spec->type_entries[0];
+  ASSERT_TRUE(LoadedPackage::GetEntry(type.type, entry_index).has_value());
 }
 
 // structs with size fields (like Res_value, ResTable_entry) should be
 // backwards and forwards compatible (aka checking the size field against
 // sizeof(Res_value) might not be backwards compatible.
-TEST(LoadedArscTest, LoadingShouldBeForwardsAndBackwardsCompatible) { ASSERT_TRUE(false); }
+// TEST(LoadedArscTest, LoadingShouldBeForwardsAndBackwardsCompatible) { ASSERT_TRUE(false); }
 
 }  // namespace android

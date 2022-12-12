@@ -424,4 +424,56 @@ TEST(ResTableTest, GetConfigurationsReturnsUniqueList) {
   EXPECT_EQ(1, std::count(locales.begin(), locales.end(), String8("sv")));
 }
 
+TEST(ResTableTest, TruncatedEncodeLength) {
+  std::string contents;
+  ASSERT_TRUE(ReadFileFromZipToString(GetTestDataPath() + "/length_decode/length_decode_valid.apk",
+                                      "resources.arsc", &contents));
+
+  ResTable table;
+  ASSERT_EQ(NO_ERROR, table.add(contents.data(), contents.size()));
+
+  Res_value val;
+  ssize_t block = table.getResource(0x7f010001, &val, MAY_NOT_BE_BAG);
+  ASSERT_GE(block, 0);
+  ASSERT_EQ(Res_value::TYPE_STRING, val.dataType);
+
+  const ResStringPool* pool = table.getTableStringBlock(block);
+  ASSERT_TRUE(pool != NULL);
+  ASSERT_LT(val.data, pool->size());
+
+  // Make sure a string with a truncated length is read to its correct length
+  auto target_str8 = pool->string8At(val.data);
+  ASSERT_TRUE(target_str8.has_value());
+  ASSERT_EQ(size_t(40076), String8(target_str8->data(), target_str8->size()).size());
+  ASSERT_EQ(target_str8->data()[40075], ']');
+
+  auto target_str16 = pool->stringAt(val.data);
+  ASSERT_TRUE(target_str16.has_value());
+  ASSERT_EQ(size_t(40076), String16(target_str16->data(), target_str16->size()).size());
+  ASSERT_EQ(target_str8->data()[40075], (char16_t) ']');
+
+  // Load an edited apk with the null terminator removed from the end of the
+  // string
+  std::string invalid_contents;
+  ASSERT_TRUE(ReadFileFromZipToString(
+      GetTestDataPath() + "/length_decode/length_decode_invalid.apk", "resources.arsc",
+      &invalid_contents));
+  ResTable invalid_table;
+  ASSERT_EQ(NO_ERROR, invalid_table.add(invalid_contents.data(), invalid_contents.size()));
+
+  Res_value invalid_val;
+  ssize_t invalid_block = invalid_table.getResource(0x7f010001, &invalid_val, MAY_NOT_BE_BAG);
+  ASSERT_GE(invalid_block, 0);
+  ASSERT_EQ(Res_value::TYPE_STRING, invalid_val.dataType);
+
+  const ResStringPool* invalid_pool = invalid_table.getTableStringBlock(invalid_block);
+  ASSERT_TRUE(invalid_pool != NULL);
+  ASSERT_LT(invalid_val.data, invalid_pool->size());
+
+  // Make sure a string with a truncated length that is not null terminated errors
+  // and does not return the string
+  ASSERT_FALSE(invalid_pool->string8At(invalid_val.data).has_value());
+  ASSERT_FALSE(invalid_pool->stringAt(invalid_val.data).has_value());
+}
+
 }  // namespace android

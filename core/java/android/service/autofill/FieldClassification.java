@@ -22,12 +22,11 @@ import android.annotation.NonNull;
 import android.os.Parcel;
 import android.view.autofill.Helper;
 
-import com.android.internal.util.Preconditions;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Represents the <a href="AutofillService.html#FieldClassification">field classification</a>
@@ -39,7 +38,7 @@ public final class FieldClassification {
 
     /** @hide */
     public FieldClassification(@NonNull ArrayList<Match> matches) {
-        mMatches = Preconditions.checkNotNull(matches);
+        mMatches = Objects.requireNonNull(matches);
         Collections.sort(mMatches, new Comparator<Match>() {
             @Override
             public int compare(Match o1, Match o2) {
@@ -108,21 +107,21 @@ public final class FieldClassification {
      */
     public static final class Match {
 
-        private final String mRemoteId;
+        private final String mCategoryId;
         private final float mScore;
 
         /** @hide */
-        public Match(String remoteId, float score) {
-            mRemoteId = Preconditions.checkNotNull(remoteId);
+        public Match(String categoryId, float score) {
+            mCategoryId = Objects.requireNonNull(categoryId);
             mScore = score;
         }
 
         /**
-         * Gets the remote id of the {@link UserData} entry.
+         * Gets the category id of the {@link UserData} entry.
          */
         @NonNull
-        public String getRemoteId() {
-            return mRemoteId;
+        public String getCategoryId() {
+            return mCategoryId;
         }
 
         /**
@@ -149,13 +148,13 @@ public final class FieldClassification {
         public String toString() {
             if (!sDebug) return super.toString();
 
-            final StringBuilder string = new StringBuilder("Match: remoteId=");
-            Helper.appendRedacted(string, mRemoteId);
+            final StringBuilder string = new StringBuilder("Match: categoryId=");
+            Helper.appendRedacted(string, mCategoryId);
             return string.append(", score=").append(mScore).toString();
         }
 
         private void writeToParcel(@NonNull Parcel parcel) {
-            parcel.writeString(mRemoteId);
+            parcel.writeString(mCategoryId);
             parcel.writeFloat(mScore);
         }
 

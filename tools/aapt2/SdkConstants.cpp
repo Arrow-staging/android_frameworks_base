@@ -18,15 +18,16 @@
 
 #include <algorithm>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using android::StringPiece;
 
 namespace aapt {
 
-static const char* sDevelopmentSdkCodeName = "P";
-static ApiVersion sDevelopmentSdkLevel = 28;
+static ApiVersion sDevelopmentSdkLevel = 10000;
+static const auto sDevelopmentSdkCodeNames =
+    std::unordered_set<StringPiece>({"Q", "R", "S", "Sv2", "Tiramisu"});
 
 static const std::vector<std::pair<uint16_t, ApiVersion>> sAttrIdMap = {
     {0x021c, 1},
@@ -54,6 +55,11 @@ static const std::vector<std::pair<uint16_t, ApiVersion>> sAttrIdMap = {
     {0x0530, SDK_NOUGAT_MR1},
     {0x0568, SDK_O},
     {0x056d, SDK_O_MR1},
+    {0x0586, SDK_P},
+    {0x0606, SDK_Q},
+    {0x0616, SDK_R},
+    {0x064b, SDK_S},
+    {0x064c, SDK_S_V2},
 };
 
 static bool less_entry_id(const std::pair<uint16_t, ApiVersion>& p, uint16_t entryId) {
@@ -71,8 +77,10 @@ ApiVersion FindAttributeSdkLevel(const ResourceId& id) {
   return iter->second;
 }
 
-std::pair<StringPiece, ApiVersion> GetDevelopmentSdkCodeNameAndVersion() {
-  return std::make_pair(StringPiece(sDevelopmentSdkCodeName), sDevelopmentSdkLevel);
+std::optional<ApiVersion> GetDevelopmentSdkCodeNameVersion(const StringPiece& code_name) {
+  return (sDevelopmentSdkCodeNames.find(code_name) == sDevelopmentSdkCodeNames.end())
+             ? std::optional<ApiVersion>()
+             : sDevelopmentSdkLevel;
 }
 
 }  // namespace aapt

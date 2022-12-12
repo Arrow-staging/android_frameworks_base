@@ -18,8 +18,14 @@ include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := tests
 LOCAL_SRC_FILES := $(call all-java-files-under,src)
 LOCAL_PACKAGE_NAME := OverlayHostTests_UpdateOverlay
-LOCAL_COMPATIBILITY_SUITE := general-tests
-LOCAL_STATIC_JAVA_LIBRARIES := android-support-test
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../../../NOTICE
+LOCAL_SDK_VERSION := current
+LOCAL_COMPATIBILITY_SUITE := device-tests
+LOCAL_STATIC_JAVA_LIBRARIES := androidx.test.rules
+LOCAL_USE_AAPT2 := true
+LOCAL_AAPT_FLAGS := --no-resource-removal
 include $(BUILD_PACKAGE)
 
 my_package_prefix := com.android.server.om.hosttest.framework_overlay
@@ -27,7 +33,11 @@ my_package_prefix := com.android.server.om.hosttest.framework_overlay
 include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := tests
 LOCAL_PACKAGE_NAME := OverlayHostTests_FrameworkOverlayV1
-LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../../../NOTICE
+LOCAL_SDK_VERSION := current
+LOCAL_COMPATIBILITY_SUITE := device-tests
 LOCAL_CERTIFICATE := platform
 LOCAL_AAPT_FLAGS := --custom-package $(my_package_prefix)_v1
 LOCAL_AAPT_FLAGS += --version-code 1 --version-name v1
@@ -38,7 +48,11 @@ include $(BUILD_PACKAGE)
 include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := tests
 LOCAL_PACKAGE_NAME := OverlayHostTests_FrameworkOverlayV2
-LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../../../NOTICE
+LOCAL_SDK_VERSION := current
+LOCAL_COMPATIBILITY_SUITE := device-tests
 LOCAL_CERTIFICATE := platform
 LOCAL_AAPT_FLAGS := --custom-package $(my_package_prefix)_v2
 LOCAL_AAPT_FLAGS += --version-code 2 --version-name v2
@@ -51,23 +65,29 @@ my_package_prefix := com.android.server.om.hosttest.app_overlay
 include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := tests
 LOCAL_PACKAGE_NAME := OverlayHostTests_AppOverlayV1
-LOCAL_COMPATIBILITY_SUITE := general-tests
-LOCAL_CERTIFICATE := platform
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../../../NOTICE
+LOCAL_SDK_VERSION := current
+LOCAL_COMPATIBILITY_SUITE := device-tests
 LOCAL_AAPT_FLAGS := --custom-package $(my_package_prefix)_v1
 LOCAL_AAPT_FLAGS += --version-code 1 --version-name v1
 LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/app/v1/res
-LOCAL_MANIFEST_FILE := app/AndroidManifest.xml
+LOCAL_MANIFEST_FILE := app/v1/AndroidManifest.xml
 include $(BUILD_PACKAGE)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := tests
 LOCAL_PACKAGE_NAME := OverlayHostTests_AppOverlayV2
-LOCAL_COMPATIBILITY_SUITE := general-tests
-LOCAL_CERTIFICATE := platform
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+LOCAL_LICENSE_CONDITIONS := notice
+LOCAL_NOTICE_FILE  := $(LOCAL_PATH)/../../../../../../NOTICE
+LOCAL_SDK_VERSION := current
+LOCAL_COMPATIBILITY_SUITE := device-tests
 LOCAL_AAPT_FLAGS := --custom-package $(my_package_prefix)_v2
 LOCAL_AAPT_FLAGS += --version-code 2 --version-name v2
 LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/app/v2/res
-LOCAL_MANIFEST_FILE := app/AndroidManifest.xml
+LOCAL_MANIFEST_FILE := app/v2/AndroidManifest.xml
 include $(BUILD_PACKAGE)
 
 my_package_prefix :=

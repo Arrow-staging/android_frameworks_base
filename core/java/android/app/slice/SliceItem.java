@@ -46,7 +46,7 @@ import java.util.List;
  * <li>{@link #FORMAT_IMAGE}</li>
  * <li>{@link #FORMAT_ACTION}</li>
  * <li>{@link #FORMAT_INT}</li>
- * <li>{@link #FORMAT_TIMESTAMP}</li>
+ * <li>{@link #FORMAT_LONG}</li>
  * <li>{@link #FORMAT_REMOTE_INPUT}</li>
  * <li>{@link #FORMAT_BUNDLE}</li>
  *
@@ -67,7 +67,7 @@ public final class SliceItem implements Parcelable {
             FORMAT_IMAGE,
             FORMAT_ACTION,
             FORMAT_INT,
-            FORMAT_TIMESTAMP,
+            FORMAT_LONG,
             FORMAT_REMOTE_INPUT,
             FORMAT_BUNDLE,
     })
@@ -98,9 +98,15 @@ public final class SliceItem implements Parcelable {
      */
     public static final String FORMAT_INT = "int";
     /**
-     * A {@link SliceItem} that contains a timestamp.
+     * A {@link SliceItem} that contains a long.
      */
-    public static final String FORMAT_TIMESTAMP = "timestamp";
+    public static final String FORMAT_LONG = "long";
+    /**
+     * @deprecated TO BE REMOVED
+     * @removed
+     */
+    @Deprecated
+    public static final String FORMAT_TIMESTAMP = FORMAT_LONG;
     /**
      * A {@link SliceItem} that contains a {@link RemoteInput}.
      */
@@ -118,6 +124,14 @@ public final class SliceItem implements Parcelable {
     private final String mFormat;
     private final String mSubType;
     private final Object mObj;
+
+    /**
+     * @hide
+     */
+    public SliceItem(Object obj, @SliceType String format, String subType,
+            List<String> hints) {
+        this(obj, format, subType, hints.toArray(new String[hints.size()]));
+    }
 
     /**
      * @hide
@@ -155,7 +169,7 @@ public final class SliceItem implements Parcelable {
      * <li>{@link #FORMAT_IMAGE}</li>
      * <li>{@link #FORMAT_ACTION}</li>
      * <li>{@link #FORMAT_INT}</li>
-     * <li>{@link #FORMAT_TIMESTAMP}</li>
+     * <li>{@link #FORMAT_LONG}</li>
      * <li>{@link #FORMAT_REMOTE_INPUT}</li>
      * <li>{@link #FORMAT_BUNDLE}</li>
      * @see #getSubType() ()
@@ -236,8 +250,17 @@ public final class SliceItem implements Parcelable {
     }
 
     /**
-     * @return The timestamp held by this {@link #FORMAT_TIMESTAMP} SliceItem
+     * @return The long held by this {@link #FORMAT_LONG} SliceItem
      */
+    public long getLong() {
+        return (Long) mObj;
+    }
+
+    /**
+     * @deprecated replaced by {@link #getLong()}
+     * @removed
+     */
+    @Deprecated
     public long getTimestamp() {
         return (Long) mObj;
     }
@@ -355,7 +378,7 @@ public final class SliceItem implements Parcelable {
         throw new RuntimeException("Unsupported type " + type);
     }
 
-    public static final Creator<SliceItem> CREATOR = new Creator<SliceItem>() {
+    public static final @android.annotation.NonNull Creator<SliceItem> CREATOR = new Creator<SliceItem>() {
         @Override
         public SliceItem createFromParcel(Parcel in) {
             return new SliceItem(in);

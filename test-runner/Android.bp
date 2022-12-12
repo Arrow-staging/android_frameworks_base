@@ -16,47 +16,83 @@
 
 // Build the android.test.runner library
 // =====================================
-java_library {
+package {
+    // See: http://go/android-license-faq
+    default_applicable_licenses: ["frameworks_base_test-runner_license"],
+}
+
+license {
+    name: "frameworks_base_test-runner_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+        "SPDX-license-identifier-CPL-1.0",
+    ],
+    license_text: [
+        "src/junit/cpl-v10.html",
+    ],
+}
+
+java_sdk_library {
     name: "android.test.runner",
 
-    // Needs to be consistent with the repackaged version of this make target.
-    java_version: "1.8",
-    srcs: ["src/**/*.java"],
+    srcs: [":android-test-runner-sources"],
 
-    no_framework_libs: true,
+    errorprone: {
+        javacflags: ["-Xep:DepAnn:ERROR"],
+    },
+
     libs: [
-        "framework",
         "android.test.base",
         "android.test.mock",
     ],
+    stub_only_libs: [
+        "android.test.base",
+        "android.test.mock",
+    ],
+    api_packages: [
+        "android.test",
+        "android.test.suitebuilder",
+        "junit.runner",
+        "junit.textui",
+    ],
+
+    compile_dex: true,
+    default_to_stubs: true,
+    dist_group: "android",
 }
 
 // Build the android.test.runner-minus-junit library
 // =================================================
-// This is only intended for inclusion in the android.test.legacy and
-// legacy-android-test static libraries and must not be used elsewhere.
+// This is only intended for inclusion in the android.test.legacy static
+// library and must not be used elsewhere.
 java_library {
     name: "android.test.runner-minus-junit",
 
     srcs: ["src/android/**/*.java"],
 
-    no_framework_libs: true,
+    sdk_version: "current",
     libs: [
-        "framework",
-        "android.test.base",
+        "android.test.base_static",
         "android.test.mock",
         "junit",
     ],
 }
 
-// Build the repackaged.android.test.runner library
-// ================================================
-java_library_static {
-    name: "repackaged.android.test.runner",
+// Make the current.txt available for use by the cts/tests/signature tests.
+// ========================================================================
+filegroup {
+    name: "android-test-runner-current.txt",
+    visibility: [
+        "//cts/tests/signature/api",
+    ],
+    srcs: [
+        "api/current.txt",
+    ],
+}
 
-    static_libs: ["android.test.runner"],
-
-    jarjar_rules: "jarjar-rules.txt",
-    // Pin java_version until jarjar is certified to support later versions. http://b/72703434
-    java_version: "1.8",
+filegroup {
+    name: "android-test-runner-sources",
+    srcs: ["src/**/*.java"],
+    path: "src",
 }

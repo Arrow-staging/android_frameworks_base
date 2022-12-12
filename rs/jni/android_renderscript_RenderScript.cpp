@@ -24,17 +24,17 @@
 #include <utils/misc.h>
 #include <inttypes.h>
 
+#include <android-base/macros.h>
 #include <androidfw/Asset.h>
-#include <androidfw/AssetManager.h>
+#include <androidfw/AssetManager2.h>
 #include <androidfw/ResourceTypes.h>
 #include <android-base/macros.h>
 
 #include "jni.h"
-#include <nativehelper/JNIHelp.h>
+#include <android/graphics/bitmap.h>
 #include "android_runtime/AndroidRuntime.h"
 #include "android_runtime/android_view_Surface.h"
 #include "android_runtime/android_util_AssetManager.h"
-#include "android/graphics/GraphicsJNI.h"
 #include "android/native_window.h"
 #include "android/native_window_jni.h"
 
@@ -1318,17 +1318,20 @@ nAllocationGenerateMipmaps(JNIEnv *_env, jobject _this, jlong con, jlong alloc)
     rsAllocationGenerateMipmaps((RsContext)con, (RsAllocation)alloc);
 }
 
+static size_t computeByteSize(const android::graphics::Bitmap& bitmap) {
+    AndroidBitmapInfo info = bitmap.getInfo();
+    return info.height * info.stride;
+}
+
 static jlong
 nAllocationCreateFromBitmap(JNIEnv *_env, jobject _this, jlong con, jlong type, jint mip,
                             jobject jbitmap, jint usage)
 {
-    SkBitmap bitmap;
-    GraphicsJNI::getSkBitmap(_env, jbitmap, &bitmap);
-
+    android::graphics::Bitmap bitmap(_env, jbitmap);
     const void* ptr = bitmap.getPixels();
     jlong id = (jlong)(uintptr_t)rsAllocationCreateFromBitmap((RsContext)con,
                                                   (RsType)type, (RsAllocationMipmapControl)mip,
-                                                  ptr, bitmap.computeByteSize(), usage);
+                                                  ptr, computeByteSize(bitmap), usage);
     return id;
 }
 
@@ -1336,9 +1339,7 @@ static jlong
 nAllocationCreateBitmapBackedAllocation(JNIEnv *_env, jobject _this, jlong con, jlong type,
                                         jint mip, jobject jbitmap, jint usage)
 {
-    SkBitmap bitmap;
-    GraphicsJNI::getSkBitmap(_env, jbitmap, &bitmap);
-
+    android::graphics::Bitmap bitmap(_env, jbitmap);
     const void* ptr = bitmap.getPixels();
     jlong id = (jlong)(uintptr_t)rsAllocationCreateTyped((RsContext)con,
                                             (RsType)type, (RsAllocationMipmapControl)mip,
@@ -1350,38 +1351,33 @@ static jlong
 nAllocationCubeCreateFromBitmap(JNIEnv *_env, jobject _this, jlong con, jlong type, jint mip,
                                 jobject jbitmap, jint usage)
 {
-    SkBitmap bitmap;
-    GraphicsJNI::getSkBitmap(_env, jbitmap, &bitmap);
-
+    android::graphics::Bitmap bitmap(_env, jbitmap);
     const void* ptr = bitmap.getPixels();
     jlong id = (jlong)(uintptr_t)rsAllocationCubeCreateFromBitmap((RsContext)con,
                                                       (RsType)type, (RsAllocationMipmapControl)mip,
-                                                      ptr, bitmap.computeByteSize(), usage);
+                                                      ptr, computeByteSize(bitmap), usage);
     return id;
 }
 
 static void
 nAllocationCopyFromBitmap(JNIEnv *_env, jobject _this, jlong con, jlong alloc, jobject jbitmap)
 {
-    SkBitmap bitmap;
-    GraphicsJNI::getSkBitmap(_env, jbitmap, &bitmap);
-    int w = bitmap.width();
-    int h = bitmap.height();
+    android::graphics::Bitmap bitmap(_env, jbitmap);
+    int w = bitmap.getInfo().width;
+    int h = bitmap.getInfo().height;
 
     const void* ptr = bitmap.getPixels();
     rsAllocation2DData((RsContext)con, (RsAllocation)alloc, 0, 0,
                        0, RS_ALLOCATION_CUBEMAP_FACE_POSITIVE_X,
-                       w, h, ptr, bitmap.computeByteSize(), 0);
+                       w, h, ptr, computeByteSize(bitmap), 0);
 }
 
 static void
 nAllocationCopyToBitmap(JNIEnv *_env, jobject _this, jlong con, jlong alloc, jobject jbitmap)
 {
-    SkBitmap bitmap;
-    GraphicsJNI::getSkBitmap(_env, jbitmap, &bitmap);
-
+    android::graphics::Bitmap bitmap(_env, jbitmap);
     void* ptr = bitmap.getPixels();
-    rsAllocationCopyToBitmap((RsContext)con, (RsAllocation)alloc, ptr, bitmap.computeByteSize());
+    rsAllocationCopyToBitmap((RsContext)con, (RsAllocation)alloc, ptr, computeByteSize(bitmap));
     bitmap.notifyPixelsChanged();
 }
 
@@ -1664,18 +1660,22 @@ nFileA3DCreateFromAssetStream(JNIEnv *_env, jobject _this, jlong con, jlong nati
 static jlong
 nFileA3DCreateFromAsset(JNIEnv *_env, jobject _this, jlong con, jobject _assetMgr, jstring _path)
 {
-    AssetManager* mgr = assetManagerForJavaObject(_env, _assetMgr);
+    Guarded<AssetManager2>* mgr = AssetManagerForJavaObject(_env, _assetMgr);
     if (mgr == nullptr) {
         return 0;
     }
 
     AutoJavaStringToUTF8 str(_env, _path);
-    Asset* asset = mgr->open(str.c_str(), Asset::ACCESS_BUFFER);
-    if (asset == nullptr) {
-        return 0;
+    std::unique_ptr<Asset> asset;
+    {
+        ScopedLock<AssetManager2> locked_mgr(*mgr);
+        asset = locked_mgr->Open(str.c_str(), Asset::ACCESS_BUFFER);
+        if (asset == nullptr) {
+            return 0;
+        }
     }
 
-    jlong id = (jlong)(uintptr_t)rsaFileA3DCreateFromAsset((RsContext)con, asset);
+    jlong id = (jlong)(uintptr_t)rsaFileA3DCreateFromAsset((RsContext)con, asset.release());
     return id;
 }
 
@@ -1752,22 +1752,25 @@ static jlong
 nFontCreateFromAsset(JNIEnv *_env, jobject _this, jlong con, jobject _assetMgr, jstring _path,
                      jfloat fontSize, jint dpi)
 {
-    AssetManager* mgr = assetManagerForJavaObject(_env, _assetMgr);
+    Guarded<AssetManager2>* mgr = AssetManagerForJavaObject(_env, _assetMgr);
     if (mgr == nullptr) {
         return 0;
     }
 
     AutoJavaStringToUTF8 str(_env, _path);
-    Asset* asset = mgr->open(str.c_str(), Asset::ACCESS_BUFFER);
-    if (asset == nullptr) {
-        return 0;
+    std::unique_ptr<Asset> asset;
+    {
+        ScopedLock<AssetManager2> locked_mgr(*mgr);
+        asset = locked_mgr->Open(str.c_str(), Asset::ACCESS_BUFFER);
+        if (asset == nullptr) {
+            return 0;
+        }
     }
 
     jlong id = (jlong)(uintptr_t)rsFontCreateFromMemory((RsContext)con,
                                            str.c_str(), str.length(),
                                            fontSize, dpi,
                                            asset->getBuffer(false), asset->getLength());
-    delete asset;
     return id;
 }
 
@@ -2858,9 +2861,9 @@ static const JNINativeMethod methods[] = {
 {"rsnTypeCreate",                    "(JJIIIZZI)J",                           (void*)nTypeCreate },
 {"rsnTypeGetNativeData",             "(JJ[J)V",                               (void*)nTypeGetNativeData },
 
-{"rsnAllocationCreateTyped",         "(JJIIJ)J",                               (void*)nAllocationCreateTyped },
+{"rsnAllocationCreateTyped",         "(JJIIJ)J",                              (void*)nAllocationCreateTyped },
 {"rsnAllocationCreateFromBitmap",    "(JJILandroid/graphics/Bitmap;I)J",      (void*)nAllocationCreateFromBitmap },
-{"rsnAllocationCreateBitmapBackedAllocation",    "(JJILandroid/graphics/Bitmap;I)J",      (void*)nAllocationCreateBitmapBackedAllocation },
+{"rsnAllocationCreateBitmapBackedAllocation",    "(JJILandroid/graphics/Bitmap;I)J", (void*)nAllocationCreateBitmapBackedAllocation },
 {"rsnAllocationCubeCreateFromBitmap","(JJILandroid/graphics/Bitmap;I)J",      (void*)nAllocationCubeCreateFromBitmap },
 
 {"rsnAllocationCopyFromBitmap",      "(JJLandroid/graphics/Bitmap;)V",        (void*)nAllocationCopyFromBitmap },

@@ -16,12 +16,15 @@
 
 package com.android.server.pm;
 
+import android.annotation.AnyThread;
+import android.annotation.WorkerThread;
 import android.app.IInstantAppResolver;
 import android.app.InstantAppResolverService;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.InstantAppRequestInfo;
 import android.content.pm.InstantAppResolveInfo;
 import android.os.Binder;
 import android.os.Build;
@@ -37,6 +40,7 @@ import android.util.Slog;
 import android.util.TimedRemoteCaller;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.os.BackgroundThread;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -68,6 +72,7 @@ final class InstantAppResolverConnection implements DeathRecipient {
     private static final int STATE_IDLE    = 0; // no bind operation is ongoing
     private static final int STATE_BINDING = 1; // someone is binding and waiting
     private static final int STATE_PENDING = 2; // a bind is pending, but the caller is not waiting
+    private final Handler mBgHandler;
 
     @GuardedBy("mLock")
     private int mBindState = STATE_IDLE;
@@ -78,15 +83,16 @@ final class InstantAppResolverConnection implements DeathRecipient {
             Context context, ComponentName componentName, String action) {
         mContext = context;
         mIntent = new Intent(action).setComponent(componentName);
+        mBgHandler = BackgroundThread.getHandler();
     }
 
-    public final List<InstantAppResolveInfo> getInstantAppResolveInfoList(Intent sanitizedIntent,
-            int hashPrefix[], String token) throws ConnectionException {
+    public List<InstantAppResolveInfo> getInstantAppResolveInfoList(InstantAppRequestInfo request)
+            throws ConnectionException {
         throwIfCalledOnMainThread();
         IInstantAppResolver target = null;
         try {
             try {
-                target = getRemoteInstanceLazy(token);
+                target = getRemoteInstanceLazy(request.getToken());
             } catch (TimeoutException e) {
                 throw new ConnectionException(ConnectionException.FAILURE_BIND);
             } catch (InterruptedException e) {
@@ -94,7 +100,7 @@ final class InstantAppResolverConnection implements DeathRecipient {
             }
             try {
                 return mGetInstantAppResolveInfoCaller
-                        .getInstantAppResolveInfoList(target, sanitizedIntent, hashPrefix, token);
+                        .getInstantAppResolveInfoList(target, request);
             } catch (TimeoutException e) {
                 throw new ConnectionException(ConnectionException.FAILURE_CALL);
             } catch (RemoteException ignore) {
@@ -107,8 +113,8 @@ final class InstantAppResolverConnection implements DeathRecipient {
         return null;
     }
 
-    public final void getInstantAppIntentFilterList(Intent sanitizedIntent, int hashPrefix[],
-            String token, PhaseTwoCallback callback, Handler callbackHandler, final long startTime)
+    public void getInstantAppIntentFilterList(InstantAppRequestInfo request,
+            PhaseTwoCallback callback, Handler callbackHandler, final long startTime)
             throws ConnectionException {
         final IRemoteCallback remoteCallback = new IRemoteCallback.Stub() {
             @Override
@@ -120,9 +126,8 @@ final class InstantAppResolverConnection implements DeathRecipient {
             }
         };
         try {
-            getRemoteInstanceLazy(token)
-                    .getInstantAppIntentFilterList(sanitizedIntent, hashPrefix, token,
-                            remoteCallback);
+            getRemoteInstanceLazy(request.getToken())
+                    .getInstantAppIntentFilterList(request, remoteCallback);
         } catch (TimeoutException e) {
             throw new ConnectionException(ConnectionException.FAILURE_BIND);
         } catch (InterruptedException e) {
@@ -131,9 +136,10 @@ final class InstantAppResolverConnection implements DeathRecipient {
         }
     }
 
+    @WorkerThread
     private IInstantAppResolver getRemoteInstanceLazy(String token)
             throws ConnectionException, TimeoutException, InterruptedException {
-        long binderToken = Binder.clearCallingIdentity();
+        final long binderToken = Binder.clearCallingIdentity();
         try {
             return bind(token);
         } finally {
@@ -157,6 +163,7 @@ final class InstantAppResolverConnection implements DeathRecipient {
         }
     }
 
+    @WorkerThread
     private IInstantAppResolver bind(String token)
             throws ConnectionException, TimeoutException, InterruptedException {
         boolean doUnbind = false;
@@ -241,6 +248,19 @@ final class InstantAppResolverConnection implements DeathRecipient {
         }
     }
 
+    @AnyThread
+    void optimisticBind() {
+        mBgHandler.post(() -> {
+            try {
+                if (bind("Optimistic Bind") != null && DEBUG_INSTANT) {
+                    Slog.i(TAG, "Optimistic bind succeeded.");
+                }
+            } catch (ConnectionException | TimeoutException | InterruptedException e) {
+                Slog.e(TAG, "Optimistic bind failed.", e);
+            }
+        });
+    }
+
     @Override
     public void binderDied() {
         if (DEBUG_INSTANT) {
@@ -249,6 +269,7 @@ final class InstantAppResolverConnection implements DeathRecipient {
         synchronized (mLock) {
             handleBinderDiedLocked();
         }
+        optimisticBind();
     }
 
     @GuardedBy("mLock")
@@ -330,12 +351,10 @@ final class InstantAppResolverConnection implements DeathRecipient {
             };
         }
 
-        public List<InstantAppResolveInfo> getInstantAppResolveInfoList(
-                IInstantAppResolver target, Intent sanitizedIntent,  int hashPrefix[], String token)
-                        throws RemoteException, TimeoutException {
+        public List<InstantAppResolveInfo> getInstantAppResolveInfoList(IInstantAppResolver target,
+                InstantAppRequestInfo request) throws RemoteException, TimeoutException {
             final int sequence = onBeforeRemoteCall();
-            target.getInstantAppResolveInfoList(sanitizedIntent, hashPrefix, token, sequence,
-                    mCallback);
+            target.getInstantAppResolveInfoList(request, sequence, mCallback);
             return getResultTimed(sequence);
         }
     }

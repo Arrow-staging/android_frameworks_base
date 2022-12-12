@@ -16,18 +16,19 @@
 
 package com.android.internal.os;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
-
 import android.os.BatteryStats;
 import android.os.Parcel;
-import android.support.test.filters.SmallTest;
 import android.util.Log;
+
+import androidx.test.filters.SmallTest;
 
 import junit.framework.Assert;
 import junit.framework.TestCase;
 
 import org.mockito.Mockito;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
 
 /**
  * Provides test cases for android.os.BatteryStats.
@@ -40,29 +41,29 @@ public class BatteryStatsTimeBaseTest extends TestCase {
         public void populate(long uptime, long realtime, boolean running, long pastUptime,
                 long uptimeStart, long pastRealtime, long realtimeStart,
                 long unpluggedUptime, long unpluggedRealtime) {
-            mUptime = uptime;
-            mRealtime = realtime;
+            mUptimeUs = uptime;
+            mRealtimeUs = realtime;
             mRunning = running;
-            mPastUptime = pastUptime;
-            mUptimeStart = uptimeStart;
-            mPastRealtime = pastRealtime;
-            mRealtimeStart = realtimeStart;
-            mUnpluggedUptime = unpluggedUptime;
-            mUnpluggedRealtime = unpluggedRealtime;
+            mPastUptimeUs = pastUptime;
+            mUptimeStartUs = uptimeStart;
+            mPastRealtimeUs = pastRealtime;
+            mRealtimeStartUs = realtimeStart;
+            mUnpluggedUptimeUs = unpluggedUptime;
+            mUnpluggedRealtimeUs = unpluggedRealtime;
         }
 
         public void verify(long uptime, long realtime, boolean running, long pastUptime,
                 long uptimeStart, long pastRealtime, long realtimeStart,
                 long unpluggedUptime, long unpluggedRealtime) {
-            Assert.assertEquals(uptime, mUptime);
-            Assert.assertEquals(realtime, mRealtime);
+            Assert.assertEquals(uptime, mUptimeUs);
+            Assert.assertEquals(realtime, mRealtimeUs);
             Assert.assertEquals(running, mRunning);
-            Assert.assertEquals(pastUptime, mPastUptime);
-            Assert.assertEquals(uptimeStart, mUptimeStart);
-            Assert.assertEquals(pastRealtime, mPastRealtime);
-            Assert.assertEquals(realtimeStart, mRealtimeStart);
-            Assert.assertEquals(unpluggedUptime, mUnpluggedUptime);
-            Assert.assertEquals(unpluggedRealtime, mUnpluggedRealtime);
+            Assert.assertEquals(pastUptime, mPastUptimeUs);
+            Assert.assertEquals(uptimeStart, mUptimeStartUs);
+            Assert.assertEquals(pastRealtime, mPastRealtimeUs);
+            Assert.assertEquals(realtimeStart, mRealtimeStartUs);
+            Assert.assertEquals(unpluggedUptime, mUnpluggedUptimeUs);
+            Assert.assertEquals(unpluggedRealtime, mUnpluggedRealtimeUs);
         }
     }
 
@@ -281,12 +282,6 @@ public class BatteryStatsTimeBaseTest extends TestCase {
 
         Assert.assertEquals(100+300+666-400,
                 tb.computeUptime(666, BatteryStats.STATS_SINCE_CHARGED));
-        Assert.assertEquals(300+666-400,
-                tb.computeUptime(666, BatteryStats.STATS_CURRENT));
-        Assert.assertEquals(300+666-400-50,
-                tb.computeUptime(666, BatteryStats.STATS_SINCE_UNPLUGGED));
-
-        Assert.assertEquals(0, tb.computeUptime(666, 6000));
     }
 
     /**
@@ -300,12 +295,6 @@ public class BatteryStatsTimeBaseTest extends TestCase {
 
         Assert.assertEquals(200+500+6666-600,
                 tb.computeRealtime(6666, BatteryStats.STATS_SINCE_CHARGED));
-        Assert.assertEquals(500+6666-600,
-                tb.computeRealtime(6666, BatteryStats.STATS_CURRENT));
-        Assert.assertEquals(500+6666-600-60,
-                tb.computeRealtime(6666, BatteryStats.STATS_SINCE_UNPLUGGED));
-
-        Assert.assertEquals(0, tb.computeUptime(666, 6000));
     }
 
     /**

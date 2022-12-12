@@ -41,6 +41,7 @@ import com.android.ims.internal.IImsVideoCallCallback;
  * @hide
  */
 oneway interface IImsVideoCallProvider {
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void setCallback(IImsVideoCallCallback callback);
 
     void setCamera(String cameraId, int uid);

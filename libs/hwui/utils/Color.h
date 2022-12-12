@@ -16,10 +16,17 @@
 #ifndef COLOR_H
 #define COLOR_H
 
-#include <math.h>
-
 #include <SkColor.h>
 #include <SkColorSpace.h>
+#include <SkImageInfo.h>
+#include <cutils/compiler.h>
+#include <math.h>
+#include <system/graphics.h>
+
+#include <optional>
+
+struct ANativeWindow_Buffer;
+struct AHardwareBuffer_Desc;
 
 namespace android {
 namespace uirenderer {
@@ -34,7 +41,7 @@ enum Color {
     LightBlue_300 = 0xFF4FC3F7,
     LightBlue_500 = 0xFF03A9F4,
     Cyan_500 = 0xFF00BCD4,
-    Teal_500 = 0xFF009688,
+    Teal_500 = 0xFF008577,
     Teal_700 = 0xFF00796B,
     Green_500 = 0xFF4CAF50,
     Green_700 = 0xFF388E3C,
@@ -78,17 +85,6 @@ static constexpr float OECF_sRGB(float linear) {
     return linear <= 0.0031308f ? linear * 12.92f : (powf(linear, 1.0f / 2.4f) * 1.055f) - 0.055f;
 }
 
-// Opto-electronic conversion function for the sRGB color space
-// Takes a linear sRGB value and converts it to a gamma-encoded sRGB value
-// This function returns the input unmodified if linear blending is not enabled
-static constexpr float OECF(float linear) {
-#ifdef ANDROID_ENABLE_LINEAR_BLENDING
-    return OECF_sRGB(linear);
-#else
-    return linear;
-#endif
-}
-
 // Electro-optical conversion function for the sRGB color space
 // Takes a gamma-encoded sRGB value and converts it to a linear sRGB value
 static constexpr float EOCF_sRGB(float srgb) {
@@ -96,21 +92,45 @@ static constexpr float EOCF_sRGB(float srgb) {
     return srgb <= 0.04045f ? srgb / 12.92f : powf((srgb + 0.055f) / 1.055f, 2.4f);
 }
 
-// Electro-optical conversion function for the sRGB color space
-// Takes a gamma-encoded sRGB value and converts it to a linear sRGB value
-// This function returns the input unmodified if linear blending is not enabled
-static constexpr float EOCF(float srgb) {
-#ifdef ANDROID_ENABLE_LINEAR_BLENDING
-    return EOCF_sRGB(srgb);
-#else
-    return srgb;
-#endif
-}
+#ifdef __ANDROID__ // Layoutlib does not support hardware buffers or native windows
+SkImageInfo ANativeWindowToImageInfo(const ANativeWindow_Buffer& buffer,
+                                                 sk_sp<SkColorSpace> colorSpace);
 
-// Returns whether the specified color space's transfer function can be
-// approximated with the native sRGB transfer function. This method
-// returns true for sRGB, gamma 2.2 and Display P3 for instance
-bool transferFunctionCloseToSRGB(const SkColorSpace* colorSpace);
+SkImageInfo BufferDescriptionToImageInfo(const AHardwareBuffer_Desc& bufferDesc,
+                                         sk_sp<SkColorSpace> colorSpace);
+
+uint32_t ColorTypeToBufferFormat(SkColorType colorType);
+#endif
+
+ANDROID_API sk_sp<SkColorSpace> DataSpaceToColorSpace(android_dataspace dataspace);
+
+/**
+ * Return the android_dataspace corresponding to colorSpace.
+ *
+ * Note: This currently only returns android_dataspaces with corresponding
+ * ADataSpaces. The NDK relies on this, so if you need to update it to return
+ * an android_dataspace *without* an ADataSpace, the NDK methods need to be
+ * updated.
+ *
+ * @param colorSpace May be null, in which case this will return
+ *                   HAL_DATASPACE_UNKNOWN.
+ * @param colorType Some SkColorSpaces are associated with more than one
+ *                  android_dataspace. In that case, the SkColorType is used to
+ *                  determine which one to return.
+ */
+ANDROID_API android_dataspace ColorSpaceToADataSpace(SkColorSpace*, SkColorType);
+
+struct Lab {
+    float L;
+    float a;
+    float b;
+};
+
+Lab sRGBToLab(SkColor color);
+SkColor LabToSRGB(const Lab& lab, SkAlpha alpha);
+skcms_TransferFunction GetPQSkTransferFunction(float sdr_white_level = 0.f);
+std::optional<skcms_TransferFunction> GetHLGScaleTransferFunction();
+
 } /* namespace uirenderer */
 } /* namespace android */
 

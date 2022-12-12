@@ -16,20 +16,36 @@
 
 package com.android.internal.util;
 
+import android.annotation.Nullable;
 import android.app.AppOpsManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Binder;
 import android.os.Handler;
+import android.text.TextUtils;
 import android.util.Slog;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Helper functions for dumping the state of system services.
+ * Test:
+ atest FrameworksCoreTests:DumpUtilsTest
  */
 public final class DumpUtils {
+
+    /**
+     * List of component names that should be dumped in the bug report critical section.
+     *
+     * @hide
+     */
+    public static final ComponentName[] CRITICAL_SECTION_COMPONENTS = {
+            new ComponentName("com.android.systemui", "com.android.systemui.SystemUIService")
+    };
     private static final String TAG = "DumpUtils";
     private static final boolean DEBUG = false;
 
@@ -122,7 +138,7 @@ public final class DumpUtils {
         final String[] pkgs = context.getPackageManager().getPackagesForUid(uid);
         if (pkgs != null) {
             for (String pkg : pkgs) {
-                switch (appOps.checkOpNoThrow(AppOpsManager.OP_GET_USAGE_STATS, uid, pkg)) {
+                switch (appOps.noteOpNoThrow(AppOpsManager.OP_GET_USAGE_STATS, uid, pkg)) {
                     case AppOpsManager.MODE_ALLOWED:
                         if (DEBUG) Slog.v(TAG, "Found package " + pkg + " with "
                                 + "android:get_usage_stats allowed");
@@ -153,4 +169,148 @@ public final class DumpUtils {
             PrintWriter pw) {
         return checkDumpPermission(context, tag, pw) && checkUsageStatsPermission(context, tag, pw);
     }
+
+    /**
+     * Return whether a package name is considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isPlatformPackage(@Nullable String packageName) {
+        return (packageName != null)
+                && (packageName.equals("android")
+                    || packageName.startsWith("android.")
+                    || packageName.startsWith("com.android."));
+    }
+
+    /**
+     * Return whether a package name is considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isPlatformPackage(@Nullable ComponentName cname) {
+        return (cname != null) && isPlatformPackage(cname.getPackageName());
+    }
+
+    /**
+     * Return whether a package name is considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isPlatformPackage(@Nullable ComponentName.WithComponentName wcn) {
+        return (wcn != null) && isPlatformPackage(wcn.getComponentName());
+    }
+
+    /**
+     * Return whether a package name is NOT considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isNonPlatformPackage(@Nullable String packageName) {
+        return (packageName != null) && !isPlatformPackage(packageName);
+    }
+
+    /**
+     * Return whether a package name is NOT considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isNonPlatformPackage(@Nullable ComponentName cname) {
+        return (cname != null) && isNonPlatformPackage(cname.getPackageName());
+    }
+
+    /**
+     * Return whether a package name is NOT considered to be part of the platform.
+     * @hide
+     */
+    public static boolean isNonPlatformPackage(@Nullable ComponentName.WithComponentName wcn) {
+        return (wcn != null) && !isPlatformPackage(wcn.getComponentName());
+    }
+
+    /**
+     * Return whether a package should be dumped in the critical section.
+     */
+    private static boolean isCriticalPackage(@Nullable ComponentName cname) {
+        if (cname == null) {
+            return false;
+        }
+
+        for (int i = 0; i < CRITICAL_SECTION_COMPONENTS.length; i++) {
+            if (cname.equals(CRITICAL_SECTION_COMPONENTS[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Return whether a package name is considered to be part of the platform and in the critical
+     * section.
+     *
+     * @hide
+     */
+    public static boolean isPlatformCriticalPackage(@Nullable ComponentName.WithComponentName wcn) {
+        return (wcn != null) && isPlatformPackage(wcn.getComponentName()) &&
+                isCriticalPackage(wcn.getComponentName());
+    }
+
+    /**
+     * Return whether a package name is considered to be part of the platform but not in the the
+     * critical section.
+     *
+     * @hide
+     */
+    public static boolean isPlatformNonCriticalPackage(
+            @Nullable ComponentName.WithComponentName wcn) {
+        return (wcn != null) && isPlatformPackage(wcn.getComponentName()) &&
+                !isCriticalPackage(wcn.getComponentName());
+    }
+
+    /**
+     * Used for dumping providers and services. Return a predicate for a given filter string.
+     * @hide
+     */
+    public static <TRec extends ComponentName.WithComponentName> Predicate<TRec> filterRecord(
+            @Nullable String filterString) {
+
+        if (TextUtils.isEmpty(filterString)) {
+            return rec -> false;
+        }
+
+        // Dump all?
+        if ("all".equals(filterString)) {
+            return Objects::nonNull;
+        }
+
+        // Dump all platform?
+        if ("all-platform".equals(filterString)) {
+            return DumpUtils::isPlatformPackage;
+        }
+
+        // Dump all non-platform?
+        if ("all-non-platform".equals(filterString)) {
+            return DumpUtils::isNonPlatformPackage;
+        }
+
+        // Dump all platform-critical?
+        if ("all-platform-critical".equals(filterString)) {
+            return DumpUtils::isPlatformCriticalPackage;
+        }
+
+        // Dump all platform-non-critical?
+        if ("all-platform-non-critical".equals(filterString)) {
+            return DumpUtils::isPlatformNonCriticalPackage;
+        }
+
+        // Is the filter a component name? If so, do an exact match.
+        final ComponentName filterCname = ComponentName.unflattenFromString(filterString);
+        if (filterCname != null) {
+            // Do exact component name check.
+            return rec -> (rec != null) && filterCname.equals(rec.getComponentName());
+        }
+
+        // Otherwise, do a partial match against the component name.
+        // Also if the filter is a hex-decimal string, do the object ID match too.
+        final int id = ParseUtils.parseIntWithBase(filterString, 16, -1);
+        return rec -> {
+            final ComponentName cn = rec.getComponentName();
+            return ((id != -1) && (System.identityHashCode(rec) == id))
+                    || cn.flattenToString().toLowerCase().contains(filterString.toLowerCase());
+        };
+    }
 }
+

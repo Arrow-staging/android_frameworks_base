@@ -23,14 +23,17 @@ import android.content.ComponentName;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.pm.PackageManagerInternal;
+import android.content.pm.ResolveInfo;
 import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.util.Slog;
 
-import com.android.server.backup.utils.AppBackupUtils;
+import com.android.server.LocalServices;
+import com.android.server.backup.utils.BackupEligibilityRules;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -46,9 +49,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
-
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * We back up the signatures of each package so that during a system restore,
@@ -92,6 +94,7 @@ public class PackageManagerBackupAgent extends BackupAgent {
     // is coming from pre-Android P device.
     private static final int UNDEFINED_ANCESTRAL_RECORD_VERSION = -1;
 
+    private int mUserId;
     private List<PackageInfo> mAllPackages;
     private PackageManager mPackageManager;
     // version & signature info of each app in a restore set
@@ -126,17 +129,19 @@ public class PackageManagerBackupAgent extends BackupAgent {
 
     // We're constructed with the set of applications that are participating
     // in backup.  This set changes as apps are installed & removed.
-    public PackageManagerBackupAgent(PackageManager packageMgr, List<PackageInfo> packages) {
-        init(packageMgr, packages);
+    public PackageManagerBackupAgent(
+            PackageManager packageMgr, List<PackageInfo> packages, int userId) {
+        init(packageMgr, packages, userId);
     }
 
-    public PackageManagerBackupAgent(PackageManager packageMgr) {
-        init(packageMgr, null);
+    public PackageManagerBackupAgent(PackageManager packageMgr, int userId,
+            BackupEligibilityRules backupEligibilityRules) {
+        init(packageMgr, null, userId);
 
-        evaluateStorablePackages();
+        evaluateStorablePackages(backupEligibilityRules);
     }
 
-    private void init(PackageManager packageMgr, List<PackageInfo> packages) {
+    private void init(PackageManager packageMgr, List<PackageInfo> packages, int userId) {
         mPackageManager = packageMgr;
         mAllPackages = packages;
         mRestoredSignatures = null;
@@ -144,21 +149,24 @@ public class PackageManagerBackupAgent extends BackupAgent {
 
         mStoredSdkVersion = Build.VERSION.SDK_INT;
         mStoredIncrementalVersion = Build.VERSION.INCREMENTAL;
+        mUserId = userId;
     }
 
     // We will need to refresh our understanding of what is eligible for
     // backup periodically; this entry point serves that purpose.
-    public void evaluateStorablePackages() {
-        mAllPackages = getStorableApplications(mPackageManager);
+    public void evaluateStorablePackages(BackupEligibilityRules backupEligibilityRules) {
+        mAllPackages = getStorableApplications(mPackageManager, mUserId, backupEligibilityRules);
     }
 
-    public static List<PackageInfo> getStorableApplications(PackageManager pm) {
-        List<PackageInfo> pkgs;
-        pkgs = pm.getInstalledPackages(PackageManager.GET_SIGNATURES);
+    /** Gets all packages installed on user {@code userId} eligible for backup. */
+    public static List<PackageInfo> getStorableApplications(PackageManager pm, int userId,
+            BackupEligibilityRules backupEligibilityRules) {
+        List<PackageInfo> pkgs =
+                pm.getInstalledPackagesAsUser(PackageManager.GET_SIGNING_CERTIFICATES, userId);
         int N = pkgs.size();
         for (int a = N-1; a >= 0; a--) {
             PackageInfo pkg = pkgs.get(a);
-            if (!AppBackupUtils.appIsEligibleForBackup(pkg.applicationInfo, pm)) {
+            if (!backupEligibilityRules.appIsEligibleForBackup(pkg.applicationInfo)) {
                 pkgs.remove(a);
             }
         }
@@ -234,11 +242,19 @@ public class PackageManagerBackupAgent extends BackupAgent {
         ComponentName home = getPreferredHomeComponent();
         if (home != null) {
             try {
-                homeInfo = mPackageManager.getPackageInfo(home.getPackageName(),
-                        PackageManager.GET_SIGNATURES);
+                homeInfo = mPackageManager.getPackageInfoAsUser(home.getPackageName(),
+                        PackageManager.GET_SIGNING_CERTIFICATES, mUserId);
                 homeInstaller = mPackageManager.getInstallerPackageName(home.getPackageName());
                 homeVersion = homeInfo.getLongVersionCode();
-                homeSigHashes = BackupUtils.hashSignatureArray(homeInfo.signatures);
+                SigningInfo signingInfo = homeInfo.signingInfo;
+                if (signingInfo == null) {
+                    Slog.e(TAG, "Home app has no signing information");
+                } else {
+                    // retrieve the newest sigs to back up
+                    // TODO (b/73988180) use entire signing history in case of rollbacks
+                    Signature[] homeInfoSignatures = signingInfo.getApkContentsSigners();
+                    homeSigHashes = BackupUtils.hashSignatureArray(homeInfoSignatures);
+                }
             } catch (NameNotFoundException e) {
                 Slog.w(TAG, "Can't access preferred home info");
                 // proceed as though there were no preferred home set
@@ -252,10 +268,11 @@ public class PackageManagerBackupAgent extends BackupAgent {
             //    2. the home app [or absence] we now use differs from the prior state,
             // OR 3. it looks like we use the same home app + version as before, but
             //       the signatures don't match so we treat them as different apps.
+            PackageManagerInternal pmi = LocalServices.getService(PackageManagerInternal.class);
             final boolean needHomeBackup = (homeVersion != mStoredHomeVersion)
                     || !Objects.equals(home, mStoredHomeComponent)
                     || (home != null
-                        && !BackupUtils.signaturesMatch(mStoredHomeSigHashes, homeInfo));
+                        && !BackupUtils.signaturesMatch(mStoredHomeSigHashes, homeInfo, pmi));
             if (needHomeBackup) {
                 if (DEBUG) {
                     Slog.i(TAG, "Home preference changed; backing up new state " + home);
@@ -303,8 +320,8 @@ public class PackageManagerBackupAgent extends BackupAgent {
                 } else {
                     PackageInfo info = null;
                     try {
-                        info = mPackageManager.getPackageInfo(packName,
-                                PackageManager.GET_SIGNATURES);
+                        info = mPackageManager.getPackageInfoAsUser(packName,
+                                PackageManager.GET_SIGNING_CERTIFICATES, mUserId);
                     } catch (NameNotFoundException e) {
                         // Weird; we just found it, and now are told it doesn't exist.
                         // Treat it as having been removed from the device.
@@ -323,9 +340,9 @@ public class PackageManagerBackupAgent extends BackupAgent {
                             continue;
                         }
                     }
-                    
-                    if (info.signatures == null || info.signatures.length == 0)
-                    {
+
+                    SigningInfo signingInfo = info.signingInfo;
+                    if (signingInfo == null) {
                         Slog.w(TAG, "Not backing up package " + packName
                                 + " since it appears to have no signatures.");
                         continue;
@@ -347,8 +364,10 @@ public class PackageManagerBackupAgent extends BackupAgent {
                     } else {
                         outputBufferStream.writeInt(info.versionCode);
                     }
+                    // retrieve the newest sigs to back up
+                    Signature[] infoSignatures = signingInfo.getApkContentsSigners();
                     writeSignatureHashArray(outputBufferStream,
-                            BackupUtils.hashSignatureArray(info.signatures));
+                            BackupUtils.hashSignatureArray(infoSignatures));
 
                     if (DEBUG) {
                         Slog.v(TAG, "+ writing metadata for " + packName

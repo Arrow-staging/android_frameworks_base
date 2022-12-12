@@ -21,24 +21,29 @@ import static android.app.servertransaction.TestUtils.mergedConfig;
 import static android.app.servertransaction.TestUtils.referrerIntentList;
 import static android.app.servertransaction.TestUtils.resultInfoList;
 
-import static junit.framework.Assert.assertEquals;
-import static junit.framework.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import android.app.ActivityOptions;
+import android.app.ContentProviderHolder;
 import android.app.IApplicationThread;
 import android.app.IInstrumentationWatcher;
 import android.app.IUiAutomationConnection;
 import android.app.ProfilerInfo;
+import android.app.servertransaction.TestUtils.LaunchActivityItemBuilder;
+import android.content.AutofillOptions;
 import android.content.ComponentName;
+import android.content.ContentCaptureOptions;
 import android.content.IIntentReceiver;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ProviderInfo;
+import android.content.pm.ProviderInfoList;
 import android.content.pm.ServiceInfo;
 import android.content.res.CompatibilityInfo;
 import android.content.res.Configuration;
-import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Debug;
@@ -47,10 +52,16 @@ import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.Parcelable;
 import android.os.PersistableBundle;
+import android.os.RemoteCallback;
 import android.os.RemoteException;
+import android.os.SharedMemory;
 import android.platform.test.annotations.Presubmit;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.view.autofill.AutofillId;
+import android.view.translation.TranslationSpec;
+import android.view.translation.UiTranslationSpec;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.app.IVoiceInteractor;
 
@@ -58,10 +69,19 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/** Test parcelling and unparcelling of transactions and transaction items. */
+/**
+ * Test parcelling and unparcelling of transactions and transaction items.
+ *
+ * <p>Build/Install/Run:
+ *  atest FrameworksCoreTests:TransactionParcelTests
+ *
+ * <p>This test class is a part of Window Manager Service tests and specified in
+ * {@link com.android.server.wm.test.filters.FrameworksTestsFilter}.
+ */
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 @Presubmit
@@ -117,7 +137,7 @@ public class TransactionParcelTests {
     @Test
     public void testNewIntent() {
         // Write to parcel
-        NewIntentItem item = NewIntentItem.obtain(referrerIntentList(), true /* pause */);
+        NewIntentItem item = NewIntentItem.obtain(referrerIntentList(), false);
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -135,59 +155,6 @@ public class TransactionParcelTests {
 
         // Read from parcel and assert
         ActivityResultItem result = ActivityResultItem.CREATOR.createFromParcel(mParcel);
-
-        assertEquals(item.hashCode(), result.hashCode());
-        assertTrue(item.equals(result));
-    }
-
-    @Test
-    public void testPipModeChange() {
-        // Write to parcel
-        PipModeChangeItem item = PipModeChangeItem.obtain(true /* isInPipMode */, config());
-        writeAndPrepareForReading(item);
-
-        // Read from parcel and assert
-        PipModeChangeItem result = PipModeChangeItem.CREATOR.createFromParcel(mParcel);
-
-        assertEquals(item.hashCode(), result.hashCode());
-        assertTrue(item.equals(result));
-    }
-
-    @Test
-    public void testMultiWindowModeChange() {
-        // Write to parcel
-        MultiWindowModeChangeItem item = MultiWindowModeChangeItem.obtain(
-                true /* isInMultiWindowMode */, config());
-        writeAndPrepareForReading(item);
-
-        // Read from parcel and assert
-        MultiWindowModeChangeItem result =
-                MultiWindowModeChangeItem.CREATOR.createFromParcel(mParcel);
-
-        assertEquals(item.hashCode(), result.hashCode());
-        assertTrue(item.equals(result));
-    }
-
-    @Test
-    public void testWindowVisibilityChange() {
-        // Write to parcel
-        WindowVisibilityItem item = WindowVisibilityItem.obtain(true /* showWindow */);
-        writeAndPrepareForReading(item);
-
-        // Read from parcel and assert
-        WindowVisibilityItem result = WindowVisibilityItem.CREATOR.createFromParcel(mParcel);
-
-        assertEquals(item.hashCode(), result.hashCode());
-        assertTrue(item.equals(result));
-
-        // Check different value
-        item = WindowVisibilityItem.obtain(false);
-
-        mParcel = Parcel.obtain();
-        writeAndPrepareForReading(item);
-
-        // Read from parcel and assert
-        result = WindowVisibilityItem.CREATOR.createFromParcel(mParcel);
 
         assertEquals(item.hashCode(), result.hashCode());
         assertTrue(item.equals(result));
@@ -213,7 +180,7 @@ public class TransactionParcelTests {
         int ident = 57;
         ActivityInfo activityInfo = new ActivityInfo();
         activityInfo.flags = 42;
-        activityInfo.maxAspectRatio = 2.4f;
+        activityInfo.setMaxAspectRatio(2.4f);
         activityInfo.launchToken = "token";
         activityInfo.applicationInfo = new ApplicationInfo();
         activityInfo.packageName = "packageName";
@@ -225,13 +192,20 @@ public class TransactionParcelTests {
         int procState = 4;
         Bundle bundle = new Bundle();
         bundle.putString("key", "value");
+        bundle.putParcelable("data", new ParcelableData(1));
         PersistableBundle persistableBundle = new PersistableBundle();
         persistableBundle.putInt("k", 4);
 
-        LaunchActivityItem item = LaunchActivityItem.obtain(intent, ident, activityInfo,
-                config(), overrideConfig, compat, referrer, null /* voiceInteractor */,
-                procState, bundle, persistableBundle, resultInfoList(), referrerIntentList(),
-                true /* isForward */, null /* profilerInfo */);
+        LaunchActivityItem item = new LaunchActivityItemBuilder()
+                .setIntent(intent).setIdent(ident).setInfo(activityInfo).setCurConfig(config())
+                .setOverrideConfig(overrideConfig).setCompatInfo(compat).setReferrer(referrer)
+                .setProcState(procState).setState(bundle).setPersistentState(persistableBundle)
+                .setPendingResults(resultInfoList()).setActivityOptions(ActivityOptions.makeBasic())
+                .setPendingNewIntents(referrerIntentList()).setIsForward(true)
+                .setAssistToken(new Binder()).setShareableActivityToken(new Binder())
+                .setTaskFragmentToken(new Binder())
+                .build();
+
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -261,7 +235,8 @@ public class TransactionParcelTests {
     public void testPause() {
         // Write to parcel
         PauseActivityItem item = PauseActivityItem.obtain(true /* finished */,
-                true /* userLeaving */, 135 /* configChanges */, true /* dontReport */);
+                true /* userLeaving */, 135 /* configChanges */, true /* dontReport */,
+                true /* autoEnteringPip */);
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -288,8 +263,7 @@ public class TransactionParcelTests {
     @Test
     public void testStop() {
         // Write to parcel
-        StopActivityItem item = StopActivityItem.obtain(true /* showWindow */,
-                14 /* configChanges */);
+        StopActivityItem item = StopActivityItem.obtain(14 /* configChanges */);
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -300,14 +274,26 @@ public class TransactionParcelTests {
     }
 
     @Test
+    public void testStart() {
+        // Write to parcel
+        StartActivityItem item = StartActivityItem.obtain(ActivityOptions.makeBasic());
+        writeAndPrepareForReading(item);
+
+        // Read from parcel and assert
+        StartActivityItem result = StartActivityItem.CREATOR.createFromParcel(mParcel);
+
+        assertEquals(item.hashCode(), result.hashCode());
+        assertEquals(item, result);
+    }
+
+    @Test
     public void testClientTransaction() {
         // Write to parcel
-        WindowVisibilityItem callback1 = WindowVisibilityItem.obtain(true);
+        NewIntentItem callback1 = NewIntentItem.obtain(new ArrayList<>(), true);
         ActivityConfigurationChangeItem callback2 = ActivityConfigurationChangeItem.obtain(
                 config());
 
-        StopActivityItem lifecycleRequest = StopActivityItem.obtain(true /* showWindow */,
-                78 /* configChanges */);
+        StopActivityItem lifecycleRequest = StopActivityItem.obtain(78 /* configChanges */);
 
         IApplicationThread appThread = new StubAppThread();
         Binder activityToken = new Binder();
@@ -329,7 +315,7 @@ public class TransactionParcelTests {
     @Test
     public void testClientTransactionCallbacksOnly() {
         // Write to parcel
-        WindowVisibilityItem callback1 = WindowVisibilityItem.obtain(true);
+        NewIntentItem callback1 = NewIntentItem.obtain(new ArrayList<>(), true);
         ActivityConfigurationChangeItem callback2 = ActivityConfigurationChangeItem.obtain(
                 config());
 
@@ -352,8 +338,7 @@ public class TransactionParcelTests {
     @Test
     public void testClientTransactionLifecycleOnly() {
         // Write to parcel
-        StopActivityItem lifecycleRequest = StopActivityItem.obtain(true /* showWindow */,
-                78 /* configChanges */);
+        StopActivityItem lifecycleRequest = StopActivityItem.obtain(78 /* configChanges */);
 
         IApplicationThread appThread = new StubAppThread();
         Binder activityToken = new Binder();
@@ -374,6 +359,47 @@ public class TransactionParcelTests {
     private void writeAndPrepareForReading(Parcelable parcelable) {
         parcelable.writeToParcel(mParcel, 0 /* flags */);
         mParcel.setDataPosition(0);
+    }
+
+    /**
+     * The parcelable class to make sure that when comparing the {@link LaunchActivityItem} or
+     * getting its hash code, the bundle is not unparceled. System shouldn't touch the data from
+     * application, otherwise it will cause exception as:
+     *   android.os.BadParcelableException: ClassNotFoundException when unmarshalling:
+     *   android.app.servertransaction.TransactionParcelTests$ParcelableData".
+     */
+    public static class ParcelableData implements Parcelable {
+        int mValue;
+
+        ParcelableData() {}
+
+        ParcelableData(int value) {
+            mValue = value;
+        }
+
+        @Override
+        public int describeContents() {
+            return 0;
+        }
+
+        @Override
+        public void writeToParcel(Parcel dest, int flags) {
+            dest.writeInt(mValue);
+        }
+
+        public static final Creator<ParcelableData> CREATOR = new Creator<ParcelableData>() {
+            @Override
+            public ParcelableData createFromParcel(Parcel source) {
+                final ParcelableData data = new ParcelableData();
+                data.mValue = source.readInt();
+                return data;
+            }
+
+            @Override
+            public ParcelableData[] newArray(int size) {
+                return new ParcelableData[size];
+            }
+        };
     }
 
     /** Stub implementation of IApplicationThread that can be presented as {@link Binder}. */
@@ -400,12 +426,16 @@ public class TransactionParcelTests {
 
         @Override
         public void bindApplication(String s, ApplicationInfo applicationInfo,
-                List<ProviderInfo> list, ComponentName componentName, ProfilerInfo profilerInfo,
+                String sdkSandboxClientAppVolumeUuid, String sdkSandboxClientAppPackage,
+                ProviderInfoList list, ComponentName componentName, ProfilerInfo profilerInfo,
                 Bundle bundle, IInstrumentationWatcher iInstrumentationWatcher,
                 IUiAutomationConnection iUiAutomationConnection, int i, boolean b, boolean b1,
                 boolean b2, boolean b3, Configuration configuration,
                 CompatibilityInfo compatibilityInfo, Map map, Bundle bundle1, String s1,
-                boolean autofillCompatEnabled) throws RemoteException {
+                AutofillOptions ao, ContentCaptureOptions co, long[] disableCompatChanges,
+                SharedMemory serializedSystemFontMap,
+                long startRequestedElapsedTime, long startRequestedUptime)
+                throws RemoteException {
         }
 
         @Override
@@ -450,10 +480,6 @@ public class TransactionParcelTests {
         }
 
         @Override
-        public void scheduleSleeping(IBinder iBinder, boolean b) throws RemoteException {
-        }
-
-        @Override
         public void profilerControl(boolean b, ProfilerInfo profilerInfo, int i)
                 throws RemoteException {
         }
@@ -464,12 +490,13 @@ public class TransactionParcelTests {
 
         @Override
         public void scheduleCreateBackupAgent(ApplicationInfo applicationInfo,
-                CompatibilityInfo compatibilityInfo, int i) throws RemoteException {
+                CompatibilityInfo compatibilityInfo, int i, int userId, int operatioType)
+                throws RemoteException {
         }
 
         @Override
         public void scheduleDestroyBackupAgent(ApplicationInfo applicationInfo,
-                CompatibilityInfo compatibilityInfo) throws RemoteException {
+                CompatibilityInfo compatibilityInfo, int userId) throws RemoteException {
         }
 
         @Override
@@ -486,7 +513,7 @@ public class TransactionParcelTests {
         }
 
         @Override
-        public void scheduleCrash(String s) throws RemoteException {
+        public void scheduleCrash(String s, int i, Bundle extras) throws RemoteException {
         }
 
         @Override
@@ -499,7 +526,7 @@ public class TransactionParcelTests {
         }
 
         @Override
-        public void setHttpProxy(String s, String s1, String s2, Uri uri) throws RemoteException {
+        public void updateHttpProxy() throws RemoteException {
         }
 
         @Override
@@ -529,6 +556,11 @@ public class TransactionParcelTests {
 
         @Override
         public void dumpGfxInfo(ParcelFileDescriptor parcelFileDescriptor, String[] strings)
+                throws RemoteException {
+        }
+
+        @Override
+        public void dumpCacheInfo(ParcelFileDescriptor parcelFileDescriptor, String[] strings)
                 throws RemoteException {
         }
 
@@ -599,6 +631,10 @@ public class TransactionParcelTests {
         }
 
         @Override
+        public void attachStartupAgents(String s) throws RemoteException {
+        }
+
+        @Override
         public void scheduleApplicationInfoChanged(ApplicationInfo applicationInfo)
                 throws RemoteException {
         }
@@ -609,11 +645,42 @@ public class TransactionParcelTests {
 
         @Override
         public void dumpHeap(boolean managed, boolean mallocInfo, boolean runGc, String path,
-                ParcelFileDescriptor fd) {
+                ParcelFileDescriptor fd, RemoteCallback finishCallback) {
+        }
+
+        @Override
+        public void dumpResources(ParcelFileDescriptor fd, RemoteCallback finishCallback) {
         }
 
         @Override
         public final void runIsolatedEntryPoint(String entryPoint, String[] entryPointArgs) {
+        }
+
+        @Override
+        public void requestDirectActions(IBinder activityToken, IVoiceInteractor interactor,
+                RemoteCallback cancellationCallback, RemoteCallback resultCallback) {
+        }
+
+        @Override
+        public void performDirectAction(IBinder activityToken, String actionId, Bundle arguments,
+                RemoteCallback cancellationCallback, RemoteCallback resultCallback) {
+        }
+
+        @Override
+        public void notifyContentProviderPublishStatus(ContentProviderHolder holder, String auth,
+                int userId, boolean published) {
+        }
+
+        @Override
+        public void instrumentWithoutRestart(ComponentName instrumentationName,
+                Bundle instrumentationArgs, IInstrumentationWatcher instrumentationWatcher,
+                IUiAutomationConnection instrumentationUiConnection, ApplicationInfo targetInfo) {
+        }
+
+        @Override
+        public void updateUiTranslationState(IBinder activityToken, int state,
+                TranslationSpec sourceSpec, TranslationSpec targetSpec, List<AutofillId> viewIds,
+                UiTranslationSpec uiTranslationSpec) {
         }
     }
 }

@@ -16,23 +16,21 @@
 
 package android.inputmethodservice;
 
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.TypedArray;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Paint.Align;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Typeface;
-import android.graphics.Paint.Align;
-import android.graphics.Region.Op;
 import android.graphics.drawable.Drawable;
 import android.inputmethodservice.Keyboard.Key;
 import android.media.AudioManager;
 import android.os.Handler;
 import android.os.Message;
-import android.os.UserHandle;
-import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.TypedValue;
 import android.view.GestureDetector;
@@ -67,7 +65,13 @@ import java.util.Map;
  * @attr ref android.R.styleable#KeyboardView_keyTextColor
  * @attr ref android.R.styleable#KeyboardView_verticalCorrection
  * @attr ref android.R.styleable#KeyboardView_popupLayout
+ *
+ * @deprecated This class is deprecated because this is just a convenient UI widget class that
+ *             application developers can re-implement on top of existing public APIs.  If you have
+ *             already depended on this class, consider copying the implementation from AOSP into
+ *             your project or re-implementing a similar widget by yourselves
  */
+@Deprecated
 public class KeyboardView extends View implements View.OnClickListener {
 
     /**
@@ -136,6 +140,7 @@ public class KeyboardView extends View implements View.OnClickListener {
 
     private Keyboard mKeyboard;
     private int mCurrentKeyIndex = NOT_A_KEY;
+    @UnsupportedAppUsage
     private int mLabelTextSize;
     private int mKeyTextSize;
     private int mKeyTextColor;
@@ -143,6 +148,7 @@ public class KeyboardView extends View implements View.OnClickListener {
     private int mShadowColor;
     private float mBackgroundDimAmount;
 
+    @UnsupportedAppUsage
     private TextView mPreviewText;
     private PopupWindow mPreviewPopup;
     private int mPreviewTextSizeLarge;
@@ -220,6 +226,7 @@ public class KeyboardView extends View implements View.OnClickListener {
     private float mOldPointerX;
     private float mOldPointerY;
 
+    @UnsupportedAppUsage
     private Drawable mKeyBackground;
 
     private static final int REPEAT_INTERVAL = 50; // ~20 keys per second
@@ -319,9 +326,11 @@ public class KeyboardView extends View implements View.OnClickListener {
             }
         }
 
+        a.recycle();
         a = mContext.obtainStyledAttributes(
                 com.android.internal.R.styleable.Theme);
         mBackgroundDimAmount = a.getFloat(android.R.styleable.Theme_backgroundDimAmount, 0.5f);
+        a.recycle();
 
         mPreviewPopup = new PopupWindow(context);
         if (previewLayout != 0) {
@@ -662,10 +671,12 @@ public class KeyboardView extends View implements View.OnClickListener {
             invalidateAllKeys();
             mKeyboardChanged = false;
         }
-        final Canvas canvas = mCanvas;
-        canvas.clipRect(mDirtyRect, Op.REPLACE);
 
         if (mKeyboard == null) return;
+
+        mCanvas.save();
+        final Canvas canvas = mCanvas;
+        canvas.clipRect(mDirtyRect);
 
         final Paint paint = mPaint;
         final Drawable keyBackground = mKeyBackground;
@@ -758,7 +769,7 @@ public class KeyboardView extends View implements View.OnClickListener {
             paint.setColor(0xFF00FF00);
             canvas.drawCircle((mStartX + mLastX) / 2, (mStartY + mLastY) / 2, 2, paint);
         }
-
+        mCanvas.restore();
         mDrawPending = false;
         mDirtyRect.setEmpty();
     }
@@ -911,6 +922,7 @@ public class KeyboardView extends View implements View.OnClickListener {
         }
     }
 
+    @UnsupportedAppUsage
     private void showKey(final int keyIndex) {
         final PopupWindow previewPopup = mPreviewPopup;
         final Key[] keys = mKeys;
@@ -1053,6 +1065,7 @@ public class KeyboardView extends View implements View.OnClickListener {
                 key.x + key.width + mPaddingLeft, key.y + key.height + mPaddingTop);
     }
 
+    @UnsupportedAppUsage
     private boolean openPopupIfRequired(MotionEvent me) {
         // Check if we have a popup layout specified first.
         if (mPopupLayout == 0) {
@@ -1358,6 +1371,7 @@ public class KeyboardView extends View implements View.OnClickListener {
         return true;
     }
 
+    @UnsupportedAppUsage
     private boolean repeatKey() {
         Key key = mKeys[mRepeatKeyIndex];
         detectAndSendKey(mCurrentKey, key.x, key.y, mLastTapTime);

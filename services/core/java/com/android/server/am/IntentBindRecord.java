@@ -23,9 +23,6 @@ import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.proto.ProtoOutputStream;
 
-import com.android.server.am.proto.AppBindRecordProto;
-import com.android.server.am.proto.IntentBindRecordProto;
-
 import java.io.PrintWriter;
 
 /**
@@ -102,7 +99,7 @@ final class IntentBindRecord {
         if ((collectFlags()&Context.BIND_AUTO_CREATE) != 0) {
             sb.append("CR ");
         }
-        sb.append(service.shortName);
+        sb.append(service.shortInstanceName);
         sb.append(':');
         if (intent != null) {
             intent.getIntent().toShortString(sb, false, false, false, false);
@@ -111,19 +108,17 @@ final class IntentBindRecord {
         return stringName = sb.toString();
     }
 
-    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
         long token = proto.start(fieldId);
-        proto.write(IntentBindRecordProto.HEX_HASH,
-                Integer.toHexString(System.identityHashCode(this)));
-        proto.write(IntentBindRecordProto.IS_CREATE,
-                (collectFlags()&Context.BIND_AUTO_CREATE) != 0);
         if (intent != null) {
-            intent.getIntent().writeToProto(proto,
+            intent.getIntent().dumpDebug(proto,
                     IntentBindRecordProto.INTENT, false, true, false, false);
         }
         if (binder != null) {
             proto.write(IntentBindRecordProto.BINDER, binder.toString());
         }
+        proto.write(IntentBindRecordProto.AUTO_CREATE,
+                (collectFlags()&Context.BIND_AUTO_CREATE) != 0);
         proto.write(IntentBindRecordProto.REQUESTED, requested);
         proto.write(IntentBindRecordProto.RECEIVED, received);
         proto.write(IntentBindRecordProto.HAS_BOUND, hasBound);
@@ -133,7 +128,7 @@ final class IntentBindRecord {
         for (int i=0; i<N; i++) {
             AppBindRecord a = apps.valueAt(i);
             if (a != null) {
-                a.writeToProto(proto, IntentBindRecordProto.APPS);
+                a.dumpDebug(proto, IntentBindRecordProto.APPS);
             }
         }
         proto.end(token);

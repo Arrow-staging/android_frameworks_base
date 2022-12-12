@@ -16,15 +16,19 @@
 
 #pragma once
 
-#include "Caches.h"
+#ifdef __ANDROID__ // Layoutlib does not support device info
 #include "DeviceInfo.h"
+#endif // __ANDROID__
+
 #include "Outline.h"
 #include "Rect.h"
 #include "RevealClip.h"
+#include "effects/StretchEffect.h"
 #include "utils/MathUtils.h"
 #include "utils/PaintUtils.h"
 
 #include <SkBlendMode.h>
+#include <SkImageFilter.h>
 #include <SkCamera.h>
 #include <SkColor.h>
 #include <SkMatrix.h>
@@ -56,11 +60,10 @@ class RenderProperties;
 // Keep in sync with View.java:LAYER_TYPE_*
 enum class LayerType {
     None = 0,
-    // Although we cannot build the software layer directly (must be done at
-    // record time), this information is used when applying alpha.
+    // We cannot build the software layer directly (must be done at record time) and all management
+    // of software layers is handled in Java.
     Software = 1,
     RenderLayer = 2,
-    // TODO: LayerTypeSurfaceTexture? Maybe?
 };
 
 enum ClippingFlags {
@@ -68,7 +71,7 @@ enum ClippingFlags {
     CLIP_TO_CLIP_BOUNDS = 0x1 << 1,
 };
 
-class ANDROID_API LayerProperties {
+class LayerProperties {
 public:
     bool setType(LayerType type) {
         if (RP_SET(mType, type)) {
@@ -90,9 +93,15 @@ public:
 
     SkBlendMode xferMode() const { return mMode; }
 
-    bool setColorFilter(SkColorFilter* filter);
+    SkColorFilter* getColorFilter() const { return mColorFilter.get(); }
 
-    SkColorFilter* colorFilter() const { return mColorFilter; }
+    bool setImageFilter(SkImageFilter* imageFilter);
+
+    SkImageFilter* getImageFilter() const { return mImageFilter.get(); }
+
+    const StretchEffect& getStretchEffect() const { return mStretchEffect; }
+
+    StretchEffect& mutableStretchEffect() { return mStretchEffect; }
 
     // Sets alpha, xfermode, and colorfilter from an SkPaint
     // paint may be NULL, in which case defaults will be set
@@ -102,13 +111,14 @@ public:
 
     LayerProperties& operator=(const LayerProperties& other);
 
+    // Strongly recommend using effectiveLayerType instead
+    LayerType type() const { return mType; }
+
 private:
     LayerProperties();
     ~LayerProperties();
     void reset();
-
-    // Private since external users should go through properties().effectiveLayerType()
-    LayerType type() const { return mType; }
+    bool setColorFilter(SkColorFilter* filter);
 
     friend class RenderProperties;
 
@@ -117,13 +127,15 @@ private:
     bool mOpaque;
     uint8_t mAlpha;
     SkBlendMode mMode;
-    SkColorFilter* mColorFilter = nullptr;
+    sk_sp<SkColorFilter> mColorFilter;
+    sk_sp<SkImageFilter> mImageFilter;
+    StretchEffect mStretchEffect;
 };
 
 /*
  * Data structure that holds the properties for a RenderNode
  */
-class ANDROID_API RenderProperties {
+class RenderProperties {
 public:
     RenderProperties();
     virtual ~RenderProperties();
@@ -153,10 +165,11 @@ public:
     bool prepareForFunctorPresence(bool willHaveFunctor, bool ancestorDictatesFunctorsNeedLayer) {
         // parent may have already dictated that a descendant layer is needed
         bool functorsNeedLayer =
-                ancestorDictatesFunctorsNeedLayer
+                ancestorDictatesFunctorsNeedLayer ||
+                CC_UNLIKELY(isClipMayBeComplex())
 
                 // Round rect clipping forces layer for functors
-                || CC_UNLIKELY(getOutline().willRoundRectClip()) ||
+                || CC_UNLIKELY(getOutline().willComplexClip()) ||
                 CC_UNLIKELY(getRevealClip().willClip())
 
                 // Complex matrices forces layer, due to stencil clipping
@@ -195,6 +208,12 @@ public:
     }
 
     bool isProjectionReceiver() const { return mPrimitiveFields.mProjectionReceiver; }
+
+    bool setClipMayBeComplex(bool isClipMayBeComplex) {
+        return RP_SET(mPrimitiveFields.mClipMayBeComplex, isClipMayBeComplex);
+    }
+
+    bool isClipMayBeComplex() const { return mPrimitiveFields.mClipMayBeComplex; }
 
     bool setStaticMatrix(const SkMatrix* matrix) {
         delete mStaticMatrix;
@@ -328,6 +347,8 @@ public:
     float getPivotY() const { return mPrimitiveFields.mPivotY; }
 
     bool isPivotExplicitlySet() const { return mPrimitiveFields.mPivotExplicitlySet; }
+
+    bool resetPivot() { return RP_SET_AND_DIRTY(mPrimitiveFields.mPivotExplicitlySet, false); }
 
     bool setCameraDistance(float distance) {
         if (distance != getCameraDistance()) {
@@ -507,37 +528,46 @@ public:
                getOutline().getAlpha() != 0.0f;
     }
 
-    SkColor getSpotShadowColor() const {
-        return mPrimitiveFields.mSpotShadowColor;
-    }
+    SkColor getSpotShadowColor() const { return mPrimitiveFields.mSpotShadowColor; }
 
     bool setSpotShadowColor(SkColor shadowColor) {
         return RP_SET(mPrimitiveFields.mSpotShadowColor, shadowColor);
     }
 
-    SkColor getAmbientShadowColor() const {
-        return mPrimitiveFields.mAmbientShadowColor;
-    }
+    SkColor getAmbientShadowColor() const { return mPrimitiveFields.mAmbientShadowColor; }
 
     bool setAmbientShadowColor(SkColor shadowColor) {
         return RP_SET(mPrimitiveFields.mAmbientShadowColor, shadowColor);
     }
 
     bool fitsOnLayer() const {
+#ifdef __ANDROID__ // Layoutlib does not support device info
         const DeviceInfo* deviceInfo = DeviceInfo::get();
         return mPrimitiveFields.mWidth <= deviceInfo->maxTextureSize() &&
                mPrimitiveFields.mHeight <= deviceInfo->maxTextureSize();
+#else
+        return mPrimitiveFields.mWidth <= 4096 && mPrimitiveFields.mHeight <= 4096;
+#endif
     }
 
     bool promotedToLayer() const {
         return mLayerProperties.mType == LayerType::None && fitsOnLayer() &&
-               (mComputedFields.mNeedLayerForFunctors ||
+               (mComputedFields.mNeedLayerForFunctors || mLayerProperties.mImageFilter != nullptr ||
+                mLayerProperties.getStretchEffect().requiresLayer() ||
                 (!MathUtils::isZero(mPrimitiveFields.mAlpha) && mPrimitiveFields.mAlpha < 1 &&
                  mPrimitiveFields.mHasOverlappingRendering));
     }
 
     LayerType effectiveLayerType() const {
         return CC_UNLIKELY(promotedToLayer()) ? LayerType::RenderLayer : mLayerProperties.mType;
+    }
+
+    bool setAllowForceDark(bool allow) {
+        return RP_SET(mPrimitiveFields.mAllowForceDark, allow);
+    }
+
+    bool getAllowForceDark() const {
+        return mPrimitiveFields.mAllowForceDark;
     }
 
 private:
@@ -559,6 +589,8 @@ private:
         bool mMatrixOrPivotDirty = false;
         bool mProjectBackwards = false;
         bool mProjectionReceiver = false;
+        bool mAllowForceDark = true;
+        bool mClipMayBeComplex = false;
         Rect mClipBounds;
         Outline mOutline;
         RevealClip mRevealClip;

@@ -44,7 +44,6 @@ public class KeyguardStateMonitor extends IKeyguardStateCallback.Stub {
     private volatile boolean mSimSecure = true;
     private volatile boolean mInputRestricted = true;
     private volatile boolean mTrusted = false;
-    private volatile boolean mHasLockscreenWallpaper = false;
 
     private int mCurrentUserId;
 
@@ -79,13 +78,17 @@ public class KeyguardStateMonitor extends IKeyguardStateCallback.Stub {
         return mTrusted;
     }
 
-    public boolean hasLockscreenWallpaper() {
-        return mHasLockscreenWallpaper;
+    public int getCurrentUser() {
+        return mCurrentUserId;
     }
 
     @Override // Binder interface
-    public void onShowingStateChanged(boolean showing) {
+    public void onShowingStateChanged(boolean showing, int userId) {
+        if (userId != mCurrentUserId) return;
+
         mIsShowing = showing;
+
+        mCallback.onShowingChanged();
     }
 
     @Override // Binder interface
@@ -95,10 +98,6 @@ public class KeyguardStateMonitor extends IKeyguardStateCallback.Stub {
 
     public synchronized void setCurrentUser(int userId) {
         mCurrentUserId = userId;
-    }
-
-    private synchronized int getCurrentUser() {
-        return mCurrentUserId;
     }
 
     @Override // Binder interface
@@ -112,13 +111,9 @@ public class KeyguardStateMonitor extends IKeyguardStateCallback.Stub {
         mCallback.onTrustedChanged();
     }
 
-    @Override // Binder interface
-    public void onHasLockscreenWallpaperChanged(boolean hasLockscreenWallpaper) {
-        mHasLockscreenWallpaper = hasLockscreenWallpaper;
-    }
-
     public interface StateCallback {
         void onTrustedChanged();
+        void onShowingChanged();
     }
 
     public void dump(String prefix, PrintWriter pw) {

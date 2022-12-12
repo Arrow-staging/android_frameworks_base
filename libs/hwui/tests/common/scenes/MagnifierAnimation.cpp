@@ -17,6 +17,7 @@
 #include "TestSceneBase.h"
 #include "renderthread/RenderProxy.h"
 #include "utils/Color.h"
+#include "hwui/Paint.h"
 
 class MagnifierAnimation;
 
@@ -37,9 +38,9 @@ public:
         canvas.drawColor(Color::White, SkBlendMode::kSrcOver);
         card = TestUtils::createNode(
                 0, 0, width, height, [&](RenderProperties& props, Canvas& canvas) {
-                    SkPaint paint;
+                    Paint paint;
                     paint.setAntiAlias(true);
-                    paint.setTextSize(50);
+                    paint.getSkFont().setSize(50);
 
                     paint.setColor(Color::Black);
                     TestUtils::drawUtf8ToCanvas(&canvas, "Test string", paint, 10, 400);
@@ -55,9 +56,9 @@ public:
                                       (float)magnifier->height(), 0, 0, (float)props.getWidth(),
                                       (float)props.getHeight(), nullptr);
                 });
-        canvas.insertReorderBarrier(true);
+        canvas.enableZ(true);
         canvas.drawRenderNode(zoomImageView.get());
-        canvas.insertReorderBarrier(false);
+        canvas.enableZ(false);
     }
 
     void doFrame(int frameNr) override {
@@ -69,7 +70,7 @@ public:
             magnifier->getSkBitmap(&temp);
             constexpr int x = 90;
             constexpr int y = 325;
-            RenderProxy::copySurfaceInto(renderTarget, x, y, x + magnifier->width(),
+            RenderProxy::copySurfaceInto(renderTarget.get(), x, y, x + magnifier->width(),
                                          y + magnifier->height(), &temp);
         }
     }

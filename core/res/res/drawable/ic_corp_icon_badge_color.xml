@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <!--
 Copyright (C) 2016 The Android Open Source Project
 
@@ -14,11 +15,19 @@ Copyright (C) 2016 The Android Open Source Project
     limitations under the License.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-        android:width="64.0dp"
-        android:height="64.0dp"
-        android:viewportWidth="64.0"
-        android:viewportHeight="64.0">
-    <path
-        android:pathData="M49.1,48.8m-13.9,0.0a13.9,13.9 0.0,1.0 1.0,27.8 0.0a13.9,13.9 0.0,1.0 1.0,-27.8 0.0"
-        android:fillColor="#FFFFFF"/>
+        android:width="64dp"
+        android:height="64dp"
+        android:viewportWidth="64"
+        android:viewportHeight="64">
+    <group
+        android:scaleX=".24"
+        android:scaleY=".24"
+        android:translateX="38"
+        android:translateY="38">
+        <path
+            android:fillColor="#fcfcfc"
+            android:strokeColor="#e8eaed"
+            android:strokeWidth="0.25"
+            android:pathData="@string/config_icon_mask" />
+    </group>
 </vector>

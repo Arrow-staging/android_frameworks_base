@@ -44,6 +44,12 @@ oneway interface IConnectionServiceAdapter {
             in ParcelableConnection connection,
             in Session.Info sessionInfo);
 
+    void handleCreateConferenceComplete(
+            String callId,
+            in ConnectionRequest request,
+            in ParcelableConference connection,
+            in Session.Info sessionInfo);
+
     void setActive(String callId, in Session.Info sessionInfo);
 
     void setRinging(String callId, in Session.Info sessionInfo);
@@ -78,7 +84,8 @@ oneway interface IConnectionServiceAdapter {
 
     void onPostDialChar(String callId, char nextChar, in Session.Info sessionInfo);
 
-    void queryRemoteConnectionServices(RemoteServiceCallback callback, in Session.Info sessionInfo);
+    void queryRemoteConnectionServices(RemoteServiceCallback callback, String callingPackage,
+    in Session.Info sessionInfo);
 
     void setVideoProvider(String callId, IVideoProvider videoProvider, in Session.Info sessionInfo);
 
@@ -121,4 +128,10 @@ oneway interface IConnectionServiceAdapter {
     in Session.Info sessionInfo);
 
     void onConnectionServiceFocusReleased(in Session.Info sessionInfo);
+
+    void resetConnectionTime(String callIdi, in Session.Info sessionInfo);
+
+    void setConferenceState(String callId, boolean isConference, in Session.Info sessionInfo);
+
+    void setCallDirection(String callId, int direction, in Session.Info sessionInfo);
 }

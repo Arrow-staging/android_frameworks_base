@@ -15,6 +15,9 @@
 */
 package com.android.server.notification;
 
+import static android.app.NotificationManager.Policy.SUPPRESSED_EFFECT_BADGE;
+
+import android.app.Notification;
 import android.content.Context;
 import android.util.Slog;
 
@@ -41,9 +44,9 @@ public class BadgeExtractor implements NotificationSignalExtractor {
             if (DBG) Slog.d(TAG, "missing config");
             return null;
         }
-        boolean userWantsBadges = mConfig.badgingEnabled(record.sbn.getUser());
+        boolean userWantsBadges = mConfig.badgingEnabled(record.getSbn().getUser());
         boolean appCanShowBadge =
-                mConfig.canShowBadge(record.sbn.getPackageName(), record.sbn.getUid());
+                mConfig.canShowBadge(record.getSbn().getPackageName(), record.getSbn().getUid());
         if (!userWantsBadges || !appCanShowBadge) {
             record.setShowBadge(false);
         } else {
@@ -54,11 +57,31 @@ public class BadgeExtractor implements NotificationSignalExtractor {
             }
         }
 
+        if (record.isIntercepted()
+                && (record.getSuppressedVisualEffects() & SUPPRESSED_EFFECT_BADGE) != 0) {
+            record.setShowBadge(false);
+        }
+
+        Notification.BubbleMetadata metadata = record.getNotification().getBubbleMetadata();
+        if (metadata != null && metadata.isNotificationSuppressed()) {
+            record.setShowBadge(false);
+        }
+
+        if (mConfig.isMediaNotificationFilteringEnabled()) {
+            final Notification notif = record.getNotification();
+            if (notif.isMediaNotification()) {
+                record.setShowBadge(false);
+            }
+        }
         return null;
     }
 
     @Override
     public void setConfig(RankingConfig config) {
         mConfig = config;
+    }
+
+    @Override
+    public void setZenHelper(ZenModeHelper helper) {
     }
 }

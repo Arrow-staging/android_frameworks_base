@@ -29,23 +29,21 @@ public class RequestSync {
     private String[] mArgs;
     private int mNextArg;
     private String mCurArgData;
-    private boolean mIsForegroundRequest;
+
+    private int mExemptionFlag = ContentResolver.SYNC_EXEMPTION_NONE;
 
     enum Operation {
         REQUEST_SYNC {
             @Override
             void invoke(RequestSync caller) {
-                if (caller.mIsForegroundRequest) {
-                    caller.mExtras.putBoolean(
-                            ContentResolver.SYNC_VIRTUAL_EXTRAS_FORCE_FG_SYNC, true);
-                } else {
-                    caller.mExtras.putBoolean(
-                            ContentResolver.SYNC_VIRTUAL_EXTRAS_FORCE_BG_SYNC, true);
+                final int flag = caller.mExemptionFlag;
+                caller.mExtras.putInt(ContentResolver.SYNC_VIRTUAL_EXTRAS_EXEMPTION_FLAG, flag);
+                if (flag == ContentResolver.SYNC_EXEMPTION_NONE) {
                     System.out.println(
                             "Making a sync request as a background app.\n"
                             + "Note: request may be throttled by App Standby.\n"
                             + "To override this behavior and run a sync immediately,"
-                            + " pass a -f option.\n");
+                            + " pass a -f or -F option (use -h for help).\n");
                 }
                 final SyncRequest request =
                         new SyncRequest.Builder()
@@ -184,6 +182,8 @@ public class RequestSync {
                 mExtras.putBoolean(ContentResolver.SYNC_EXTRAS_UPLOAD, true);
             } else if (opt.equals("--rc") || opt.equals("--require-charging")) {
                 mExtras.putBoolean(ContentResolver.SYNC_EXTRAS_REQUIRE_CHARGING, true);
+            } else if (opt.equals("--ej") || opt.equals("--schedule-as-ej")) {
+                mExtras.putBoolean(ContentResolver.SYNC_EXTRAS_SCHEDULE_AS_EXPEDITED_JOB, true);
             } else if (opt.equals("-e") || opt.equals("--es") || opt.equals("--extra-string")) {
                 final String key = nextArgRequired();
                 final String value = nextArgRequired();
@@ -213,7 +213,10 @@ public class RequestSync {
                 mExtras.putBoolean(key, Boolean.valueOf(value));
 
             } else if (opt.equals("-f") || opt.equals("--foreground")) {
-                mIsForegroundRequest = true;
+                mExemptionFlag = ContentResolver.SYNC_EXEMPTION_PROMOTE_BUCKET;
+
+            } else if (opt.equals("-F") || opt.equals("--top")) {
+                mExemptionFlag = ContentResolver.SYNC_EXEMPTION_PROMOTE_BUCKET_WITH_TEMP;
 
             } else {
                 System.err.println("Error: Unknown option: " + opt);
@@ -293,7 +296,9 @@ public class RequestSync {
                 "       -a|--authority <AUTHORITY>\n" +
                 "    App-standby related options\n" +
                 "\n" +
-                "       -f|--foreground (Exempt a sync from app standby)\n" +
+                "       -f|--foreground (defeat app-standby job throttling," +
+                " but not battery saver)\n" +
+                "       -F|--top (defeat app-standby job throttling and battery saver)\n" +
                 "    ContentResolver extra options:\n" +
                 "      --is|--ignore-settings: Add SYNC_EXTRAS_IGNORE_SETTINGS\n" +
                 "      --ib|--ignore-backoff: Add SYNC_EXTRAS_IGNORE_BACKOFF\n" +

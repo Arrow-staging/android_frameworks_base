@@ -16,11 +16,9 @@
 
 package com.android.internal.os.logging;
 
-import android.content.Context;
-import android.util.StatsLog;
+import android.view.WindowManager.LayoutParams;
 
-import com.android.internal.logging.MetricsLogger;
-import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import com.android.internal.util.FrameworkStatsLog;
 
 /**
  * Used to wrap different logging calls in one, so that client side code base is clean and more
@@ -28,82 +26,27 @@ import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
  */
 public class MetricsLoggerWrapper {
 
-    private static final int METRIC_VALUE_DISMISSED_BY_TAP = 0;
-    private static final int METRIC_VALUE_DISMISSED_BY_DRAG = 1;
-
-    public static void logPictureInPictureDismissByTap(Context context) {
-        MetricsLogger.action(context, MetricsEvent.ACTION_PICTURE_IN_PICTURE_DISMISSED,
-                METRIC_VALUE_DISMISSED_BY_TAP);
-        StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED,
-                context.getUserId(),
-                context.getApplicationInfo().packageName,
-                context.getApplicationInfo().className,
-                StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__DISMISSED);
-    }
-
-    public static void logPictureInPictureDismissByDrag(Context context) {
-        MetricsLogger.action(context,
-                MetricsEvent.ACTION_PICTURE_IN_PICTURE_DISMISSED,
-                METRIC_VALUE_DISMISSED_BY_DRAG);
-        StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED,
-                context.getUserId(),
-                context.getApplicationInfo().packageName,
-                context.getApplicationInfo().className,
-                StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__DISMISSED);
-    }
-
-    public static void logPictureInPictureMinimize(Context context, boolean isMinimized) {
-        MetricsLogger.action(context, MetricsEvent.ACTION_PICTURE_IN_PICTURE_MINIMIZED,
-                isMinimized);
-        if (isMinimized) {
-            StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED,
-                    context.getUserId(),
-                    context.getApplicationInfo().packageName,
-                    context.getApplicationInfo().className,
-                    StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__MINIMIZED);
-        } else {
-            StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED,
-                    context.getUserId(),
-                    context.getApplicationInfo().packageName,
-                    context.getApplicationInfo().className,
-                    StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__EXPANDED_TO_FULL_SCREEN);
+    public static void logAppOverlayEnter(int uid, String packageName, boolean changed, int type, boolean usingAlertWindow) {
+        if (changed) {
+            if (type != LayoutParams.TYPE_APPLICATION_OVERLAY) {
+                FrameworkStatsLog.write(FrameworkStatsLog.OVERLAY_STATE_CHANGED, uid, packageName,
+                        true, FrameworkStatsLog.OVERLAY_STATE_CHANGED__STATE__ENTERED);
+            } else if (!usingAlertWindow){
+                FrameworkStatsLog.write(FrameworkStatsLog.OVERLAY_STATE_CHANGED, uid, packageName,
+                        false, FrameworkStatsLog.OVERLAY_STATE_CHANGED__STATE__ENTERED);
+            }
         }
     }
 
-    public static void logPictureInPictureMenuVisible(Context context, boolean menuStateFull) {
-        MetricsLogger.visibility(context, MetricsEvent.ACTION_PICTURE_IN_PICTURE_MENU,
-                menuStateFull);
-    }
-
-    public static void logPictureInPictureEnter(Context context,
-            boolean supportsEnterPipOnTaskSwitch) {
-        MetricsLogger.action(context, MetricsEvent.ACTION_PICTURE_IN_PICTURE_ENTERED,
-                supportsEnterPipOnTaskSwitch);
-        if (supportsEnterPipOnTaskSwitch) {
-            StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED, context.getUserId(),
-                    context.getApplicationInfo().packageName,
-                    context.getApplicationInfo().className,
-                    StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__ENTERED);
+    public static void logAppOverlayExit(int uid, String packageName, boolean changed, int type, boolean usingAlertWindow) {
+        if (changed) {
+            if (type != LayoutParams.TYPE_APPLICATION_OVERLAY) {
+                FrameworkStatsLog.write(FrameworkStatsLog.OVERLAY_STATE_CHANGED, uid, packageName,
+                        true, FrameworkStatsLog.OVERLAY_STATE_CHANGED__STATE__EXITED);
+            } else if (!usingAlertWindow){
+                FrameworkStatsLog.write(FrameworkStatsLog.OVERLAY_STATE_CHANGED, uid, packageName,
+                        false, FrameworkStatsLog.OVERLAY_STATE_CHANGED__STATE__EXITED);
+            }
         }
-    }
-
-    public static void logPictureInPictureFullScreen(Context context) {
-        MetricsLogger.action(context,
-                MetricsEvent.ACTION_PICTURE_IN_PICTURE_EXPANDED_TO_FULLSCREEN);
-        StatsLog.write(StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED,
-                context.getUserId(),
-                context.getApplicationInfo().packageName,
-                context.getApplicationInfo().className,
-                StatsLog.PICTURE_IN_PICTURE_STATE_CHANGED__STATE__EXPANDED_TO_FULL_SCREEN);
-    }
-
-    public static void logAppOverlayEnter(int uid, String packageName, boolean usingAlertWindow) {
-        StatsLog.write(StatsLog.OVERLAY_STATE_CHANGED, uid, packageName, usingAlertWindow,
-                StatsLog.OVERLAY_STATE_CHANGED__STATE__ENTERED);
-    }
-
-    public static void logAppOverlayExit(int uid, String packageName, boolean usingAlertWindow) {
-        StatsLog.write(StatsLog.OVERLAY_STATE_CHANGED, uid, packageName, usingAlertWindow,
-                StatsLog.OVERLAY_STATE_CHANGED__STATE__EXITED);
     }
 }

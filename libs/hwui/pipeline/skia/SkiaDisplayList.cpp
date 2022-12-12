@@ -15,31 +15,45 @@
  */
 
 #include "SkiaDisplayList.h"
+#include "FunctorDrawable.h"
 
 #include "DumpOpsCanvas.h"
+#ifdef __ANDROID__ // Layoutlib does not support SkiaPipeline
 #include "SkiaPipeline.h"
+#else
+#include "DamageAccumulator.h"
+#endif
 #include "VectorDrawable.h"
+#ifdef __ANDROID__
 #include "renderthread/CanvasContext.h"
+#endif
 
 #include <SkImagePriv.h>
+#include <SkPathOps.h>
 
 namespace android {
 namespace uirenderer {
 namespace skiapipeline {
 
-void SkiaDisplayList::syncContents() {
+void SkiaDisplayList::syncContents(const WebViewSyncData& data) {
     for (auto& functor : mChildFunctors) {
-        functor.syncFunctor();
+        functor->syncFunctor(data);
     }
     for (auto& animatedImage : mAnimatedImages) {
         animatedImage->syncProperties();
     }
     for (auto& vectorDrawable : mVectorDrawables) {
-        vectorDrawable->syncProperties();
+        vectorDrawable.first->syncProperties();
     }
 }
 
-bool SkiaDisplayList::reuseDisplayList(RenderNode* node, renderthread::CanvasContext* context) {
+void SkiaDisplayList::onRemovedFromTree() {
+    for (auto& functor : mChildFunctors) {
+        functor->onRemovedFromTree();
+    }
+}
+
+bool SkiaDisplayList::reuseDisplayList(RenderNode* node) {
     reset();
     node->attachAvailableList(this);
     return true;
@@ -51,12 +65,36 @@ void SkiaDisplayList::updateChildren(std::function<void(RenderNode*)> updateFn) 
     }
 }
 
+static bool intersects(const SkISize screenSize, const Matrix4& mat, const SkRect& bounds) {
+    Vector3 points[] = { Vector3 {bounds.fLeft, bounds.fTop, 0},
+                         Vector3 {bounds.fRight, bounds.fTop, 0},
+                         Vector3 {bounds.fRight, bounds.fBottom, 0},
+                         Vector3 {bounds.fLeft, bounds.fBottom, 0}};
+    float minX, minY, maxX, maxY;
+    bool first = true;
+    for (auto& point : points) {
+        mat.mapPoint3d(point);
+        if (first) {
+            minX = maxX = point.x;
+            minY = maxY = point.y;
+            first = false;
+        } else {
+            minX = std::min(minX, point.x);
+            minY = std::min(minY, point.y);
+            maxX = std::max(maxX, point.x);
+            maxY = std::max(maxY, point.y);
+        }
+    }
+    return SkRect::Make(screenSize).intersects(SkRect::MakeLTRB(minX, minY, maxX, maxY));
+}
+
 bool SkiaDisplayList::prepareListAndChildren(
         TreeObserver& observer, TreeInfo& info, bool functorsNeedLayer,
         std::function<void(RenderNode*, TreeObserver&, TreeInfo&, bool)> childFn) {
     // If the prepare tree is triggered by the UI thread and no previous call to
     // pinImages has failed then we must pin all mutable images in the GPU cache
     // until the next UI thread draw.
+#ifdef __ANDROID__ // Layoutlib does not support CanvasContext
     if (info.prepareTextures && !info.canvasContext.pinImages(mMutableImages)) {
         // In the event that pinning failed we prevent future pinImage calls for the
         // remainder of this tree traversal and also unpin any currently pinned images
@@ -64,18 +102,18 @@ bool SkiaDisplayList::prepareListAndChildren(
         info.prepareTextures = false;
         info.canvasContext.unpinImages();
     }
+#endif
 
     bool hasBackwardProjectedNodesHere = false;
     bool hasBackwardProjectedNodesSubtree = false;
 
     for (auto& child : mChildNodes) {
-        hasBackwardProjectedNodesHere |= child.getNodeProperties().getProjectBackwards();
         RenderNode* childNode = child.getRenderNode();
         Matrix4 mat4(child.getRecordedMatrix());
         info.damageAccumulator->pushTransform(&mat4);
-        // TODO: a layer is needed if the canvas is rotated or has a non-rect clip
         info.hasBackwardProjectedNodes = false;
         childFn(childNode, observer, info, functorsNeedLayer);
+        hasBackwardProjectedNodesHere |= child.getNodeProperties().getProjectBackwards();
         hasBackwardProjectedNodesSubtree |= info.hasBackwardProjectedNodes;
         info.damageAccumulator->popTransform();
     }
@@ -93,24 +131,34 @@ bool SkiaDisplayList::prepareListAndChildren(
 
     bool isDirty = false;
     for (auto& animatedImage : mAnimatedImages) {
+        nsecs_t timeTilNextFrame = TreeInfo::Out::kNoAnimatedImageDelay;
         // If any animated image in the display list needs updated, then damage the node.
-        if (animatedImage->isDirty()) {
+        if (animatedImage->isDirty(&timeTilNextFrame)) {
             isDirty = true;
         }
-        if (animatedImage->isRunning()) {
-            info.out.hasAnimations = true;
+
+        if (animatedImage->isRunning() &&
+            timeTilNextFrame != TreeInfo::Out::kNoAnimatedImageDelay) {
+            auto& delay = info.out.animatedImageDelay;
+            if (delay == TreeInfo::Out::kNoAnimatedImageDelay || timeTilNextFrame < delay) {
+                delay = timeTilNextFrame;
+            }
         }
     }
 
-    for (auto& vectorDrawable : mVectorDrawables) {
+    for (auto& [vectorDrawable, cachedMatrix] : mVectorDrawables) {
         // If any vector drawable in the display list needs update, damage the node.
         if (vectorDrawable->isDirty()) {
-            isDirty = true;
-            static_cast<SkiaPipeline*>(info.canvasContext.getRenderPipeline())
-                    ->getVectorDrawables()
-                    ->push_back(vectorDrawable);
+            Matrix4 totalMatrix;
+            info.damageAccumulator->computeCurrentTransform(&totalMatrix);
+            Matrix4 canvasMatrix(cachedMatrix);
+            totalMatrix.multiply(canvasMatrix);
+            const SkRect& bounds = vectorDrawable->properties().getBounds();
+            if (intersects(info.screenSize, totalMatrix, bounds)) {
+                isDirty = true;
+                vectorDrawable->setPropertyChangeWillBeConsumed(true);
+            }
         }
-        vectorDrawable->setPropertyChangeWillBeConsumed(true);
     }
     return isDirty;
 }
@@ -126,16 +174,15 @@ void SkiaDisplayList::reset() {
     mChildFunctors.clear();
     mChildNodes.clear();
 
-    projectionReceiveIndex = -1;
     allocator.~LinearAllocator();
     new (&allocator) LinearAllocator();
 }
 
-void SkiaDisplayList::output(std::ostream& output, uint32_t level) {
+void SkiaDisplayList::output(std::ostream& output, uint32_t level) const {
     DumpOpsCanvas canvas(output, level, *this);
     mDisplayList.draw(&canvas);
 }
 
-};  // namespace skiapipeline
-};  // namespace uirenderer
-};  // namespace android
+}  // namespace skiapipeline
+}  // namespace uirenderer
+}  // namespace android

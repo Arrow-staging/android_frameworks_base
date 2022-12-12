@@ -16,8 +16,15 @@
 
 package com.android.systemui.shared.recents;
 
+import android.graphics.Bitmap;
+import android.graphics.Insets;
 import android.graphics.Rect;
-import com.android.systemui.shared.system.GraphicBufferCompat;
+import android.os.Bundle;
+import android.os.UserHandle;
+import android.view.MotionEvent;
+
+import com.android.systemui.shared.recents.model.Task;
+import com.android.systemui.shared.system.RemoteTransitionCompat;
 
 /**
  * Temporary callbacks into SystemUI.
@@ -25,23 +32,107 @@ import com.android.systemui.shared.system.GraphicBufferCompat;
 interface ISystemUiProxy {
 
     /**
-     * Proxies SurfaceControl.screenshotToBuffer().
-     */
-    GraphicBufferCompat screenshot(in Rect sourceCrop, int width, int height, int minLayer,
-            int maxLayer, boolean useIdentityTransform, int rotation);
-
-    /**
      * Begins screen pinning on the provided {@param taskId}.
      */
-    void startScreenPinning(int taskId);
+    void startScreenPinning(int taskId) = 1;
 
     /**
-     * Called when the overview service has started the recents animation.
+     * Notifies SystemUI that Overview is shown.
      */
-    void onRecentsAnimationStarted();
+    void onOverviewShown(boolean fromHome) = 6;
 
     /**
-     * Specifies the text to be shown for onboarding the new swipe-up gesture to access recents.
+     * Proxies motion events from the homescreen UI to the status bar. Only called when
+     * swipe down is detected on WORKSPACE. The sender guarantees the following order of events on
+     * the tracking pointer.
+     *
+     * Normal gesture: DOWN, MOVE/POINTER_DOWN/POINTER_UP)*, UP or CANCLE
      */
-    void setRecentsOnboardingText(CharSequence text);
+    void onStatusBarMotionEvent(in MotionEvent event) = 9;
+
+    /**
+     * Proxies the assistant gesture's progress started from navigation bar.
+     */
+    void onAssistantProgress(float progress) = 12;
+
+    /**
+    * Proxies the assistant gesture fling velocity (in pixels per millisecond) upon completion.
+    * Velocity is 0 for drag gestures.
+    */
+    void onAssistantGestureCompletion(float velocity) = 18;
+
+    /**
+     * Start the assistant.
+     */
+    void startAssistant(in Bundle bundle) = 13;
+
+    /**
+     * Notifies that the accessibility button in the system's navigation area has been clicked
+     */
+    void notifyAccessibilityButtonClicked(int displayId) = 15;
+
+    /**
+     * Notifies that the accessibility button in the system's navigation area has been long clicked
+     */
+    void notifyAccessibilityButtonLongClicked() = 16;
+
+    /**
+     * Ends the system screen pinning.
+     */
+    void stopScreenPinning() = 17;
+
+    /*
+     * Notifies that the swipe-to-home (recents animation) is finished.
+     */
+    void notifySwipeToHomeFinished() = 23;
+
+    /**
+     * Notifies that quickstep will switch to a new task
+     * @param rotation indicates which Surface.Rotation the gesture was started in
+     */
+    void notifyPrioritizedRotation(int rotation) = 25;
+
+    /**
+     * Handle the provided image as if it was a screenshot.
+     */
+    void handleImageBundleAsScreenshot(in Bundle screenImageBundle, in Rect locationInScreen,
+              in Insets visibleInsets, in Task.TaskKey task) = 28;
+
+    /**
+     * Notifies to expand notification panel.
+     */
+    void expandNotificationPanel() = 29;
+
+    /**
+     * Notifies SystemUI to invoke Back.
+     */
+    void onBackPressed() = 44;
+
+    /** Sets home rotation enabled. */
+    void setHomeRotationEnabled(boolean enabled) = 45;
+
+    /** Notifies that a swipe-up gesture has started */
+    oneway void notifySwipeUpGestureStarted() = 46;
+
+    /** Notifies when taskbar status updated */
+    oneway void notifyTaskbarStatus(boolean visible, boolean stashed) = 47;
+
+    /**
+     * Notifies sysui when taskbar requests autoHide to stop auto-hiding
+     * If called to suspend, caller is also responsible for calling this method to un-suspend
+     * @param suspend should be true to stop auto-hide, false to resume normal behavior
+     */
+    oneway void notifyTaskbarAutohideSuspend(boolean suspend) = 48;
+
+    /**
+     * Notifies SystemUI to invoke IME Switcher.
+     */
+    void onImeSwitcherPressed() = 49;
+
+    /**
+     * Notifies to toggle notification panel.
+     */
+    void toggleNotificationPanel() = 50;
+
+    // Next id = 51
 }

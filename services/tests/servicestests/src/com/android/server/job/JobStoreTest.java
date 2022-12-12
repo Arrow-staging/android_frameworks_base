@@ -1,9 +1,12 @@
 package com.android.server.job;
 
 import static android.net.NetworkCapabilities.NET_CAPABILITY_IMS;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_OEM_PAID;
 import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -21,14 +24,15 @@ import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.PersistableBundle;
 import android.os.SystemClock;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.runner.AndroidJUnit4;
 import android.test.RenamingDelegatingContext;
 import android.util.Log;
 import android.util.Pair;
 
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
 import com.android.internal.util.HexDump;
-import com.android.server.IoThread;
 import com.android.server.LocalServices;
 import com.android.server.job.JobStore.JobSet;
 import com.android.server.job.controllers.JobStatus;
@@ -42,8 +46,6 @@ import java.time.Clock;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Test reading and writing correctly from file.
@@ -51,6 +53,7 @@ import java.util.concurrent.TimeUnit;
  * atest $ANDROID_BUILD_TOP/frameworks/base/services/tests/servicestests/src/com/android/server/job/JobStoreTest.java
  */
 @RunWith(AndroidJUnit4.class)
+@SmallTest
 public class JobStoreTest {
     private static final String TAG = "TaskStoreTest";
     private static final String TEST_PREFIX = "_test_";
@@ -84,7 +87,7 @@ public class JobStoreTest {
         JobSchedulerService.sSystemClock =
                 Clock.fixed(Clock.systemUTC().instant(), ZoneOffset.UTC);
         JobSchedulerService.sUptimeMillisClock =
-                Clock.fixed(SystemClock.uptimeMillisClock().instant(), ZoneOffset.UTC);
+                Clock.fixed(SystemClock.uptimeClock().instant(), ZoneOffset.UTC);
         JobSchedulerService.sElapsedRealtimeClock =
                 Clock.fixed(SystemClock.elapsedRealtimeClock().instant(), ZoneOffset.UTC);
     }
@@ -92,14 +95,26 @@ public class JobStoreTest {
     @After
     public void tearDown() throws Exception {
         mTaskStoreUnderTest.clear();
+        mTaskStoreUnderTest.waitForWriteToCompleteForTesting(5_000L);
     }
 
     private void waitForPendingIo() throws Exception {
-        final CountDownLatch latch = new CountDownLatch(1);
-        IoThread.getHandler().post(() -> {
-            latch.countDown();
-        });
-        latch.await(10, TimeUnit.SECONDS);
+        assertTrue("Timed out waiting for persistence I/O to complete",
+                mTaskStoreUnderTest.waitForWriteToCompleteForTesting(5_000L));
+    }
+
+    @Test
+    public void testStringToIntArrayAndIntArrayToString() {
+        final int[] netCapabilitiesIntArray = { 1, 3, 5, 7, 9 };
+        final String netCapabilitiesStr = "1,3,5,7,9";
+        final String netCapabilitiesStrWithErrorInt = "1,3,a,7,9";
+        final String emptyString = "";
+        final String str1 = JobStore.intArrayToString(netCapabilitiesIntArray);
+        assertArrayEquals(netCapabilitiesIntArray, JobStore.stringToIntArray(str1));
+        assertEquals(0, JobStore.stringToIntArray(emptyString).length);
+        assertThrows(NumberFormatException.class,
+                () -> JobStore.stringToIntArray(netCapabilitiesStrWithErrorInt));
+        assertEquals(netCapabilitiesStr, JobStore.intArrayToString(netCapabilitiesIntArray));
     }
 
     @Test
@@ -274,10 +289,10 @@ public class JobStoreTest {
                 invalidLateRuntimeElapsedMillis - TWO_HOURS;  // Early is (late - period).
         final Pair<Long, Long> persistedExecutionTimesUTC = new Pair<>(rtcNow, rtcNow + ONE_HOUR);
         final JobStatus js = new JobStatus(b.build(), SOME_UID, "somePackage",
-                0 /* sourceUserId */, 0, 0, "someTag",
+                0 /* sourceUserId */, 0, "someTag",
                 invalidEarlyRuntimeElapsedMillis, invalidLateRuntimeElapsedMillis,
                 0 /* lastSuccessfulRunTime */, 0 /* lastFailedRunTime */,
-                persistedExecutionTimesUTC, 0 /* innerFlagg */);
+                persistedExecutionTimesUTC, 0 /* innerFlag */, 0 /* dynamicConstraints */);
 
         mTaskStoreUnderTest.add(js);
         waitForPendingIo();
@@ -298,10 +313,10 @@ public class JobStoreTest {
     }
 
     @Test
-    public void testPriorityPersisted() throws Exception {
+    public void testBiasPersisted() throws Exception {
         JobInfo.Builder b = new Builder(92, mComponent)
                 .setOverrideDeadline(5000)
-                .setPriority(42)
+                .setBias(42)
                 .setPersisted(true);
         final JobStatus js = JobStatus.createFromJobInfo(b.build(), SOME_UID, null, -1, null);
         mTaskStoreUnderTest.add(js);
@@ -310,7 +325,25 @@ public class JobStoreTest {
         final JobSet jobStatusSet = new JobSet();
         mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
         JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
-        assertEquals("Priority not correctly persisted.", 42, loaded.getPriority());
+        assertEquals("Bias not correctly persisted.", 42, loaded.getBias());
+    }
+
+    @Test
+    public void testPriorityPersisted() throws Exception {
+        final JobInfo job = new Builder(92, mComponent)
+                .setOverrideDeadline(5000)
+                .setPriority(JobInfo.PRIORITY_MIN)
+                .setPersisted(true)
+                .build();
+        final JobStatus js = JobStatus.createFromJobInfo(job, SOME_UID, null, -1, null);
+        mTaskStoreUnderTest.add(js);
+        waitForPendingIo();
+
+        final JobSet jobStatusSet = new JobSet();
+        mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
+        final JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
+        assertEquals("Priority not correctly persisted.",
+                JobInfo.PRIORITY_MIN, job.getPriority());
     }
 
     /**
@@ -374,8 +407,86 @@ public class JobStoreTest {
         assertPersistedEquals(new JobInfo.Builder(0, mComponent)
                 .setPersisted(true)
                 .setRequiredNetwork(new NetworkRequest.Builder()
-                        .addCapability(NET_CAPABILITY_IMS).build())
+                        .addCapability(NET_CAPABILITY_IMS)
+                        .addForbiddenCapability(NET_CAPABILITY_OEM_PAID)
+                        .build())
                 .build());
+    }
+
+    @Test
+    public void testPersistedIdleConstraint() throws Exception {
+        JobInfo.Builder b = new Builder(8, mComponent)
+                .setRequiresDeviceIdle(true)
+                .setPersisted(true);
+        JobStatus taskStatus = JobStatus.createFromJobInfo(b.build(), SOME_UID, null, -1, null);
+
+        mTaskStoreUnderTest.add(taskStatus);
+        waitForPendingIo();
+
+        final JobSet jobStatusSet = new JobSet();
+        mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
+        assertEquals("Incorrect # of persisted tasks.", 1, jobStatusSet.size());
+        JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
+        assertEquals("Idle constraint not persisted correctly.",
+                loaded.getJob().isRequireDeviceIdle(),
+                taskStatus.getJob().isRequireDeviceIdle());
+    }
+
+    @Test
+    public void testPersistedChargingConstraint() throws Exception {
+        JobInfo.Builder b = new Builder(8, mComponent)
+                .setRequiresCharging(true)
+                .setPersisted(true);
+        JobStatus taskStatus = JobStatus.createFromJobInfo(b.build(), SOME_UID, null, -1, null);
+
+        mTaskStoreUnderTest.add(taskStatus);
+        waitForPendingIo();
+
+        final JobSet jobStatusSet = new JobSet();
+        mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
+        assertEquals("Incorrect # of persisted tasks.", 1, jobStatusSet.size());
+        JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
+        assertEquals("Charging constraint not persisted correctly.",
+                loaded.getJob().isRequireCharging(),
+                taskStatus.getJob().isRequireCharging());
+    }
+
+    @Test
+    public void testPersistedStorageNotLowConstraint() throws Exception {
+        JobInfo.Builder b = new Builder(8, mComponent)
+                .setRequiresStorageNotLow(true)
+                .setPersisted(true);
+        JobStatus taskStatus = JobStatus.createFromJobInfo(b.build(), SOME_UID, null, -1, null);
+
+        mTaskStoreUnderTest.add(taskStatus);
+        waitForPendingIo();
+
+        final JobSet jobStatusSet = new JobSet();
+        mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
+        assertEquals("Incorrect # of persisted tasks.", 1, jobStatusSet.size());
+        JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
+        assertEquals("Storage-not-low constraint not persisted correctly.",
+                loaded.getJob().isRequireStorageNotLow(),
+                taskStatus.getJob().isRequireStorageNotLow());
+    }
+
+    @Test
+    public void testPersistedBatteryNotLowConstraint() throws Exception {
+        JobInfo.Builder b = new Builder(8, mComponent)
+                .setRequiresBatteryNotLow(true)
+                .setPersisted(true);
+        JobStatus taskStatus = JobStatus.createFromJobInfo(b.build(), SOME_UID, null, -1, null);
+
+        mTaskStoreUnderTest.add(taskStatus);
+        waitForPendingIo();
+
+        final JobSet jobStatusSet = new JobSet();
+        mTaskStoreUnderTest.readJobMapFromDisk(jobStatusSet, true);
+        assertEquals("Incorrect # of persisted tasks.", 1, jobStatusSet.size());
+        JobStatus loaded = jobStatusSet.getAllJobs().iterator().next();
+        assertEquals("Battery-not-low constraint not persisted correctly.",
+                loaded.getJob().isRequireBatteryNotLow(),
+                taskStatus.getJob().isRequireBatteryNotLow());
     }
 
     /**
@@ -428,7 +539,7 @@ public class JobStoreTest {
                 first.getTransientExtras().toString(), second.getTransientExtras().toString());
 
         // Since people can forget to add tests here for new fields, do one last
-        // sanity check based on bits-on-wire equality.
+        // validity check based on bits-on-wire equality.
         final byte[] firstBytes = marshall(first);
         final byte[] secondBytes = marshall(second);
         if (!Arrays.equals(firstBytes, secondBytes)) {

@@ -17,6 +17,7 @@
 package com.android.internal.view;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.Context;
 import android.graphics.Point;
 import android.graphics.Rect;
@@ -28,14 +29,14 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewParent;
-import android.view.WindowManager;
+import android.widget.PopupWindow;
 
 import com.android.internal.R;
-import com.android.internal.util.Preconditions;
 import com.android.internal.view.menu.MenuBuilder;
-import com.android.internal.widget.FloatingToolbar;
+import com.android.internal.widget.floatingtoolbar.FloatingToolbar;
 
 import java.util.Arrays;
+import java.util.Objects;
 
 public final class FloatingActionMode extends ActionMode {
 
@@ -82,8 +83,8 @@ public final class FloatingActionMode extends ActionMode {
     public FloatingActionMode(
             Context context, ActionMode.Callback2 callback,
             View originatingView, FloatingToolbar floatingToolbar) {
-        mContext = Preconditions.checkNotNull(context);
-        mCallback = Preconditions.checkNotNull(callback);
+        mContext = Objects.requireNonNull(context);
+        mCallback = Objects.requireNonNull(callback);
         mMenu = new MenuBuilder(context).setDefaultShowAsAction(
                 MenuItem.SHOW_AS_ACTION_IF_ROOM);
         setType(ActionMode.TYPE_FLOATING);
@@ -105,14 +106,14 @@ public final class FloatingActionMode extends ActionMode {
         mViewRectOnScreen = new Rect();
         mPreviousViewRectOnScreen = new Rect();
         mScreenRect = new Rect();
-        mOriginatingView = Preconditions.checkNotNull(originatingView);
+        mOriginatingView = Objects.requireNonNull(originatingView);
         mOriginatingView.getLocationOnScreen(mViewPositionOnScreen);
         // Allow the content rect to overshoot a little bit beyond the
         // bottom view bound if necessary.
         mBottomAllowance = context.getResources()
                 .getDimensionPixelSize(R.dimen.content_rect_bottom_clip_allowance);
         mDisplaySize = new Point();
-        setFloatingToolbar(Preconditions.checkNotNull(floatingToolbar));
+        setFloatingToolbar(Objects.requireNonNull(floatingToolbar));
     }
 
     private void setFloatingToolbar(FloatingToolbar floatingToolbar) {
@@ -147,16 +148,21 @@ public final class FloatingActionMode extends ActionMode {
     @Override
     public void invalidateContentRect() {
         mCallback.onGetContentRect(this, mOriginatingView, mContentRect);
-        repositionToolbar();
+        updateViewLocationInWindow(/* forceRepositionToolbar= */ true);
     }
 
     public void updateViewLocationInWindow() {
+        updateViewLocationInWindow(/* forceRepositionToolbar= */ false);
+    }
+
+    private void updateViewLocationInWindow(boolean forceRepositionToolbar) {
         mOriginatingView.getLocationOnScreen(mViewPositionOnScreen);
         mOriginatingView.getRootView().getLocationOnScreen(mRootViewPositionOnScreen);
         mOriginatingView.getGlobalVisibleRect(mViewRectOnScreen);
         mViewRectOnScreen.offset(mRootViewPositionOnScreen[0], mRootViewPositionOnScreen[1]);
 
-        if (!Arrays.equals(mViewPositionOnScreen, mPreviousViewPositionOnScreen)
+        if (forceRepositionToolbar
+                || !Arrays.equals(mViewPositionOnScreen, mPreviousViewPositionOnScreen)
                 || !mViewRectOnScreen.equals(mPreviousViewRectOnScreen)) {
             repositionToolbar();
             mPreviousViewPositionOnScreen[0] = mViewPositionOnScreen[0];
@@ -191,10 +197,15 @@ public final class FloatingActionMode extends ActionMode {
                             mViewRectOnScreen.bottom + mBottomAllowance));
 
             if (!mContentRectOnScreen.equals(mPreviousContentRectOnScreen)) {
-                // Content rect is moving.
-                mOriginatingView.removeCallbacks(mMovingOff);
-                mFloatingToolbarVisibilityHelper.setMoving(true);
-                mOriginatingView.postDelayed(mMovingOff, MOVING_HIDE_DELAY);
+                // Content rect is moving
+                if (!mPreviousContentRectOnScreen.isEmpty()) {
+                    mOriginatingView.removeCallbacks(mMovingOff);
+                    mFloatingToolbarVisibilityHelper.setMoving(true);
+                    mOriginatingView.postDelayed(mMovingOff, MOVING_HIDE_DELAY);
+                } else {
+                    // mPreviousContentRectOnScreen is empty. That means we are are showing the
+                    // toolbar rather than moving it. And we should show it right away.
+                }
 
                 mFloatingToolbar.setContentRect(mContentRectOnScreen);
                 mFloatingToolbar.updateLayout();
@@ -209,8 +220,7 @@ public final class FloatingActionMode extends ActionMode {
     }
 
     private boolean isContentRectWithinBounds() {
-        mContext.getSystemService(WindowManager.class)
-            .getDefaultDisplay().getRealSize(mDisplaySize);
+        mContext.getDisplayNoVerify().getRealSize(mDisplaySize);
         mScreenRect.set(0, 0, mDisplaySize.x, mDisplaySize.y);
 
         return intersectsClosed(mContentRectOnScreen, mScreenRect)
@@ -239,6 +249,23 @@ public final class FloatingActionMode extends ActionMode {
             mFloatingToolbarVisibilityHelper.updateToolbarVisibility();
             mOriginatingView.postDelayed(mHideOff, duration);
         }
+    }
+
+    /**
+     * If this is set to true, the action mode view will dismiss itself on touch events outside of
+     * its window. This only makes sense if the action mode view is a PopupWindow that is touchable
+     * but not focusable, which means touches outside of the window will be delivered to the window
+     * behind. The default is false.
+     *
+     * This is for internal use only and the approach to this may change.
+     * @hide
+     *
+     * @param outsideTouchable whether or not this action mode is "outside touchable"
+     * @param onDismiss optional. Sets a callback for when this action mode popup dismisses itself
+     */
+    public void setOutsideTouchable(
+            boolean outsideTouchable, @Nullable PopupWindow.OnDismissListener onDismiss) {
+        mFloatingToolbar.setOutsideTouchable(outsideTouchable, onDismiss);
     }
 
     @Override
@@ -309,7 +336,7 @@ public final class FloatingActionMode extends ActionMode {
         private long mLastShowTime;
 
         public FloatingToolbarVisibilityHelper(FloatingToolbar toolbar) {
-            mToolbar = Preconditions.checkNotNull(toolbar);
+            mToolbar = Objects.requireNonNull(toolbar);
         }
 
         public void activate() {

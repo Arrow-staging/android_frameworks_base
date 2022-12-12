@@ -14,23 +14,26 @@
  * limitations under the License.
  */
 
+#include "Link.h"
+
 #include <sys/stat.h>
 #include <cinttypes>
 
+#include <algorithm>
 #include <queue>
 #include <unordered_map>
 #include <vector>
 
 #include "android-base/errors.h"
+#include "android-base/expected.h"
 #include "android-base/file.h"
 #include "android-base/stringprintf.h"
+#include "androidfw/Locale.h"
 #include "androidfw/StringPiece.h"
 
 #include "AppInfo.h"
 #include "Debug.h"
-#include "Flags.h"
 #include "LoadedApk.h"
-#include "Locale.h"
 #include "NameMangler.h"
 #include "ResourceUtils.h"
 #include "ResourceValues.h"
@@ -55,7 +58,9 @@
 #include "java/ProguardRules.h"
 #include "link/Linkers.h"
 #include "link/ManifestFixer.h"
+#include "link/NoDefaultResourceRemover.h"
 #include "link/ReferenceLinker.h"
+#include "link/ResourceExcluder.h"
 #include "link/TableMerger.h"
 #include "link/XmlCompatVersioner.h"
 #include "optimize/ResourceDeduper.h"
@@ -63,76 +68,37 @@
 #include "process/IResourceTableConsumer.h"
 #include "process/SymbolTable.h"
 #include "split/TableSplitter.h"
+#include "trace/TraceBuffer.h"
 #include "util/Files.h"
 #include "xml/XmlDom.h"
 
 using ::aapt::io::FileInputStream;
+using ::android::ConfigDescription;
 using ::android::StringPiece;
+using ::android::base::expected;
 using ::android::base::StringPrintf;
+using ::android::base::unexpected;
 
 namespace aapt {
 
-enum class OutputFormat {
-  kApk,
-  kProto,
-};
+namespace {
 
-struct LinkOptions {
-  std::string output_path;
-  std::string manifest_path;
-  std::vector<std::string> include_paths;
-  std::vector<std::string> overlay_files;
-  std::vector<std::string> assets_dirs;
-  bool output_to_directory = false;
-  bool auto_add_overlay = false;
-  OutputFormat output_format = OutputFormat::kApk;
+expected<ResourceTablePackage*, const char*> GetStaticLibraryPackage(ResourceTable* table) {
+  // Resource tables built by aapt2 always contain one package. This is a post condition of
+  // VerifyNoExternalPackages.
+  if (table->packages.size() != 1u) {
+    return unexpected("static library contains more than one package");
+  }
+  return table->packages.back().get();
+}
 
-  // Java/Proguard options.
-  Maybe<std::string> generate_java_class_path;
-  Maybe<std::string> custom_java_package;
-  std::set<std::string> extra_java_packages;
-  Maybe<std::string> generate_text_symbols_path;
-  Maybe<std::string> generate_proguard_rules_path;
-  Maybe<std::string> generate_main_dex_proguard_rules_path;
-  bool generate_conditional_proguard_rules = false;
-  bool generate_non_final_ids = false;
-  std::vector<std::string> javadoc_annotations;
-  Maybe<std::string> private_symbols;
+}  // namespace
 
-  // Optimizations/features.
-  bool no_auto_version = false;
-  bool no_version_vectors = false;
-  bool no_version_transitions = false;
-  bool no_resource_deduping = false;
-  bool no_xml_namespaces = false;
-  bool do_not_compress_anything = false;
-  std::unordered_set<std::string> extensions_to_not_compress;
-
-  // Static lib options.
-  bool no_static_lib_packages = false;
-
-  // AndroidManifest.xml massaging options.
-  ManifestFixerOptions manifest_fixer_options;
-
-  // Products to use/filter on.
-  std::unordered_set<std::string> products;
-
-  // Flattening options.
-  TableFlattenerOptions table_flattener_options;
-
-  // Split APK options.
-  TableSplitterOptions table_splitter_options;
-  std::vector<SplitConstraints> split_constraints;
-  std::vector<std::string> split_paths;
-
-  // Stable ID options.
-  std::unordered_map<ResourceName, ResourceId> stable_id_map;
-  Maybe<std::string> resource_id_map_path;
-};
+constexpr uint8_t kAndroidPackageId = 0x01;
 
 class LinkContext : public IAaptContext {
  public:
-  LinkContext(IDiagnostics* diagnostics)
+  explicit LinkContext(IDiagnostics* diagnostics)
       : diagnostics_(diagnostics), name_mangler_({}), symbols_(&name_mangler_) {
   }
 
@@ -192,6 +158,14 @@ class LinkContext : public IAaptContext {
     min_sdk_version_ = minSdk;
   }
 
+  const std::set<std::string>& GetSplitNameDependencies() override {
+    return split_name_dependencies_;
+  }
+
+  void SetSplitNameDependencies(const std::set<std::string>& split_name_dependencies) {
+    split_name_dependencies_ = split_name_dependencies;
+  }
+
  private:
   DISALLOW_COPY_AND_ASSIGN(LinkContext);
 
@@ -203,6 +177,7 @@ class LinkContext : public IAaptContext {
   SymbolTable symbols_;
   bool verbose_ = false;
   int min_sdk_version_ = 0;
+  std::set<std::string> split_name_dependencies_;
 };
 
 // A custom delegate that generates compatible pre-O IDs for use with feature splits.
@@ -217,7 +192,7 @@ class LinkContext : public IAaptContext {
 // See b/37498913.
 class FeatureSplitSymbolTableDelegate : public DefaultSymbolTableDelegate {
  public:
-  FeatureSplitSymbolTableDelegate(IAaptContext* context) : context_(context) {
+  explicit FeatureSplitSymbolTableDelegate(IAaptContext* context) : context_(context) {
   }
 
   virtual ~FeatureSplitSymbolTableDelegate() = default;
@@ -232,7 +207,7 @@ class FeatureSplitSymbolTableDelegate : public DefaultSymbolTableDelegate {
     }
 
     // Check to see if this is an 'id' with the target package.
-    if (name.type == ResourceType::kId && symbol->id) {
+    if (name.type.type == ResourceType::kId && symbol->id) {
       ResourceId* id = &symbol->id.value();
       if (id->package_id() > kAppPackageId) {
         // Rewrite the resource ID to be compatible pre-O.
@@ -266,6 +241,7 @@ class FeatureSplitSymbolTableDelegate : public DefaultSymbolTableDelegate {
 static bool FlattenXml(IAaptContext* context, const xml::XmlResource& xml_res,
                        const StringPiece& path, bool keep_raw_values, bool utf16,
                        OutputFormat format, IArchiveWriter* writer) {
+  TRACE_CALL();
   if (context->IsVerbose()) {
     context->GetDiagnostics()->Note(DiagMessage(path) << "writing to archive (keep_raw_values="
                                                       << (keep_raw_values ? "true" : "false")
@@ -290,6 +266,9 @@ static bool FlattenXml(IAaptContext* context, const xml::XmlResource& xml_res,
 
     case OutputFormat::kProto: {
       pb::XmlNode pb_node;
+      // Strip whitespace text nodes from tha AndroidManifest.xml
+      SerializeXmlOptions options;
+      options.remove_empty_text_nodes = (path == kAndroidManifestPath);
       SerializeXmlResourceToPb(xml_res, &pb_node);
       return io::CopyProtoToArchive(context, &pb_node, path.to_string(), ArchiveEntry::kCompress,
                                     writer);
@@ -300,6 +279,7 @@ static bool FlattenXml(IAaptContext* context, const xml::XmlResource& xml_res,
 
 // Inflates an XML file from the source path.
 static std::unique_ptr<xml::XmlResource> LoadXml(const std::string& path, IDiagnostics* diag) {
+  TRACE_CALL();
   FileInputStream fin(path);
   if (fin.HadError()) {
     diag->Error(DiagMessage(path) << "failed to load XML file: " << fin.GetError());
@@ -316,8 +296,10 @@ struct ResourceFileFlattenerOptions {
   bool keep_raw_values = false;
   bool do_not_compress_anything = false;
   bool update_proguard_spec = false;
+  bool do_not_fail_on_missing_resources = false;
   OutputFormat output_format = OutputFormat::kApk;
   std::unordered_set<std::string> extensions_to_not_compress;
+  std::optional<std::regex> regex_to_not_compress;
 };
 
 // A sampling of public framework resource IDs.
@@ -343,6 +325,25 @@ struct R {
   };
 };
 
+template <typename T>
+uint32_t GetCompressionFlags(const StringPiece& str, T options) {
+  if (options.do_not_compress_anything) {
+    return 0;
+  }
+
+  if (options.regex_to_not_compress
+      && std::regex_search(str.to_string(), options.regex_to_not_compress.value())) {
+    return 0;
+  }
+
+  for (const std::string& extension : options.extensions_to_not_compress) {
+    if (util::EndsWith(str, extension)) {
+      return 0;
+    }
+  }
+  return ArchiveEntry::kCompress;
+}
+
 class ResourceFileFlattener {
  public:
   ResourceFileFlattener(const ResourceFileFlattenerOptions& options, IAaptContext* context,
@@ -366,8 +367,6 @@ class ResourceFileFlattener {
     // The destination to write this file to.
     std::string dst_path;
   };
-
-  uint32_t GetCompressionFlags(const StringPiece& str);
 
   std::vector<std::unique_ptr<xml::XmlResource>> LinkAndVersionXmlFile(ResourceTable* table,
                                                                        FileOperation* file_op);
@@ -427,19 +426,6 @@ ResourceFileFlattener::ResourceFileFlattener(const ResourceFileFlattenerOptions&
   }
 }
 
-uint32_t ResourceFileFlattener::GetCompressionFlags(const StringPiece& str) {
-  if (options_.do_not_compress_anything) {
-    return 0;
-  }
-
-  for (const std::string& extension : options_.extensions_to_not_compress) {
-    if (util::EndsWith(str, extension)) {
-      return 0;
-    }
-  }
-  return ArchiveEntry::kCompress;
-}
-
 static bool IsTransitionElement(const std::string& name) {
   return name == "fade" || name == "changeBounds" || name == "slide" || name == "explode" ||
          name == "changeImageTransform" || name == "changeTransform" ||
@@ -450,7 +436,8 @@ static bool IsTransitionElement(const std::string& name) {
 
 static bool IsVectorElement(const std::string& name) {
   return name == "vector" || name == "animated-vector" || name == "pathInterpolator" ||
-         name == "objectAnimator" || name == "gradient" || name == "animated-selector";
+         name == "objectAnimator" || name == "gradient" || name == "animated-selector" ||
+         name == "set";
 }
 
 template <typename T>
@@ -462,6 +449,7 @@ std::vector<T> make_singleton_vec(T&& val) {
 
 std::vector<std::unique_ptr<xml::XmlResource>> ResourceFileFlattener::LinkAndVersionXmlFile(
     ResourceTable* table, FileOperation* file_op) {
+  TRACE_CALL();
   xml::XmlResource* doc = file_op->xml_to_flatten.get();
   const Source& src = doc->file.source;
 
@@ -474,12 +462,12 @@ std::vector<std::unique_ptr<xml::XmlResource>> ResourceFileFlattener::LinkAndVer
   // that existing projects have out-of-date references which pass compilation.
   xml::StripAndroidStudioAttributes(doc->root.get());
 
-  XmlReferenceLinker xml_linker;
-  if (!xml_linker.Consume(context_, doc)) {
+  XmlReferenceLinker xml_linker(table);
+  if (!options_.do_not_fail_on_missing_resources && !xml_linker.Consume(context_, doc)) {
     return {};
   }
 
-  if (options_.update_proguard_spec && !proguard::CollectProguardRules(doc, keep_set_)) {
+  if (options_.update_proguard_spec && !proguard::CollectProguardRules(context_, doc, keep_set_)) {
     return {};
   }
 
@@ -514,7 +502,23 @@ std::vector<std::unique_ptr<xml::XmlResource>> ResourceFileFlattener::LinkAndVer
   return xml_compat_versioner.Process(context_, doc, api_range);
 }
 
+ResourceFile::Type XmlFileTypeForOutputFormat(OutputFormat format) {
+  switch (format) {
+    case OutputFormat::kApk:
+      return ResourceFile::Type::kBinaryXml;
+    case OutputFormat::kProto:
+      return ResourceFile::Type::kProtoXml;
+  }
+  LOG_ALWAYS_FATAL("unreachable");
+  return ResourceFile::Type::kUnknown;
+}
+
+static auto kDrawableVersions = std::map<std::string, ApiVersion>{
+    { "adaptive-icon" , SDK_O },
+};
+
 bool ResourceFileFlattener::Flatten(ResourceTable* table, IArchiveWriter* archive_writer) {
+  TRACE_CALL();
   bool error = false;
   std::map<std::pair<ConfigDescription, StringPiece>, FileOperation> config_sorted_files;
 
@@ -587,6 +591,9 @@ bool ResourceFileFlattener::Flatten(ResourceTable* table, IArchiveWriter* archiv
               }
             }
 
+            // Update the type that this file will be written as.
+            file_ref->type = XmlFileTypeForOutputFormat(options_.output_format);
+
             file_op.xml_to_flatten->file.config = config_value->config;
             file_op.xml_to_flatten->file.source = file_ref->GetSource();
             file_op.xml_to_flatten->file.name = ResourceName(pkg->name, type->type, entry->name);
@@ -608,6 +615,20 @@ bool ResourceFileFlattener::Flatten(ResourceTable* table, IArchiveWriter* archiv
         FileOperation& file_op = map_entry.second;
 
         if (file_op.xml_to_flatten) {
+          // Check minimum sdk versions supported for drawables
+          auto drawable_entry = kDrawableVersions.find(file_op.xml_to_flatten->root->name);
+          if (drawable_entry != kDrawableVersions.end()) {
+            if (drawable_entry->second > context_->GetMinSdkVersion()
+                && drawable_entry->second > config.sdkVersion) {
+              context_->GetDiagnostics()->Error(DiagMessage(file_op.xml_to_flatten->file.source)
+                                                    << "<" << drawable_entry->first << "> elements "
+                                                    << "require a sdk version of at least "
+                                                    << (int16_t) drawable_entry->second);
+              error = true;
+              continue;
+            }
+          }
+
           std::vector<std::unique_ptr<xml::XmlResource>> versioned_docs =
               LinkAndVersionXmlFile(table, &file_op);
           if (versioned_docs.empty()) {
@@ -625,11 +646,20 @@ bool ResourceFileFlattener::Flatten(ResourceTable* table, IArchiveWriter* archiv
                                                  << config << "' -> '" << doc->file.config << "'");
               }
 
-              dst_path =
-                  ResourceUtils::BuildResourceFileName(doc->file, context_->GetNameMangler());
-              bool result =
-                  table->AddFileReferenceMangled(doc->file.name, doc->file.config, doc->file.source,
-                                                 dst_path, nullptr, context_->GetDiagnostics());
+              const ResourceFile& file = doc->file;
+              dst_path = ResourceUtils::BuildResourceFileName(file, context_->GetNameMangler());
+
+              auto file_ref =
+                  util::make_unique<FileReference>(table->string_pool.MakeRef(dst_path));
+              file_ref->SetSource(doc->file.source);
+
+              // Update the output format of this XML file.
+              file_ref->type = XmlFileTypeForOutputFormat(options_.output_format);
+              bool result = table->AddResource(NewResourceBuilder(file.name)
+                                                   .SetValue(std::move(file_ref), file.config)
+                                                   .SetAllowMangled(true)
+                                                   .Build(),
+                                               context_->GetDiagnostics());
               if (!result) {
                 return false;
               }
@@ -640,7 +670,8 @@ bool ResourceFileFlattener::Flatten(ResourceTable* table, IArchiveWriter* archiv
           }
         } else {
           error |= !io::CopyFileToArchive(context_, file_op.file_to_copy, file_op.dst_path,
-                                          GetCompressionFlags(file_op.dst_path), archive_writer);
+                                          GetCompressionFlags(file_op.dst_path, options_),
+                                          archive_writer);
         }
       }
     }
@@ -710,7 +741,7 @@ static bool LoadStableIdMap(IDiagnostics* diag, const std::string& path,
     const size_t res_id_str_len = line.size() - res_id_start_idx;
     StringPiece res_id_str = util::TrimWhitespace(line.substr(res_id_start_idx, res_id_str_len));
 
-    Maybe<ResourceId> maybe_id = ResourceUtils::ParseResourceId(res_id_str);
+    std::optional<ResourceId> maybe_id = ResourceUtils::ParseResourceId(res_id_str);
     if (!maybe_id) {
       diag->Error(DiagMessage(Source(path, line_no)) << "invalid resource ID '" << res_id_str
                                                      << "'");
@@ -722,50 +753,30 @@ static bool LoadStableIdMap(IDiagnostics* diag, const std::string& path,
   return true;
 }
 
-static int32_t FindFrameworkAssetManagerCookie(const android::AssetManager& assets) {
-  using namespace android;
-
-  // Find the system package (0x01). AAPT always generates attributes with the type 0x01, so
-  // we're looking for the first attribute resource in the system package.
-  const ResTable& table = assets.getResources(true);
-  Res_value val;
-  ssize_t idx = table.getResource(0x01010000, &val, true);
-  if (idx != NO_ERROR) {
-    // Try as a bag.
-    const ResTable::bag_entry* entry;
-    ssize_t cnt = table.lockBag(0x01010000, &entry);
-    if (cnt >= 0) {
-      idx = entry->stringBlock;
-    }
-    table.unlockBag(entry);
-  }
-
-  if (idx < 0) {
-    return 0;
-  }
-  return table.getTableCookie(idx);
-}
-
-class LinkCommand {
+class Linker {
  public:
-  LinkCommand(LinkContext* context, const LinkOptions& options)
+  Linker(LinkContext* context, const LinkOptions& options)
       : options_(options),
         context_(context),
         final_table_(),
         file_collection_(util::make_unique<io::FileCollection>()) {
   }
 
-  void ExtractCompileSdkVersions(android::AssetManager* assets) {
+  void ExtractCompileSdkVersions(android::AssetManager2* assets) {
     using namespace android;
 
-    int32_t cookie = FindFrameworkAssetManagerCookie(*assets);
-    if (cookie == 0) {
+    // Find the system package (0x01). AAPT always generates attributes with the type 0x01, so
+    // we're looking for the first attribute resource in the system package.
+    android::ApkAssetsCookie cookie;
+    if (auto value = assets->GetResource(0x01010000, true /** may_be_bag */); value.has_value()) {
+      cookie = value->cookie;
+    } else {
       // No Framework assets loaded. Not a failure.
       return;
     }
 
     std::unique_ptr<Asset> manifest(
-        assets->openNonAsset(cookie, kAndroidManifestPath, Asset::AccessMode::ACCESS_BUFFER));
+        assets->OpenNonAsset(kAndroidManifestPath, cookie, Asset::AccessMode::ACCESS_BUFFER));
     if (manifest == nullptr) {
       // No errors.
       return;
@@ -779,35 +790,39 @@ class LinkCommand {
       return;
     }
 
-    xml::Attribute* attr = manifest_xml->root->FindAttribute(xml::kSchemaAndroid, "versionCode");
-    if (attr != nullptr) {
-      Maybe<std::string>& compile_sdk_version = options_.manifest_fixer_options.compile_sdk_version;
-      if (BinaryPrimitive* prim = ValueCast<BinaryPrimitive>(attr->compiled_value.get())) {
-        switch (prim->value.dataType) {
-          case Res_value::TYPE_INT_DEC:
-            compile_sdk_version = StringPrintf("%" PRId32, static_cast<int32_t>(prim->value.data));
-            break;
-          case Res_value::TYPE_INT_HEX:
-            compile_sdk_version = StringPrintf("%" PRIx32, prim->value.data);
-            break;
-          default:
-            break;
+    if (!options_.manifest_fixer_options.compile_sdk_version) {
+      xml::Attribute* attr = manifest_xml->root->FindAttribute(xml::kSchemaAndroid, "versionCode");
+      if (attr != nullptr) {
+        auto& compile_sdk_version = options_.manifest_fixer_options.compile_sdk_version;
+        if (BinaryPrimitive* prim = ValueCast<BinaryPrimitive>(attr->compiled_value.get())) {
+          switch (prim->value.dataType) {
+            case Res_value::TYPE_INT_DEC:
+              compile_sdk_version = StringPrintf("%" PRId32, static_cast<int32_t>(prim->value.data));
+              break;
+            case Res_value::TYPE_INT_HEX:
+              compile_sdk_version = StringPrintf("%" PRIx32, prim->value.data);
+              break;
+            default:
+              break;
+          }
+        } else if (String* str = ValueCast<String>(attr->compiled_value.get())) {
+          compile_sdk_version = *str->value;
+        } else {
+          compile_sdk_version = attr->value;
         }
-      } else if (String* str = ValueCast<String>(attr->compiled_value.get())) {
-        compile_sdk_version = *str->value;
-      } else {
-        compile_sdk_version = attr->value;
       }
     }
 
-    attr = manifest_xml->root->FindAttribute(xml::kSchemaAndroid, "versionName");
-    if (attr != nullptr) {
-      Maybe<std::string>& compile_sdk_version_codename =
-          options_.manifest_fixer_options.compile_sdk_version_codename;
-      if (String* str = ValueCast<String>(attr->compiled_value.get())) {
-        compile_sdk_version_codename = *str->value;
-      } else {
-        compile_sdk_version_codename = attr->value;
+    if (!options_.manifest_fixer_options.compile_sdk_version_codename) {
+      xml::Attribute* attr = manifest_xml->root->FindAttribute(xml::kSchemaAndroid, "versionName");
+      if (attr != nullptr) {
+        std::optional<std::string>& compile_sdk_version_codename =
+            options_.manifest_fixer_options.compile_sdk_version_codename;
+        if (String* str = ValueCast<String>(attr->compiled_value.get())) {
+          compile_sdk_version_codename = *str->value;
+        } else {
+          compile_sdk_version_codename = attr->value;
+        }
       }
     }
   }
@@ -815,6 +830,7 @@ class LinkCommand {
   // Creates a SymbolTable that loads symbols from the various APKs.
   // Pre-condition: context_->GetCompilationPackage() needs to be set.
   bool LoadSymbolsFromIncludePaths() {
+    TRACE_NAME("LoadSymbolsFromIncludePaths: #" + std::to_string(options_.include_paths.size()));
     auto asset_source = util::make_unique<AssetManagerSymbolSource>();
     for (const std::string& path : options_.include_paths) {
       if (context_->IsVerbose()) {
@@ -847,18 +863,15 @@ class LinkCommand {
         ResourceTable* table = static_apk->GetResourceTable();
 
         // If we are using --no-static-lib-packages, we need to rename the package of this table to
-        // our compilation package.
-        if (options_.no_static_lib_packages) {
-          // Since package names can differ, and multiple packages can exist in a ResourceTable,
-          // we place the requirement that all static libraries are built with the package
-          // ID 0x7f. So if one is not found, this is an error.
-          if (ResourceTablePackage* pkg = table->FindPackageById(kAppPackageId)) {
-            pkg->name = context_->GetCompilationPackage();
-          } else {
-            context_->GetDiagnostics()->Error(DiagMessage(path)
-                                              << "no package with ID 0x7f found in static library");
+        // our compilation package so the symbol package name does not get mangled into the entry
+        // name.
+        if (options_.no_static_lib_packages && !table->packages.empty()) {
+          auto lib_package_result = GetStaticLibraryPackage(table);
+          if (!lib_package_result.has_value()) {
+            context_->GetDiagnostics()->Error(DiagMessage(path) << lib_package_result.error());
             return false;
           }
+          lib_package_result.value()->name = context_->GetCompilationPackage();
         }
 
         context_->GetExternalSymbols()->AppendSource(
@@ -876,9 +889,7 @@ class LinkCommand {
     // Capture the shared libraries so that the final resource table can be properly flattened
     // with support for shared libraries.
     for (auto& entry : asset_source->GetAssignedPackageIds()) {
-      if (entry.first > kFrameworkPackageId && entry.first < kAppPackageId) {
-        final_table_.included_packages_[entry.first] = entry.second;
-      } else if (entry.first == kAppPackageId) {
+      if (entry.first == kAppPackageId) {
         // Capture the included base feature package.
         included_feature_base_ = entry.second;
       } else if (entry.first == kFrameworkPackageId) {
@@ -892,6 +903,8 @@ class LinkCommand {
           // android:versionCode from the framework AndroidManifest.xml.
           ExtractCompileSdkVersions(asset_source->GetAssetManager());
         }
+      } else if (asset_source->IsPackageDynamic(entry.first, entry.second)) {
+        final_table_.included_packages_[entry.first] = entry.second;
       }
     }
 
@@ -899,7 +912,8 @@ class LinkCommand {
     return true;
   }
 
-  Maybe<AppInfo> ExtractAppInfoFromManifest(xml::XmlResource* xml_res, IDiagnostics* diag) {
+  std::optional<AppInfo> ExtractAppInfoFromManifest(xml::XmlResource* xml_res, IDiagnostics* diag) {
+    TRACE_CALL();
     // Make sure the first element is <manifest> with package attribute.
     xml::Element* manifest_el = xml::FindRootElement(xml_res->root.get());
     if (manifest_el == nullptr) {
@@ -923,7 +937,7 @@ class LinkCommand {
 
     if (xml::Attribute* version_code_attr =
             manifest_el->FindAttribute(xml::kSchemaAndroid, "versionCode")) {
-      Maybe<uint32_t> maybe_code = ResourceUtils::ParseInt(version_code_attr->value);
+      std::optional<uint32_t> maybe_code = ResourceUtils::ParseInt(version_code_attr->value);
       if (!maybe_code) {
         diag->Error(DiagMessage(xml_res->file.source.WithLine(manifest_el->line_number))
                     << "invalid android:versionCode '" << version_code_attr->value << "'");
@@ -932,9 +946,21 @@ class LinkCommand {
       app_info.version_code = maybe_code.value();
     }
 
+    if (xml::Attribute* version_code_major_attr =
+        manifest_el->FindAttribute(xml::kSchemaAndroid, "versionCodeMajor")) {
+      std::optional<uint32_t> maybe_code = ResourceUtils::ParseInt(version_code_major_attr->value);
+      if (!maybe_code) {
+        diag->Error(DiagMessage(xml_res->file.source.WithLine(manifest_el->line_number))
+                        << "invalid android:versionCodeMajor '"
+                        << version_code_major_attr->value << "'");
+        return {};
+      }
+      app_info.version_code_major = maybe_code.value();
+    }
+
     if (xml::Attribute* revision_code_attr =
             manifest_el->FindAttribute(xml::kSchemaAndroid, "revisionCode")) {
-      Maybe<uint32_t> maybe_code = ResourceUtils::ParseInt(revision_code_attr->value);
+      std::optional<uint32_t> maybe_code = ResourceUtils::ParseInt(revision_code_attr->value);
       if (!maybe_code) {
         diag->Error(DiagMessage(xml_res->file.source.WithLine(manifest_el->line_number))
                     << "invalid android:revisionCode '" << revision_code_attr->value << "'");
@@ -955,6 +981,17 @@ class LinkCommand {
         app_info.min_sdk_version = ResourceUtils::ParseSdkVersion(min_sdk->value);
       }
     }
+
+    for (const xml::Element* child_el : manifest_el->GetChildElements()) {
+      if (child_el->namespace_uri.empty() && child_el->name == "uses-split") {
+        if (const xml::Attribute* split_name =
+            child_el->FindAttribute(xml::kSchemaAndroid, "name")) {
+          if (!split_name->value.empty()) {
+            app_info.split_name_dependencies.insert(split_name->value);
+          }
+        }
+      }
+    }
     return app_info;
   }
 
@@ -963,8 +1000,7 @@ class LinkCommand {
   // stripped, or there is an error and false is returned.
   bool VerifyNoExternalPackages() {
     auto is_ext_package_func = [&](const std::unique_ptr<ResourceTablePackage>& pkg) -> bool {
-      return context_->GetCompilationPackage() != pkg->name || !pkg->id ||
-             pkg->id.value() != context_->GetPackageId();
+      return context_->GetCompilationPackage() != pkg->name;
     };
 
     bool error = false;
@@ -1008,19 +1044,11 @@ class LinkCommand {
   bool VerifyNoIdsSet() {
     for (const auto& package : final_table_.packages) {
       for (const auto& type : package->types) {
-        if (type->id) {
-          context_->GetDiagnostics()->Error(DiagMessage() << "type " << type->type << " has ID "
-                                                          << StringPrintf("%02x", type->id.value())
-                                                          << " assigned");
-          return false;
-        }
-
         for (const auto& entry : type->entries) {
           if (entry->id) {
             ResourceNameRef res_name(package->name, type->type, entry->name);
-            context_->GetDiagnostics()->Error(
-                DiagMessage() << "entry " << res_name << " has ID "
-                              << StringPrintf("%02x", entry->id.value()) << " assigned");
+            context_->GetDiagnostics()->Error(DiagMessage() << "resource " << res_name << " has ID "
+                                                            << entry->id.value() << " assigned");
             return false;
           }
         }
@@ -1038,6 +1066,7 @@ class LinkCommand {
   }
 
   bool FlattenTable(ResourceTable* table, OutputFormat format, IArchiveWriter* writer) {
+    TRACE_CALL();
     switch (format) {
       case OutputFormat::kApk: {
         BigBuffer buffer(1024);
@@ -1054,7 +1083,8 @@ class LinkCommand {
 
       case OutputFormat::kProto: {
         pb::ResourceTable pb_table;
-        SerializeTableToPb(*table, &pb_table);
+        SerializeTableToPb(*table, &pb_table, context_->GetDiagnostics(),
+                           options_.proto_table_flattener_options);
         return io::CopyProtoToArchive(context_, &pb_table, kProtoResourceTablePath,
                                       ArchiveEntry::kCompress, writer);
       } break;
@@ -1064,7 +1094,7 @@ class LinkCommand {
 
   bool WriteJavaFile(ResourceTable* table, const StringPiece& package_name_to_generate,
                      const StringPiece& out_package, const JavaClassGeneratorOptions& java_options,
-                     const Maybe<std::string>& out_text_symbols_path = {}) {
+                     const std::optional<std::string>& out_text_symbols_path = {}) {
     if (!options_.generate_java_class_path && !out_text_symbols_path) {
       return true;
     }
@@ -1111,6 +1141,7 @@ class LinkCommand {
   }
 
   bool GenerateJavaClasses() {
+    TRACE_CALL();
     // The set of packages whose R class to call in the main classes onResourcesLoaded callback.
     std::vector<std::string> packages_to_callback;
 
@@ -1194,6 +1225,7 @@ class LinkCommand {
   }
 
   bool WriteManifestJavaFile(xml::XmlResource* manifest_xml) {
+    TRACE_CALL();
     if (!options_.generate_java_class_path) {
       return true;
     }
@@ -1219,7 +1251,7 @@ class LinkCommand {
     }
 
     const std::string package_utf8 =
-        options_.custom_java_package.value_or_default(context_->GetCompilationPackage());
+        options_.custom_java_package.value_or(context_->GetCompilationPackage());
 
     std::string out_path = options_.generate_java_class_path.value();
     file::AppendPath(&out_path, file::PackageToPath(package_utf8));
@@ -1239,7 +1271,8 @@ class LinkCommand {
       return false;
     }
 
-    ClassDefinition::WriteJavaFile(manifest_class.get(), package_utf8, true, &fout);
+    ClassDefinition::WriteJavaFile(manifest_class.get(), package_utf8, true,
+                                   false /* strip_api_annotations */, &fout);
     fout.Flush();
 
     if (fout.HadError()) {
@@ -1250,7 +1283,8 @@ class LinkCommand {
     return true;
   }
 
-  bool WriteProguardFile(const Maybe<std::string>& out, const proguard::KeepSet& keep_set) {
+  bool WriteProguardFile(const std::optional<std::string>& out, const proguard::KeepSet& keep_set) {
+    TRACE_CALL();
     if (!out) {
       return true;
     }
@@ -1263,7 +1297,8 @@ class LinkCommand {
       return false;
     }
 
-    proguard::WriteKeepSet(keep_set, &fout);
+    proguard::WriteKeepSet(keep_set, &fout, options_.generate_minimal_proguard_rules,
+                           options_.no_proguard_location_reference);
     fout.Flush();
 
     if (fout.HadError()) {
@@ -1275,6 +1310,7 @@ class LinkCommand {
   }
 
   bool MergeStaticLibrary(const std::string& input, bool override) {
+    TRACE_CALL();
     if (context_->IsVerbose()) {
       context_->GetDiagnostics()->Note(DiagMessage() << "merging static library " << input);
     }
@@ -1286,12 +1322,17 @@ class LinkCommand {
     }
 
     ResourceTable* table = apk->GetResourceTable();
-    ResourceTablePackage* pkg = table->FindPackageById(kAppPackageId);
-    if (!pkg) {
-      context_->GetDiagnostics()->Error(DiagMessage(input) << "static library has no package");
+    if (table->packages.empty()) {
+      return true;
+    }
+
+    auto lib_package_result = GetStaticLibraryPackage(table);
+    if (!lib_package_result.has_value()) {
+      context_->GetDiagnostics()->Error(DiagMessage(input) << lib_package_result.error());
       return false;
     }
 
+    ResourceTablePackage* pkg = lib_package_result.value();
     bool result;
     if (options_.no_static_lib_packages) {
       // Merge all resources as if they were in the compilation package. This is the old behavior
@@ -1325,6 +1366,7 @@ class LinkCommand {
 
   bool MergeExportedSymbols(const Source& source,
                             const std::vector<SourcedResourceName>& exported_symbols) {
+    TRACE_CALL();
     // Add the exports of this file to the table.
     for (const SourcedResourceName& exported_symbol : exported_symbols) {
       ResourceName res_name = exported_symbol.name;
@@ -1332,16 +1374,16 @@ class LinkCommand {
         res_name.package = context_->GetCompilationPackage();
       }
 
-      Maybe<ResourceName> mangled_name = context_->GetNameMangler()->MangleName(res_name);
+      std::optional<ResourceName> mangled_name = context_->GetNameMangler()->MangleName(res_name);
       if (mangled_name) {
         res_name = mangled_name.value();
       }
 
-      std::unique_ptr<Id> id = util::make_unique<Id>();
+      auto id = util::make_unique<Id>();
       id->SetSource(source.WithLine(exported_symbol.line));
-      bool result =
-          final_table_.AddResourceMangled(res_name, ConfigDescription::DefaultConfig(),
-                                          std::string(), std::move(id), context_->GetDiagnostics());
+      bool result = final_table_.AddResource(
+          NewResourceBuilder(res_name).SetValue(std::move(id)).SetAllowMangled(true).Build(),
+          context_->GetDiagnostics());
       if (!result) {
         return false;
       }
@@ -1350,6 +1392,7 @@ class LinkCommand {
   }
 
   bool MergeCompiledFile(const ResourceFile& compiled_file, io::IFile* file, bool override) {
+    TRACE_CALL();
     if (context_->IsVerbose()) {
       context_->GetDiagnostics()->Note(DiagMessage()
                                        << "merging '" << compiled_file.name
@@ -1362,12 +1405,13 @@ class LinkCommand {
     return MergeExportedSymbols(compiled_file.source, compiled_file.exported_symbols);
   }
 
-  // Takes a path to load as a ZIP file and merges the files within into the master ResourceTable.
+  // Takes a path to load as a ZIP file and merges the files within into the main ResourceTable.
   // If override is true, conflicting resources are allowed to override each other, in order of last
   // seen.
   // An io::IFileCollection is created from the ZIP file and added to the set of
   // io::IFileCollections that are open.
   bool MergeArchive(const std::string& input, bool override) {
+    TRACE_CALL();
     if (context_->IsVerbose()) {
       context_->GetDiagnostics()->Note(DiagMessage() << "merging archive " << input);
     }
@@ -1392,7 +1436,7 @@ class LinkCommand {
     return !error;
   }
 
-  // Takes a path to load and merge into the master ResourceTable. If override is true,
+  // Takes a path to load and merge into the main ResourceTable. If override is true,
   // conflicting resources are allowed to override each other, in order of last seen.
   // If the file path ends with .flata, .jar, .jack, or .zip the file is treated
   // as ZIP archive and the files within are merged individually.
@@ -1409,12 +1453,13 @@ class LinkCommand {
     return MergeFile(file, override);
   }
 
-  // Takes an AAPT Container file (.apc/.flat) to load and merge into the master ResourceTable.
+  // Takes an AAPT Container file (.apc/.flat) to load and merge into the main ResourceTable.
   // If override is true, conflicting resources are allowed to override each other, in order of last
   // seen.
   // All other file types are ignored. This is because these files could be coming from a zip,
   // where we could have other files like classes.dex.
   bool MergeFile(io::IFile* file, bool override) {
+    TRACE_CALL();
     const Source& src = file->GetSource();
 
     if (util::EndsWith(src.path, ".xml") || util::EndsWith(src.path, ".png")) {
@@ -1455,6 +1500,7 @@ class LinkCommand {
 
     while ((entry = reader.Next()) != nullptr) {
       if (entry->Type() == ContainerEntryType::kResTable) {
+        TRACE_NAME(std::string("Process ResTable:") + file->GetSource().path);
         pb::ResourceTable pb_table;
         if (!entry->GetResTable(&pb_table)) {
           context_->GetDiagnostics()->Error(DiagMessage(src) << "failed to read resource table: "
@@ -1475,6 +1521,7 @@ class LinkCommand {
           return false;
         }
       } else if (entry->Type() == ContainerEntryType::kResFile) {
+        TRACE_NAME(std::string("Process ResFile") + file->GetSource().path);
         pb::internal::CompiledFile pb_compiled_file;
         off64_t offset;
         size_t len;
@@ -1503,7 +1550,7 @@ class LinkCommand {
   bool CopyAssetsDirsToApk(IArchiveWriter* writer) {
     std::map<std::string, std::unique_ptr<io::RegularFile>> merged_assets;
     for (const std::string& assets_dir : options_.assets_dirs) {
-      Maybe<std::vector<std::string>> files =
+      std::optional<std::vector<std::string>> files =
           file::FindFiles(assets_dir, context_->GetDiagnostics(), nullptr);
       if (!files) {
         return false;
@@ -1526,12 +1573,7 @@ class LinkCommand {
     }
 
     for (auto& entry : merged_assets) {
-      uint32_t compression_flags = ArchiveEntry::kCompress;
-      std::string extension = file::GetExtension(entry.first).to_string();
-      if (options_.extensions_to_not_compress.count(extension) > 0) {
-        compression_flags = 0u;
-      }
-
+      uint32_t compression_flags = GetCompressionFlags(entry.first, options_);
       if (!io::CopyFileToArchive(context_, entry.second.get(), entry.first, compression_flags,
                                  writer)) {
         return false;
@@ -1540,14 +1582,161 @@ class LinkCommand {
     return true;
   }
 
+  ResourceEntry* ResolveTableEntry(LinkContext* context, ResourceTable* table,
+                                   Reference* reference) {
+    if (!reference || !reference->name) {
+      return nullptr;
+    }
+    auto name_ref = ResourceNameRef(reference->name.value());
+    if (name_ref.package.empty()) {
+      name_ref.package = context->GetCompilationPackage();
+    }
+    const auto search_result = table->FindResource(name_ref);
+    if (!search_result) {
+      return nullptr;
+    }
+    return search_result.value().entry;
+  }
+
+  void AliasAdaptiveIcon(xml::XmlResource* manifest, ResourceTable* table) {
+    const xml::Element* application = manifest->root->FindChild("", "application");
+    if (!application) {
+      return;
+    }
+
+    const xml::Attribute* icon = application->FindAttribute(xml::kSchemaAndroid, "icon");
+    const xml::Attribute* round_icon = application->FindAttribute(xml::kSchemaAndroid, "roundIcon");
+    if (!icon || !round_icon) {
+      return;
+    }
+
+    // Find the icon resource defined within the application.
+    const auto icon_reference = ValueCast<Reference>(icon->compiled_value.get());
+    const auto icon_entry = ResolveTableEntry(context_, table, icon_reference);
+    if (!icon_entry) {
+      return;
+    }
+
+    int icon_max_sdk = 0;
+    for (auto& config_value : icon_entry->values) {
+      icon_max_sdk = (icon_max_sdk < config_value->config.sdkVersion)
+          ? config_value->config.sdkVersion : icon_max_sdk;
+    }
+    if (icon_max_sdk < SDK_O) {
+      // Adaptive icons must be versioned with v26 qualifiers, so this is not an adaptive icon.
+      return;
+    }
+
+    // Find the roundIcon resource defined within the application.
+    const auto round_icon_reference = ValueCast<Reference>(round_icon->compiled_value.get());
+    const auto round_icon_entry = ResolveTableEntry(context_, table, round_icon_reference);
+    if (!round_icon_entry) {
+      return;
+    }
+
+    int round_icon_max_sdk = 0;
+    for (auto& config_value : round_icon_entry->values) {
+      round_icon_max_sdk = (round_icon_max_sdk < config_value->config.sdkVersion)
+                     ? config_value->config.sdkVersion : round_icon_max_sdk;
+    }
+    if (round_icon_max_sdk >= SDK_O) {
+      // The developer explicitly used a v26 compatible drawable as the roundIcon, meaning we should
+      // not generate an alias to the icon drawable.
+      return;
+    }
+
+    // Add an equivalent v26 entry to the roundIcon for each v26 variant of the regular icon.
+    for (auto& config_value : icon_entry->values) {
+      if (config_value->config.sdkVersion < SDK_O) {
+        continue;
+      }
+
+      context_->GetDiagnostics()->Note(DiagMessage() << "generating "
+                                                     << round_icon_reference->name.value()
+                                                     << " with config \"" << config_value->config
+                                                     << "\" for round icon compatibility");
+
+      CloningValueTransformer cloner(&table->string_pool);
+      auto value = icon_reference->Transform(cloner);
+      auto round_config_value =
+          round_icon_entry->FindOrCreateValue(config_value->config, config_value->product);
+      round_config_value->value = std::move(value);
+    }
+  }
+
+  bool VerifySharedUserId(xml::XmlResource* manifest, ResourceTable* table) {
+    const xml::Element* manifest_el = xml::FindRootElement(manifest->root.get());
+    if (manifest_el == nullptr) {
+      return true;
+    }
+    if (!manifest_el->namespace_uri.empty() || manifest_el->name != "manifest") {
+      return true;
+    }
+    const xml::Attribute* attr = manifest_el->FindAttribute(xml::kSchemaAndroid, "sharedUserId");
+    if (!attr) {
+      return true;
+    }
+    const auto validate = [&](const std::string& shared_user_id) -> bool {
+      if (util::IsAndroidSharedUserId(context_->GetCompilationPackage(), shared_user_id)) {
+        return true;
+      }
+      DiagMessage error_msg(manifest_el->line_number);
+      error_msg << "attribute 'sharedUserId' in <manifest> tag is not a valid shared user id: '"
+                << shared_user_id << "'";
+      if (options_.manifest_fixer_options.warn_validation) {
+        // Treat the error only as a warning.
+        context_->GetDiagnostics()->Warn(error_msg);
+        return true;
+      }
+      context_->GetDiagnostics()->Error(error_msg);
+      return false;
+    };
+    // If attr->compiled_value is not null, check if it is a ref
+    if (attr->compiled_value) {
+      const auto ref = ValueCast<Reference>(attr->compiled_value.get());
+      if (ref == nullptr) {
+        return true;
+      }
+      const auto shared_user_id_entry = ResolveTableEntry(context_, table, ref);
+      if (!shared_user_id_entry) {
+        return true;
+      }
+      for (const auto& value : shared_user_id_entry->values) {
+        const auto str_value = ValueCast<String>(value->value.get());
+        if (str_value != nullptr && !validate(*str_value->value)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // Fallback to checking the raw value
+    return validate(attr->value);
+  }
+
   // Writes the AndroidManifest, ResourceTable, and all XML files referenced by the ResourceTable
   // to the IArchiveWriter.
   bool WriteApk(IArchiveWriter* writer, proguard::KeepSet* keep_set, xml::XmlResource* manifest,
                 ResourceTable* table) {
-    const bool keep_raw_values = context_->GetPackageType() == PackageType::kStaticLib;
-    bool result = FlattenXml(context_, *manifest, "AndroidManifest.xml", keep_raw_values,
+    TRACE_CALL();
+    const bool keep_raw_values = (context_->GetPackageType() == PackageType::kStaticLib)
+                                 || options_.keep_raw_values;
+    bool result = FlattenXml(context_, *manifest, kAndroidManifestPath, keep_raw_values,
                              true /*utf16*/, options_.output_format, writer);
     if (!result) {
+      return false;
+    }
+
+    // When a developer specifies an adaptive application icon, and a non-adaptive round application
+    // icon, create an alias from the round icon to the regular icon for v26 APIs and up. We do this
+    // because certain devices prefer android:roundIcon over android:icon regardless of the API
+    // levels of the drawables set for either. This auto-aliasing behaviour allows an app to prefer
+    // the android:roundIcon on API 25 devices, and prefer the adaptive icon on API 26 devices.
+    // See (b/34829129)
+    AliasAdaptiveIcon(manifest, table);
+
+    // Verify the shared user id here to handle the case of reference value.
+    if (!VerifySharedUserId(manifest, table)) {
       return false;
     }
 
@@ -1555,6 +1744,7 @@ class LinkCommand {
     file_flattener_options.keep_raw_values = keep_raw_values;
     file_flattener_options.do_not_compress_anything = options_.do_not_compress_anything;
     file_flattener_options.extensions_to_not_compress = options_.extensions_to_not_compress;
+    file_flattener_options.regex_to_not_compress = options_.regex_to_not_compress;
     file_flattener_options.no_auto_version = options_.no_auto_version;
     file_flattener_options.no_version_vectors = options_.no_version_vectors;
     file_flattener_options.no_version_transitions = options_.no_version_transitions;
@@ -1562,9 +1752,9 @@ class LinkCommand {
     file_flattener_options.update_proguard_spec =
         static_cast<bool>(options_.generate_proguard_rules_path);
     file_flattener_options.output_format = options_.output_format;
+    file_flattener_options.do_not_fail_on_missing_resources = options_.merge_only;
 
     ResourceFileFlattener file_flattener(file_flattener_options, context_, keep_set);
-
     if (!file_flattener.Flatten(table, writer)) {
       context_->GetDiagnostics()->Error(DiagMessage() << "failed linking file resources");
       return false;
@@ -1576,18 +1766,24 @@ class LinkCommand {
     // If required, the package name is modifed before flattening, and then modified back
     // to its original name.
     ResourceTablePackage* package_to_rewrite = nullptr;
-    if (context_->GetPackageId() > kAppPackageId &&
-        included_feature_base_ == make_value(context_->GetCompilationPackage())) {
+    // Pre-O, the platform treats negative resource IDs [those with a package ID of 0x80
+    // or higher] as invalid. In order to work around this limitation, we allow the use
+    // of traditionally reserved resource IDs [those between 0x02 and 0x7E]. Allow the
+    // definition of what a valid "split" package ID is to account for this.
+    const bool isSplitPackage = (options_.allow_reserved_package_id &&
+          context_->GetPackageId() != kAppPackageId &&
+          context_->GetPackageId() != kFrameworkPackageId)
+        || (!options_.allow_reserved_package_id && context_->GetPackageId() > kAppPackageId);
+    if (isSplitPackage && included_feature_base_ == context_->GetCompilationPackage()) {
       // The base APK is included, and this is a feature split. If the base package is
       // the same as this package, then we are building an old style Android Instant Apps feature
       // split and must apply this workaround to avoid requiring namespaces support.
-      package_to_rewrite = table->FindPackage(context_->GetCompilationPackage());
-      if (package_to_rewrite != nullptr) {
-        CHECK_EQ(1u, table->packages.size()) << "can't change name of package when > 1 package";
-
+      if (!table->packages.empty() &&
+          table->packages.back()->name == context_->GetCompilationPackage()) {
+        package_to_rewrite = table->packages.back().get();
         std::string new_package_name =
             StringPrintf("%s.%s", package_to_rewrite->name.c_str(),
-                         app_info_.split_name.value_or_default("feature").c_str());
+                         app_info_.split_name.value_or("feature").c_str());
 
         if (context_->IsVerbose()) {
           context_->GetDiagnostics()->Note(
@@ -1603,9 +1799,12 @@ class LinkCommand {
     if (package_to_rewrite != nullptr) {
       // Change the name back.
       package_to_rewrite->name = context_->GetCompilationPackage();
-      if (package_to_rewrite->id) {
-        table->included_packages_.erase(package_to_rewrite->id.value());
-      }
+
+      // TableFlattener creates an `included_packages_` mapping entry for each package with a
+      // non-standard package id (not 0x01 or 0x7f). Since this is a feature split and not a shared
+      // library, do not include a mapping from the feature package name to the feature package id
+      // in the feature's dynamic reference table.
+      table->included_packages_.erase(context_->GetPackageId());
     }
 
     if (!success) {
@@ -1615,6 +1814,7 @@ class LinkCommand {
   }
 
   int Run(const std::vector<std::string>& input_files) {
+    TRACE_CALL();
     // Load the AndroidManifest.xml
     std::unique_ptr<xml::XmlResource> manifest_xml =
         LoadXml(options_.manifest_path, context_->GetDiagnostics());
@@ -1623,10 +1823,20 @@ class LinkCommand {
     }
 
     // First extract the Package name without modifying it (via --rename-manifest-package).
-    if (Maybe<AppInfo> maybe_app_info =
+    if (std::optional<AppInfo> maybe_app_info =
             ExtractAppInfoFromManifest(manifest_xml.get(), context_->GetDiagnostics())) {
       const AppInfo& app_info = maybe_app_info.value();
       context_->SetCompilationPackage(app_info.package);
+    }
+
+    // Determine the package name under which to merge resources.
+    if (options_.rename_resources_package) {
+      if (!options_.custom_java_package) {
+        // Generate the R.java under the original package name instead of the package name specified
+        // through --rename-resources-package.
+        options_.custom_java_package = context_->GetCompilationPackage();
+      }
+      context_->SetCompilationPackage(options_.rename_resources_package.value());
     }
 
     // Now that the compilation package is set, load the dependencies. This will also extract
@@ -1640,20 +1850,21 @@ class LinkCommand {
       return 1;
     }
 
-    Maybe<AppInfo> maybe_app_info =
+    std::optional<AppInfo> maybe_app_info =
         ExtractAppInfoFromManifest(manifest_xml.get(), context_->GetDiagnostics());
     if (!maybe_app_info) {
       return 1;
     }
 
     app_info_ = maybe_app_info.value();
-    context_->SetMinSdkVersion(app_info_.min_sdk_version.value_or_default(0));
+    context_->SetMinSdkVersion(app_info_.min_sdk_version.value_or(0));
 
     context_->SetNameManglerPolicy(NameManglerPolicy{context_->GetCompilationPackage()});
+    context_->SetSplitNameDependencies(app_info_.split_name_dependencies);
 
     // Override the package ID when it is "android".
     if (context_->GetCompilationPackage() == "android") {
-      context_->SetPackageId(0x01);
+      context_->SetPackageId(kAndroidPackageId);
 
       // Verify we're building a regular app.
       if (context_->GetPackageType() != PackageType::kApp) {
@@ -1665,6 +1876,9 @@ class LinkCommand {
 
     TableMergerOptions table_merger_options;
     table_merger_options.auto_add_overlay = options_.auto_add_overlay;
+    table_merger_options.override_styles_instead_of_overlaying =
+        options_.override_styles_instead_of_overlaying;
+    table_merger_options.strict_visibility = options_.strict_visibility;
     table_merger_ = util::make_unique<TableMerger>(context_, &final_table_, table_merger_options);
 
     if (context_->IsVerbose()) {
@@ -1707,7 +1921,8 @@ class LinkCommand {
 
     if (context_->GetPackageType() != PackageType::kStaticLib) {
       PrivateAttributeMover mover;
-      if (!mover.Consume(context_, &final_table_)) {
+      if (context_->GetPackageId() == kAndroidPackageId &&
+          !mover.Consume(context_, &final_table_)) {
         context_->GetDiagnostics()->Error(DiagMessage() << "failed moving private attributes");
         return 1;
       }
@@ -1726,8 +1941,7 @@ class LinkCommand {
             for (auto& entry : type->entries) {
               ResourceName name(package->name, type->type, entry->name);
               // The IDs are guaranteed to exist.
-              options_.stable_id_map[std::move(name)] =
-                  ResourceId(package->id.value(), type->id.value(), entry->id.value());
+              options_.stable_id_map[std::move(name)] = entry->id.value();
             }
           }
         }
@@ -1767,8 +1981,18 @@ class LinkCommand {
           util::make_unique<FeatureSplitSymbolTableDelegate>(context_));
     }
 
+    // Before we process anything, remove the resources whose default values don't exist.
+    // We want to force any references to these to fail the build.
+    if (!options_.no_resource_removal) {
+      if (!NoDefaultResourceRemover{}.Consume(context_, &final_table_)) {
+        context_->GetDiagnostics()->Error(DiagMessage()
+                                          << "failed removing resources with no defaults");
+        return 1;
+      }
+    }
+
     ReferenceLinker linker;
-    if (!linker.Consume(context_, &final_table_)) {
+    if (!options_.merge_only && !linker.Consume(context_, &final_table_)) {
       context_->GetDiagnostics()->Error(DiagMessage() << "failed linking references");
       return 1;
     }
@@ -1807,6 +2031,30 @@ class LinkCommand {
       }
     }
 
+    if (!options_.exclude_configs_.empty()) {
+      std::vector<ConfigDescription> excluded_configs;
+
+      for (auto& config_string : options_.exclude_configs_) {
+        TRACE_NAME("ConfigDescription::Parse");
+        ConfigDescription config_description;
+
+        if (!ConfigDescription::Parse(config_string, &config_description)) {
+          context_->GetDiagnostics()->Error(DiagMessage()
+                                                << "failed to parse --excluded-configs "
+                                                << config_string);
+          return 1;
+        }
+
+        excluded_configs.push_back(config_description);
+      }
+
+      ResourceExcluder excluder(excluded_configs);
+      if (!excluder.Consume(context_, &final_table_)) {
+        context_->GetDiagnostics()->Error(DiagMessage() << "failed excluding configurations");
+        return 1;
+      }
+    }
+
     if (!options_.no_resource_deduping) {
       ResourceDeduper deduper;
       if (!deduper.Consume(context_, &final_table_)) {
@@ -1828,9 +2076,15 @@ class LinkCommand {
     } else {
       // Adjust the SplitConstraints so that their SDK version is stripped if it is less than or
       // equal to the minSdk.
+      const size_t origConstraintSize = options_.split_constraints.size();
       options_.split_constraints =
           AdjustSplitConstraintsForMinSdk(context_->GetMinSdkVersion(), options_.split_constraints);
 
+      if (origConstraintSize != options_.split_constraints.size()) {
+        context_->GetDiagnostics()->Warn(DiagMessage()
+                                         << "requested to split resources prior to min sdk of "
+                                         << context_->GetMinSdkVersion());
+      }
       TableSplitter table_splitter(options_.split_constraints, options_.table_splitter_options);
       if (!table_splitter.VerifySplitConstraints(context_)) {
         return 1;
@@ -1858,7 +2112,7 @@ class LinkCommand {
         std::unique_ptr<xml::XmlResource> split_manifest =
             GenerateSplitManifest(app_info_, *split_constraints_iter);
 
-        XmlReferenceLinker linker;
+        XmlReferenceLinker linker(&final_table_);
         if (!linker.Consume(context_, split_manifest.get())) {
           context_->GetDiagnostics()->Error(DiagMessage()
                                             << "failed to create Split AndroidManifest.xml");
@@ -1889,8 +2143,8 @@ class LinkCommand {
       // So we give it a package name so it can see local resources.
       manifest_xml->file.name.package = context_->GetCompilationPackage();
 
-      XmlReferenceLinker manifest_linker;
-      if (manifest_linker.Consume(context_, manifest_xml.get())) {
+      XmlReferenceLinker manifest_linker(&final_table_);
+      if (options_.merge_only || manifest_linker.Consume(context_, manifest_xml.get())) {
         if (options_.generate_proguard_rules_path &&
             !proguard::CollectProguardRulesForManifest(manifest_xml.get(), &proguard_keep_set)) {
           error = true;
@@ -1977,170 +2231,16 @@ class LinkCommand {
   std::map<size_t, std::string> shared_libs_;
 
   // The package name of the base application, if it is included.
-  Maybe<std::string> included_feature_base_;
+  std::optional<std::string> included_feature_base_;
 };
 
-int Link(const std::vector<StringPiece>& args, IDiagnostics* diagnostics) {
-  LinkContext context(diagnostics);
-  LinkOptions options;
-  std::vector<std::string> overlay_arg_list;
-  std::vector<std::string> extra_java_packages;
-  Maybe<std::string> package_id;
-  std::vector<std::string> configs;
-  Maybe<std::string> preferred_density;
-  Maybe<std::string> product_list;
-  bool legacy_x_flag = false;
-  bool require_localization = false;
-  bool verbose = false;
-  bool shared_lib = false;
-  bool static_lib = false;
-  bool proto_format = false;
-  Maybe<std::string> stable_id_file_path;
-  std::vector<std::string> split_args;
-  Flags flags =
-      Flags()
-          .RequiredFlag("-o", "Output path.", &options.output_path)
-          .RequiredFlag("--manifest", "Path to the Android manifest to build.",
-                        &options.manifest_path)
-          .OptionalFlagList("-I", "Adds an Android APK to link against.", &options.include_paths)
-          .OptionalFlagList("-A",
-                            "An assets directory to include in the APK. These are unprocessed.",
-                            &options.assets_dirs)
-          .OptionalFlagList("-R",
-                            "Compilation unit to link, using `overlay` semantics.\n"
-                            "The last conflicting resource given takes precedence.",
-                            &overlay_arg_list)
-          .OptionalFlag("--package-id",
-                        "Specify the package ID to use for this app. Must be greater or equal to\n"
-                        "0x7f and can't be used with --static-lib or --shared-lib.",
-                        &package_id)
-          .OptionalFlag("--java", "Directory in which to generate R.java.",
-                        &options.generate_java_class_path)
-          .OptionalFlag("--proguard", "Output file for generated Proguard rules.",
-                        &options.generate_proguard_rules_path)
-          .OptionalFlag("--proguard-main-dex",
-                        "Output file for generated Proguard rules for the main dex.",
-                        &options.generate_main_dex_proguard_rules_path)
-          .OptionalSwitch("--proguard-conditional-keep-rules",
-                          "Generate conditional Proguard keep rules.",
-                          &options.generate_conditional_proguard_rules)
-          .OptionalSwitch("--no-auto-version",
-                          "Disables automatic style and layout SDK versioning.",
-                          &options.no_auto_version)
-          .OptionalSwitch("--no-version-vectors",
-                          "Disables automatic versioning of vector drawables. Use this only\n"
-                          "when building with vector drawable support library.",
-                          &options.no_version_vectors)
-          .OptionalSwitch("--no-version-transitions",
-                          "Disables automatic versioning of transition resources. Use this only\n"
-                          "when building with transition support library.",
-                          &options.no_version_transitions)
-          .OptionalSwitch("--no-resource-deduping",
-                          "Disables automatic deduping of resources with\n"
-                          "identical values across compatible configurations.",
-                          &options.no_resource_deduping)
-          .OptionalSwitch("--enable-sparse-encoding",
-                          "Enables encoding sparse entries using a binary search tree.\n"
-                          "This decreases APK size at the cost of resource retrieval performance.",
-                          &options.table_flattener_options.use_sparse_entries)
-          .OptionalSwitch("-x", "Legacy flag that specifies to use the package identifier 0x01.",
-                          &legacy_x_flag)
-          .OptionalSwitch("-z", "Require localization of strings marked 'suggested'.",
-                          &require_localization)
-          .OptionalFlagList("-c",
-                            "Comma separated list of configurations to include. The default\n"
-                            "is all configurations.",
-                            &configs)
-          .OptionalFlag("--preferred-density",
-                        "Selects the closest matching density and strips out all others.",
-                        &preferred_density)
-          .OptionalFlag("--product", "Comma separated list of product names to keep", &product_list)
-          .OptionalSwitch("--output-to-dir",
-                          "Outputs the APK contents to a directory specified by -o.",
-                          &options.output_to_directory)
-          .OptionalSwitch("--no-xml-namespaces",
-                          "Removes XML namespace prefix and URI information from\n"
-                          "AndroidManifest.xml and XML binaries in res/*.",
-                          &options.no_xml_namespaces)
-          .OptionalFlag("--min-sdk-version",
-                        "Default minimum SDK version to use for AndroidManifest.xml.",
-                        &options.manifest_fixer_options.min_sdk_version_default)
-          .OptionalFlag("--target-sdk-version",
-                        "Default target SDK version to use for AndroidManifest.xml.",
-                        &options.manifest_fixer_options.target_sdk_version_default)
-          .OptionalFlag("--version-code",
-                        "Version code (integer) to inject into the AndroidManifest.xml if none is\n"
-                        "present.",
-                        &options.manifest_fixer_options.version_code_default)
-          .OptionalFlag("--version-name",
-                        "Version name to inject into the AndroidManifest.xml if none is present.",
-                        &options.manifest_fixer_options.version_name_default)
-          .OptionalSwitch("--shared-lib", "Generates a shared Android runtime library.",
-                          &shared_lib)
-          .OptionalSwitch("--static-lib", "Generate a static Android library.", &static_lib)
-          .OptionalSwitch("--proto-format",
-                          "Generates compiled resources in Protobuf format.\n"
-                          "Suitable as input to the bundle tool for generating an App Bundle.",
-                          &proto_format)
-          .OptionalSwitch("--no-static-lib-packages",
-                          "Merge all library resources under the app's package.",
-                          &options.no_static_lib_packages)
-          .OptionalSwitch("--non-final-ids",
-                          "Generates R.java without the final modifier. This is implied when\n"
-                          "--static-lib is specified.",
-                          &options.generate_non_final_ids)
-          .OptionalFlag("--stable-ids", "File containing a list of name to ID mapping.",
-                        &stable_id_file_path)
-          .OptionalFlag("--emit-ids",
-                        "Emit a file at the given path with a list of name to ID mappings,\n"
-                        "suitable for use with --stable-ids.",
-                        &options.resource_id_map_path)
-          .OptionalFlag("--private-symbols",
-                        "Package name to use when generating R.java for private symbols.\n"
-                        "If not specified, public and private symbols will use the application's\n"
-                        "package name.",
-                        &options.private_symbols)
-          .OptionalFlag("--custom-package", "Custom Java package under which to generate R.java.",
-                        &options.custom_java_package)
-          .OptionalFlagList("--extra-packages",
-                            "Generate the same R.java but with different package names.",
-                            &extra_java_packages)
-          .OptionalFlagList("--add-javadoc-annotation",
-                            "Adds a JavaDoc annotation to all generated Java classes.",
-                            &options.javadoc_annotations)
-          .OptionalFlag("--output-text-symbols",
-                        "Generates a text file containing the resource symbols of the R class in\n"
-                        "the specified folder.",
-                        &options.generate_text_symbols_path)
-          .OptionalSwitch("--auto-add-overlay",
-                          "Allows the addition of new resources in overlays without\n"
-                          "<add-resource> tags.",
-                          &options.auto_add_overlay)
-          .OptionalFlag("--rename-manifest-package", "Renames the package in AndroidManifest.xml.",
-                        &options.manifest_fixer_options.rename_manifest_package)
-          .OptionalFlag("--rename-instrumentation-target-package",
-                        "Changes the name of the target package for instrumentation. Most useful\n"
-                        "when used in conjunction with --rename-manifest-package.",
-                        &options.manifest_fixer_options.rename_instrumentation_target_package)
-          .OptionalFlagList("-0", "File extensions not to compress.",
-                            &options.extensions_to_not_compress)
-          .OptionalSwitch("--warn-manifest-validation",
-                          "Treat manifest validation errors as warnings.",
-                          &options.manifest_fixer_options.warn_validation)
-          .OptionalFlagList("--split",
-                            "Split resources matching a set of configs out to a Split APK.\n"
-                            "Syntax: path/to/output.apk:<config>[,<config>[...]].\n"
-                            "On Windows, use a semicolon ';' separator instead.",
-                            &split_args)
-          .OptionalSwitch("-v", "Enables verbose logging.", &verbose);
-
-  if (!flags.Parse("aapt2 link", args, &std::cerr)) {
-    return 1;
-  }
+int LinkCommand::Action(const std::vector<std::string>& args) {
+  TRACE_FLUSH(trace_folder_ ? trace_folder_.value() : "", "LinkCommand::Action");
+  LinkContext context(diag_);
 
   // Expand all argument-files passed into the command line. These start with '@'.
   std::vector<std::string> arg_list;
-  for (const std::string& arg : flags.GetArgs()) {
+  for (const std::string& arg : args) {
     if (util::StartsWith(arg, "@")) {
       const std::string path = arg.substr(1, arg.size() - 1);
       std::string error;
@@ -2154,27 +2254,43 @@ int Link(const std::vector<StringPiece>& args, IDiagnostics* diagnostics) {
   }
 
   // Expand all argument-files passed to -R.
-  for (const std::string& arg : overlay_arg_list) {
+  for (const std::string& arg : overlay_arg_list_) {
     if (util::StartsWith(arg, "@")) {
       const std::string path = arg.substr(1, arg.size() - 1);
       std::string error;
-      if (!file::AppendArgsFromFile(path, &options.overlay_files, &error)) {
+      if (!file::AppendArgsFromFile(path, &options_.overlay_files, &error)) {
         context.GetDiagnostics()->Error(DiagMessage(path) << error);
         return 1;
       }
     } else {
-      options.overlay_files.push_back(arg);
+      options_.overlay_files.push_back(arg);
     }
   }
 
-  if (verbose) {
-    context.SetVerbose(verbose);
+  if (verbose_) {
+    context.SetVerbose(verbose_);
   }
 
-  if (int{shared_lib} + int{static_lib} + int{proto_format} > 1) {
+  if (int{shared_lib_} + int{static_lib_} + int{proto_format_} > 1) {
     context.GetDiagnostics()->Error(
         DiagMessage()
-        << "only one of --shared-lib, --static-lib, or --proto_format can be defined");
+            << "only one of --shared-lib, --static-lib, or --proto_format can be defined");
+    return 1;
+  }
+
+  if (shared_lib_ && options_.private_symbols) {
+    // If a shared library styleable in a public R.java uses a private attribute, attempting to
+    // reference the private attribute within the styleable array will cause a link error because
+    // the private attribute will not be emitted in the public R.java.
+    context.GetDiagnostics()->Error(DiagMessage()
+                                    << "--shared-lib cannot currently be used in combination with"
+                                    << " --private-symbols");
+    return 1;
+  }
+
+  if (options_.merge_only && !static_lib_) {
+    context.GetDiagnostics()->Error(
+        DiagMessage() << "the --merge-only flag can be only used when building a static library");
     return 1;
   }
 
@@ -2182,32 +2298,35 @@ int Link(const std::vector<StringPiece>& args, IDiagnostics* diagnostics) {
   context.SetPackageType(PackageType::kApp);
   context.SetPackageId(kAppPackageId);
 
-  if (shared_lib) {
+  if (shared_lib_) {
     context.SetPackageType(PackageType::kSharedLib);
     context.SetPackageId(0x00);
-  } else if (static_lib) {
+  } else if (static_lib_) {
     context.SetPackageType(PackageType::kStaticLib);
-    options.output_format = OutputFormat::kProto;
-  } else if (proto_format) {
-    options.output_format = OutputFormat::kProto;
+    options_.output_format = OutputFormat::kProto;
+  } else if (proto_format_) {
+    options_.output_format = OutputFormat::kProto;
   }
 
-  if (package_id) {
+  if (package_id_) {
     if (context.GetPackageType() != PackageType::kApp) {
       context.GetDiagnostics()->Error(
           DiagMessage() << "can't specify --package-id when not building a regular app");
       return 1;
     }
 
-    const Maybe<uint32_t> maybe_package_id_int = ResourceUtils::ParseInt(package_id.value());
+    const std::optional<uint32_t> maybe_package_id_int =
+        ResourceUtils::ParseInt(package_id_.value());
     if (!maybe_package_id_int) {
-      context.GetDiagnostics()->Error(DiagMessage() << "package ID '" << package_id.value()
+      context.GetDiagnostics()->Error(DiagMessage() << "package ID '" << package_id_.value()
                                                     << "' is not a valid integer");
       return 1;
     }
 
     const uint32_t package_id_int = maybe_package_id_int.value();
-    if (package_id_int < kAppPackageId || package_id_int > std::numeric_limits<uint8_t>::max()) {
+    if (package_id_int > std::numeric_limits<uint8_t>::max()
+        || package_id_int == kFrameworkPackageId
+        || (!options_.allow_reserved_package_id && package_id_int < kAppPackageId)) {
       context.GetDiagnostics()->Error(
           DiagMessage() << StringPrintf(
               "invalid package ID 0x%02x. Must be in the range 0x7f-0xff.", package_id_int));
@@ -2217,71 +2336,89 @@ int Link(const std::vector<StringPiece>& args, IDiagnostics* diagnostics) {
   }
 
   // Populate the set of extra packages for which to generate R.java.
-  for (std::string& extra_package : extra_java_packages) {
+  for (std::string& extra_package : extra_java_packages_) {
     // A given package can actually be a colon separated list of packages.
     for (StringPiece package : util::Split(extra_package, ':')) {
-      options.extra_java_packages.insert(package.to_string());
+      options_.extra_java_packages.insert(package.to_string());
     }
   }
 
-  if (product_list) {
-    for (StringPiece product : util::Tokenize(product_list.value(), ',')) {
+  if (product_list_) {
+    for (StringPiece product : util::Tokenize(product_list_.value(), ',')) {
       if (product != "" && product != "default") {
-        options.products.insert(product.to_string());
+        options_.products.insert(product.to_string());
       }
     }
   }
 
   std::unique_ptr<IConfigFilter> filter;
-  if (!configs.empty()) {
-    filter = ParseConfigFilterParameters(configs, context.GetDiagnostics());
+  if (!configs_.empty()) {
+    filter = ParseConfigFilterParameters(configs_, context.GetDiagnostics());
     if (filter == nullptr) {
       return 1;
     }
-    options.table_splitter_options.config_filter = filter.get();
+    options_.table_splitter_options.config_filter = filter.get();
   }
 
-  if (preferred_density) {
-    Maybe<uint16_t> density =
-        ParseTargetDensityParameter(preferred_density.value(), context.GetDiagnostics());
+  if (preferred_density_) {
+    std::optional<uint16_t> density =
+        ParseTargetDensityParameter(preferred_density_.value(), context.GetDiagnostics());
     if (!density) {
       return 1;
     }
-    options.table_splitter_options.preferred_densities.push_back(density.value());
+    options_.table_splitter_options.preferred_densities.push_back(density.value());
   }
 
   // Parse the split parameters.
-  for (const std::string& split_arg : split_args) {
-    options.split_paths.push_back({});
-    options.split_constraints.push_back({});
-    if (!ParseSplitParameter(split_arg, context.GetDiagnostics(), &options.split_paths.back(),
-                             &options.split_constraints.back())) {
+  for (const std::string& split_arg : split_args_) {
+    options_.split_paths.push_back({});
+    options_.split_constraints.push_back({});
+    if (!ParseSplitParameter(split_arg, context.GetDiagnostics(), &options_.split_paths.back(),
+        &options_.split_constraints.back())) {
       return 1;
     }
   }
 
-  if (context.GetPackageType() != PackageType::kStaticLib && stable_id_file_path) {
-    if (!LoadStableIdMap(context.GetDiagnostics(), stable_id_file_path.value(),
-                         &options.stable_id_map)) {
+  if (context.GetPackageType() != PackageType::kStaticLib && stable_id_file_path_) {
+    if (!LoadStableIdMap(context.GetDiagnostics(), stable_id_file_path_.value(),
+        &options_.stable_id_map)) {
       return 1;
+    }
+  }
+
+  if (no_compress_regex) {
+    std::string regex = no_compress_regex.value();
+    if (util::StartsWith(regex, "@")) {
+      const std::string path = regex.substr(1, regex.size() -1);
+      std::string error;
+      if (!file::AppendSetArgsFromFile(path, &options_.extensions_to_not_compress, &error)) {
+        context.GetDiagnostics()->Error(DiagMessage(path) << error);
+        return 1;
+      }
+    } else {
+      options_.regex_to_not_compress = GetRegularExpression(no_compress_regex.value());
     }
   }
 
   // Populate some default no-compress extensions that are already compressed.
-  options.extensions_to_not_compress.insert(
-      {".jpg",   ".jpeg", ".png",  ".gif", ".wav",  ".mp2",  ".mp3",  ".ogg",
-       ".aac",   ".mpg",  ".mpeg", ".mid", ".midi", ".smf",  ".jet",  ".rtttl",
-       ".imy",   ".xmf",  ".mp4",  ".m4a", ".m4v",  ".3gp",  ".3gpp", ".3g2",
-       ".3gpp2", ".amr",  ".awb",  ".wma", ".wmv",  ".webm", ".mkv"});
+  options_.extensions_to_not_compress.insert({
+      // Image extensions
+      ".jpg", ".jpeg", ".png", ".gif", ".webp",
+      // Audio extensions
+      ".wav", ".mp2", ".mp3", ".ogg", ".aac", ".mid", ".midi", ".smf", ".jet", ".rtttl", ".imy",
+      ".xmf", ".amr", ".awb",
+      // Audio/video extensions
+      ".mpg", ".mpeg", ".mp4", ".m4a", ".m4v", ".3gp", ".3gpp", ".3g2", ".3gpp2", ".wma", ".wmv",
+      ".webm", ".mkv"});
 
   // Turn off auto versioning for static-libs.
   if (context.GetPackageType() == PackageType::kStaticLib) {
-    options.no_auto_version = true;
-    options.no_version_vectors = true;
-    options.no_version_transitions = true;
+    options_.no_auto_version = true;
+    options_.no_version_vectors = true;
+    options_.no_version_transitions = true;
   }
 
-  LinkCommand cmd(&context, options);
+  Linker cmd(&context, options_);
   return cmd.Run(arg_list);
 }
 

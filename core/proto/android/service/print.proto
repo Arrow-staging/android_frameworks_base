@@ -21,13 +21,13 @@ option java_multiple_files = true;
 option java_outer_classname = "PrintServiceProto";
 
 import "frameworks/base/core/proto/android/content/component_name.proto";
-import "frameworks/base/libs/incident/proto/android/privacy.proto";
+import "frameworks/base/core/proto/android/privacy.proto";
 
 message PrintServiceDumpProto {
     option (android.msg_privacy).dest = DEST_AUTOMATIC;
 
     // Each user has a separate printer state
-    repeated PrintUserStateProto userStates = 1;
+    repeated PrintUserStateProto user_states = 1;
 }
 
 message PrintUserStateProto {
@@ -74,8 +74,9 @@ message PrintSpoolerInternalStateProto {
     // Print jobs
     repeated PrintJobInfoProto print_jobs = 1;
 
-    // Files used by these print jobs
-    repeated string print_job_files = 2;
+    // Files used by these print jobs. These are auto-generated UUIDs that are
+    // only valid while the print job is processed.
+    repeated string print_job_files = 2 [ (android.privacy).dest = DEST_EXPLICIT ];
 
     // Approved print services
     repeated android.content.ComponentNameProto approved_services = 3;
@@ -101,7 +102,7 @@ message PrinterCapabilitiesProto {
 }
 
 message PrinterInfoProto {
-    option (android.msg_privacy).dest = DEST_AUTOMATIC;
+    option (android.msg_privacy).dest = DEST_EXPLICIT;
 
     // The id of the printer
     optional PrinterIdProto id = 1;
@@ -123,9 +124,9 @@ message PrinterInfoProto {
         STATUS_UNAVAILABLE = 3;
     }
     // The status of the printer
-    optional Status status = 3;
+    optional Status status = 3 [ (android.privacy).dest = DEST_AUTOMATIC ];
 
-    // The description of the printer
+    // The description of the printer, set by the user.
     optional string description = 4;
 
     // The capabilities of the printer
@@ -171,13 +172,13 @@ message InstalledPrintServiceProto {
 }
 
 message PrinterIdProto {
-    option (android.msg_privacy).dest = DEST_AUTOMATIC;
+    option (android.msg_privacy).dest = DEST_EXPLICIT;
 
     // Component name of the service that reported the printer
-    optional android.content.ComponentNameProto service_name = 1;
+    optional android.content.ComponentNameProto service_name = 1 [ (android.privacy).dest = DEST_AUTOMATIC ];
 
     // Local id of the printer
-    optional string local_id = 2 [ (android.privacy).dest = DEST_EXPLICIT ];
+    optional string local_id = 2;
 }
 
 message ActivePrintServiceProto {
@@ -310,7 +311,7 @@ message PrintDocumentInfoProto {
     // Type of content (see PrintDocumentInfo.ContentType)
     optional int32 content_type = 3;
 
-    // The size of the the document
+    // The size of the document
     optional int64 data_size = 4;
 }
 
@@ -331,7 +332,7 @@ message PrintJobInfoProto {
     optional string label = 1 [ (android.privacy).dest = DEST_EXPLICIT ];
 
     // Id of the job
-    optional string print_job_id = 2;
+    optional string print_job_id = 2 [ (android.privacy).dest = DEST_EXPLICIT ];
 
     enum State {
         // Unknown state
@@ -366,7 +367,7 @@ message PrintJobInfoProto {
     optional PrinterIdProto printer = 4;
 
     // Tag assigned to the job
-    optional string tag = 5;
+    optional string tag = 5 [ (android.privacy).dest = DEST_EXPLICIT ];
 
     // Time the job was created
     optional int64 creation_time = 6;

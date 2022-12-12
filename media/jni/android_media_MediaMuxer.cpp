@@ -18,10 +18,10 @@
 #define LOG_TAG "MediaMuxer-JNI"
 #include <utils/Log.h>
 
-#include "android_media_Utils.h"
+#include "android_media_Streams.h"
 #include "android_runtime/AndroidRuntime.h"
 #include "jni.h"
-#include <nativehelper/JNIHelp.h>
+#include <nativehelper/JNIPlatformHelp.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -230,8 +230,9 @@ static void android_media_MediaMuxer_stop(JNIEnv *env, jclass /* clazz */,
     status_t err = muxer->stop();
 
     if (err != OK) {
+        ALOGE("Error during stop:%d", err);
         jniThrowException(env, "java/lang/IllegalStateException",
-                          "Failed to stop the muxer");
+                    "Error during stop(), muxer would have stopped already");
         return;
     }
 }

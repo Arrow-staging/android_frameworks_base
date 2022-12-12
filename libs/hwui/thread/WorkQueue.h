@@ -26,13 +26,12 @@
 #include <functional>
 #include <future>
 #include <mutex>
-#include <variant>
 #include <vector>
 
 namespace android::uirenderer {
 
 struct MonotonicClock {
-    static nsecs_t now() { return systemTime(CLOCK_MONOTONIC); }
+    static nsecs_t now() { return systemTime(SYSTEM_TIME_MONOTONIC); }
 };
 
 class WorkQueue {

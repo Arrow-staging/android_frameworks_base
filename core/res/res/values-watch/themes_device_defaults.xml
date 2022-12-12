@@ -44,6 +44,7 @@ a similar way.
         <item name="colorBackgroundCacheHint">@color/background_cache_hint_selector_device_default</item>
         <item name="colorButtonNormal">@color/button_normal_device_default_dark</item>
         <item name="colorError">@color/error_color_device_default_dark</item>
+        <item name="colorEdgeEffect">@color/white</item>
         <item name="disabledAlpha">@dimen/disabled_alpha_device_default</item>
         <item name="primaryContentAlpha">@dimen/primary_content_alpha_device_default</item>
         <item name="secondaryContentAlpha">@dimen/secondary_content_alpha_device_default</item>
@@ -132,6 +133,8 @@ a similar way.
 
     <!-- Use a dark theme for watches. -->
     <style name="Theme.DeviceDefault.System" />
+    <style name="Theme.DeviceDefault.System.Dialog" parent="Theme.DeviceDefault.Dialog" />
+    <style name="Theme.DeviceDefault.System.Dialog.Alert" parent="Theme.DeviceDefault.Dialog.Alert" />
 
     <!-- DeviceDefault style for input methods, which is used by the
          {@link android.inputmethodservice.InputMethodService} class.-->
@@ -420,6 +423,13 @@ a similar way.
         <item name="disabledAlpha">@dimen/disabled_alpha_device_default</item>
         <item name="primaryContentAlpha">@dimen/primary_content_alpha_device_default</item>
         <item name="secondaryContentAlpha">@dimen/secondary_content_alpha_device_default</item>
+    </style>
+
+    <!-- Theme for the dialog shown when an app crashes or ANRs. Override to make it dark. -->
+    <style name="Theme.DeviceDefault.Dialog.AppError" parent="Theme.DeviceDefault.Dialog.Alert">
+        <item name="windowContentTransitions">false</item>
+        <item name="windowActivityTransitions">false</item>
+        <item name="windowCloseOnTouchOutside">false</item>
     </style>
 
     <style name="Theme.DeviceDefault.SearchBar" parent="Theme.Material.SearchBar">

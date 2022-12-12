@@ -19,10 +19,19 @@
 
 #include <cstdlib>
 #include <memory>
+#include <sstream>
+#include <vector>
 
-#include "android-base/macros.h"
+#include <android-base/macros.h>
+#include <util/map_ptr.h>
 
 #include "androidfw/StringPiece.h"
+
+#ifdef __ANDROID__
+#define ANDROID_LOG(x) LOG(x)
+#else
+#define ANDROID_LOG(x) std::stringstream()
+#endif
 
 namespace android {
 namespace util {
@@ -45,13 +54,13 @@ class unique_cptr {
   using pointer = typename std::add_pointer<T>::type;
 
   constexpr unique_cptr() : ptr_(nullptr) {}
-  constexpr unique_cptr(std::nullptr_t) : ptr_(nullptr) {}
+  constexpr explicit unique_cptr(std::nullptr_t) : ptr_(nullptr) {}
   explicit unique_cptr(pointer ptr) : ptr_(ptr) {}
-  unique_cptr(unique_cptr&& o) : ptr_(o.ptr_) { o.ptr_ = nullptr; }
+  unique_cptr(unique_cptr&& o) noexcept : ptr_(o.ptr_) { o.ptr_ = nullptr; }
 
   ~unique_cptr() { std::free(reinterpret_cast<void*>(ptr_)); }
 
-  inline unique_cptr& operator=(unique_cptr&& o) {
+  inline unique_cptr& operator=(unique_cptr&& o) noexcept {
     if (&o == this) {
       return *this;
     }
@@ -115,6 +124,17 @@ std::u16string Utf8ToUtf16(const StringPiece& utf8);
 
 // Converts a UTF-16 string to a UTF-8 string.
 std::string Utf16ToUtf8(const StringPiece16& utf16);
+
+std::vector<std::string> SplitAndLowercase(const android::StringPiece& str, char sep);
+
+template <typename T>
+inline bool IsFourByteAligned(const incfs::map_ptr<T>& data) {
+  return ((size_t)data.unsafe_ptr() & 0x3U) == 0;
+}
+
+inline bool IsFourByteAligned(const void* data) {
+  return ((size_t)data & 0x3U) == 0;
+}
 
 }  // namespace util
 }  // namespace android

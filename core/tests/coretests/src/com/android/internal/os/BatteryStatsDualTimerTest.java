@@ -13,10 +13,12 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
+
 package com.android.internal.os;
 
 import android.os.BatteryStats;
-import android.support.test.filters.SmallTest;
+
+import androidx.test.filters.SmallTest;
 
 import junit.framework.TestCase;
 
@@ -27,7 +29,7 @@ public class BatteryStatsDualTimerTest extends TestCase {
 
     @SmallTest
     public void testResetDetach() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         clocks.realtime = clocks.uptime = 100;
 
         final BatteryStatsImpl.TimeBase timeBase = new BatteryStatsImpl.TimeBase();

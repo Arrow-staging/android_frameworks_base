@@ -16,32 +16,58 @@
 
 package android.view.accessibility;
 
+import static junit.framework.Assert.assertEquals;
+
+import static org.hamcrest.Matchers.emptyCollectionOf;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
-import android.support.test.filters.LargeTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.os.Parcel;
 import android.util.ArraySet;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
+
+import androidx.test.filters.LargeTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.util.CollectionUtils;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 
 @LargeTest
 @RunWith(AndroidJUnit4.class)
 public class AccessibilityNodeInfoTest {
+    // The number of fields tested in the corresponding CTS AccessibilityNodeInfoTest:
+    // See fullyPopulateAccessibilityNodeInfo, assertEqualsAccessibilityNodeInfo,
+    // and assertAccessibilityNodeInfoCleared in that class.
+    private static final int NUM_MARSHALLED_PROPERTIES = 40;
+
+    /**
+     * The number of properties that are purposely not marshalled
+     * mOriginalText - Used when resolving clickable spans; intentionally not parceled
+     * mSealed - Unparceling sets the sealed bit
+     * mConnectionId - Set after unparceling. Actually is parceled, but probably shouldn't be.
+     */
+    private static final int NUM_NONMARSHALLED_PROPERTIES = 3;
+
+    // The number of flags held in boolean properties. Their values should also be double-checked
+    // in the methods above.
+    private static final int NUM_BOOLEAN_PROPERTIES = 24;
 
     @Test
     public void testStandardActions_serializationFlagIsValid() {
         AccessibilityAction brokenStandardAction = CollectionUtils.find(
                 new ArrayList<>(AccessibilityAction.sStandardActions),
-                action -> Integer.bitCount(action.mSerializationFlag) != 1);
+                action -> Long.bitCount(action.mSerializationFlag) != 1);
         if (brokenStandardAction != null) {
             String message = "Invalid serialization flag(0x"
-                    + Integer.toHexString(brokenStandardAction.mSerializationFlag)
+                    + Long.toHexString(brokenStandardAction.mSerializationFlag)
                     + ") in " + brokenStandardAction;
             if (brokenStandardAction.mSerializationFlag == 0L) {
                 message += "\nThis is likely due to an overflow";
@@ -56,7 +82,7 @@ public class AccessibilityNodeInfoTest {
                         && action.getId() != action.mSerializationFlag);
         if (brokenStandardAction != null) {
             fail("Serialization flag(0x"
-                    + Integer.toHexString(brokenStandardAction.mSerializationFlag)
+                    + Long.toHexString(brokenStandardAction.mSerializationFlag)
                     + ") is different from legacy action id(0x"
                     + Integer.toHexString(brokenStandardAction.getId())
                     + ") in " + brokenStandardAction);
@@ -77,4 +103,57 @@ public class AccessibilityNodeInfoTest {
         }
     }
 
+    @Test
+    public void testStandardActions_allComeThroughParceling() {
+        for (AccessibilityAction action : AccessibilityAction.sStandardActions) {
+            final AccessibilityNodeInfo nodeWithAction = AccessibilityNodeInfo.obtain();
+            nodeWithAction.addAction(action);
+            assertThat(nodeWithAction.getActionList(), hasItem(action));
+            final Parcel parcel = Parcel.obtain();
+            nodeWithAction.writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            final AccessibilityNodeInfo unparceledNode =
+                    AccessibilityNodeInfo.CREATOR.createFromParcel(parcel);
+            assertThat(unparceledNode.getActionList(), hasItem(action));
+        }
+    }
+
+    @Test
+    public void testEmptyListOfActions_parcelsCorrectly() {
+        // Also set text, as if there's nothing else in the parcel it can unparcel even with
+        // a bug present.
+        final String text = "text";
+        final AccessibilityNodeInfo nodeWithEmptyActionList = AccessibilityNodeInfo.obtain();
+        nodeWithEmptyActionList.addAction(AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
+        nodeWithEmptyActionList.removeAction(AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
+        nodeWithEmptyActionList.setText(text);
+        final Parcel parcel = Parcel.obtain();
+        nodeWithEmptyActionList.writeToParcel(parcel, 0);
+        parcel.setDataPosition(0);
+        final AccessibilityNodeInfo unparceledNode =
+                AccessibilityNodeInfo.CREATOR.createFromParcel(parcel);
+        assertThat(unparceledNode.getActionList(), emptyCollectionOf(AccessibilityAction.class));
+        assertThat(unparceledNode.getText(), equalTo(text));
+    }
+
+    @Test
+    public void dontForgetToUpdateCtsParcelingTestWhenYouAddNewFields() {
+        AccessibilityEventTest.assertNoNewNonStaticFieldsAdded(AccessibilityNodeInfo.class,
+                NUM_MARSHALLED_PROPERTIES + NUM_NONMARSHALLED_PROPERTIES);
+    }
+
+    @Test
+    public void updateCtsToTestNewBooleanProperties() {
+        int booleanPropertiesCount = 0;
+
+        for (Field field : AccessibilityNodeInfo.class.getDeclaredFields()) {
+            if (((field.getModifiers() & Modifier.STATIC) != 0)
+                    && (field.getName().contains("BOOLEAN_PROPERTY"))) {
+                booleanPropertiesCount++;
+            }
+        }
+
+        assertEquals("New boolean properties. Make sure you're testing them in CTS",
+                NUM_BOOLEAN_PROPERTIES, booleanPropertiesCount);
+    }
 }

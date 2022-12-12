@@ -13,579 +13,397 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-#define LOG_TAG "incidentd"
+#define DEBUG false
+#include "Log.h"
 
 #include "Section.h"
 
+#include <dirent.h>
 #include <errno.h>
-#include <sys/prctl.h>
-#include <unistd.h>
-#include <wait.h>
-
-#include <memory>
 #include <mutex>
+#include <set>
+#include <thread>
 
+#include <android-base/file.h>
+#include <android-base/properties.h>
+#include <android-base/stringprintf.h>
 #include <android/util/protobuf.h>
+#include <android/util/ProtoOutputStream.h>
 #include <binder/IServiceManager.h>
+#include <debuggerd/client.h>
+#include <dumputils/dump_utils.h>
 #include <log/log_event_list.h>
 #include <log/logprint.h>
-#include <log/log_read.h>
 #include <private/android_logger.h>
+#include <sys/mman.h>
 
 #include "FdBuffer.h"
-#include "frameworks/base/core/proto/android/util/log.proto.h"
-#include "io_util.h"
 #include "Privacy.h"
-#include "PrivacyBuffer.h"
-#include "section_list.h"
+#include "frameworks/base/core/proto/android/os/backtrace.proto.h"
+#include "frameworks/base/core/proto/android/os/data.proto.h"
+#include "frameworks/base/core/proto/android/util/log.proto.h"
+#include "frameworks/base/core/proto/android/util/textdump.proto.h"
+#include "incidentd_util.h"
 
+namespace android {
+namespace os {
+namespace incidentd {
+
+using namespace android::base;
 using namespace android::util;
-using namespace std;
 
 // special section ids
-const int FIELD_ID_INCIDENT_HEADER = 1;
+const int FIELD_ID_INCIDENT_METADATA = 2;
 
 // incident section parameters
-const int   WAIT_MAX = 5;
-const struct timespec WAIT_INTERVAL_NS = {0, 200 * 1000 * 1000};
 const char INCIDENT_HELPER[] = "/system/bin/incident_helper";
+const char* GZIP[] = {"/system/bin/gzip", NULL};
 
-static pid_t
-fork_execute_incident_helper(const int id, const char* name, Fpipe& p2cPipe, Fpipe& c2pPipe)
-{
-    const char* ihArgs[] { INCIDENT_HELPER, "-s", String8::format("%d", id).string(), NULL };
-    // fork used in multithreaded environment, avoid adding unnecessary code in child process
-    pid_t pid = fork();
-    if (pid == 0) {
-        if (TEMP_FAILURE_RETRY(dup2(p2cPipe.readFd(),  STDIN_FILENO))  != 0
-            || !p2cPipe.close()
-            || TEMP_FAILURE_RETRY(dup2(c2pPipe.writeFd(), STDOUT_FILENO)) != 1
-            || !c2pPipe.close()) {
-            ALOGW("%s can't setup stdin and stdout for incident helper", name);
-            _exit(EXIT_FAILURE);
-        }
+static pid_t fork_execute_incident_helper(const int id, Fpipe* p2cPipe, Fpipe* c2pPipe) {
+    const char* ihArgs[]{INCIDENT_HELPER, "-s", String8::format("%d", id).string(), NULL};
+    return fork_execute_cmd(const_cast<char**>(ihArgs), p2cPipe, c2pPipe);
+}
 
-        /* make sure the child dies when incidentd dies */
-        prctl(PR_SET_PDEATHSIG, SIGKILL);
-
-        execv(INCIDENT_HELPER, const_cast<char**>(ihArgs));
-
-        ALOGW("%s failed in incident helper process: %s", name, strerror(errno));
-        _exit(EXIT_FAILURE); // always exits with failure if any
+bool section_requires_specific_mention(int sectionId) {
+    switch (sectionId) {
+        case 3025: // restricted_images
+            return true;
+        case 3026: // system_trace
+            return true;
+        default:
+            return false;
     }
-    // close the fds used in incident helper
-    close(p2cPipe.readFd());
-    close(c2pPipe.writeFd());
-    return pid;
 }
 
 // ================================================================================
-static status_t statusCode(int status) {
-    if (WIFSIGNALED(status)) {
-      ALOGD("return by signal: %s", strerror(WTERMSIG(status)));
-      return -WTERMSIG(status);
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) > 0) {
-      ALOGD("return by exit: %s", strerror(WEXITSTATUS(status)));
-      return -WEXITSTATUS(status);
-    }
-    return NO_ERROR;
+Section::Section(int i, int64_t timeoutMs)
+    : id(i),
+      timeoutMs(timeoutMs) {
 }
 
-static status_t kill_child(pid_t pid) {
-    int status;
-    ALOGD("try to kill child process %d", pid);
-    kill(pid, SIGKILL);
-    if (waitpid(pid, &status, 0) == -1) return -1;
-    return statusCode(status);
-}
-
-static status_t wait_child(pid_t pid) {
-    int status;
-    bool died = false;
-    // wait for child to report status up to 1 seconds
-    for(int loop = 0; !died && loop < WAIT_MAX; loop++) {
-        if (waitpid(pid, &status, WNOHANG) == pid) died = true;
-        // sleep for 0.2 second
-        nanosleep(&WAIT_INTERVAL_NS, NULL);
-    }
-    if (!died) return kill_child(pid);
-    return statusCode(status);
-}
-// ================================================================================
-static const Privacy*
-get_privacy_of_section(int id)
-{
-    int l = 0;
-    int r = PRIVACY_POLICY_COUNT - 1;
-    while (l <= r) {
-        int mid = (l + r) >> 1;
-        const Privacy* p = PRIVACY_POLICY_LIST[mid];
-
-        if (p->field_id < (uint32_t)id) {
-            l = mid + 1;
-        } else if (p->field_id > (uint32_t)id) {
-            r = mid - 1;
-        } else {
-            return p;
-        }
-    }
-    return NULL;
-}
+Section::~Section() {}
 
 // ================================================================================
-static status_t
-write_section_header(int fd, int sectionId, size_t size)
-{
-    uint8_t buf[20];
-    uint8_t *p = write_length_delimited_tag_header(buf, sectionId, size);
-    return write_all(fd, buf, p-buf);
-}
+static inline bool isSysfs(const char* filename) { return strncmp(filename, "/sys/", 5) == 0; }
 
-static status_t
-write_report_requests(const int id, const FdBuffer& buffer, ReportRequestSet* requests)
-{
-    status_t err = -EBADF;
-    EncodedBuffer::iterator data = buffer.data();
-    PrivacyBuffer privacyBuffer(get_privacy_of_section(id), data);
-    int writeable = 0;
-
-    // The streaming ones, group requests by spec in order to save unnecessary strip operations
-    map<PrivacySpec, vector<sp<ReportRequest>>> requestsBySpec;
-    for (auto it = requests->begin(); it != requests->end(); it++) {
-        sp<ReportRequest> request = *it;
-        if (!request->ok() || !request->args.containsSection(id)) {
-            continue;  // skip invalid request
-        }
-        PrivacySpec spec = PrivacySpec::new_spec(request->args.dest());
-        requestsBySpec[spec].push_back(request);
-    }
-
-    for (auto mit = requestsBySpec.begin(); mit != requestsBySpec.end(); mit++) {
-        PrivacySpec spec = mit->first;
-        err = privacyBuffer.strip(spec);
-        if (err != NO_ERROR) return err; // it means the privacyBuffer data is corrupted.
-        if (privacyBuffer.size() == 0) continue;
-
-        for (auto it = mit->second.begin(); it != mit->second.end(); it++) {
-            sp<ReportRequest> request = *it;
-            err = write_section_header(request->fd, id, privacyBuffer.size());
-            if (err != NO_ERROR) { request->err = err; continue; }
-            err = privacyBuffer.flush(request->fd);
-            if (err != NO_ERROR) { request->err = err; continue; }
-            writeable++;
-            ALOGD("Section %d flushed %zu bytes to fd %d with spec %d", id,
-                  privacyBuffer.size(), request->fd, spec.dest);
-        }
-        privacyBuffer.clear();
-    }
-
-    // The dropbox file
-    if (requests->mainFd() >= 0) {
-        PrivacySpec spec = requests->mainDest() < 0 ?
-                PrivacySpec::get_default_dropbox_spec() :
-                PrivacySpec::new_spec(requests->mainDest());
-        err = privacyBuffer.strip(spec);
-        if (err != NO_ERROR) return err; // the buffer data is corrupted.
-        if (privacyBuffer.size() == 0) goto DONE;
-
-        err = write_section_header(requests->mainFd(), id, privacyBuffer.size());
-        if (err != NO_ERROR) { requests->setMainFd(-1); goto DONE; }
-        err = privacyBuffer.flush(requests->mainFd());
-        if (err != NO_ERROR) { requests->setMainFd(-1); goto DONE; }
-        writeable++;
-        ALOGD("Section %d flushed %zu bytes to dropbox %d with spec %d", id,
-              privacyBuffer.size(), requests->mainFd(), spec.dest);
-    }
-
-DONE:
-    // only returns error if there is no fd to write to.
-    return writeable > 0 ? NO_ERROR : err;
-}
-
-// ================================================================================
-Section::Section(int i, const int64_t timeoutMs)
-    :id(i),
-     timeoutMs(timeoutMs)
-{
-}
-
-Section::~Section()
-{
-}
-
-// ================================================================================
-HeaderSection::HeaderSection()
-    :Section(FIELD_ID_INCIDENT_HEADER, 0)
-{
-}
-
-HeaderSection::~HeaderSection()
-{
-}
-
-status_t
-HeaderSection::Execute(ReportRequestSet* requests) const
-{
-    for (ReportRequestSet::iterator it=requests->begin(); it!=requests->end(); it++) {
-        const sp<ReportRequest> request = *it;
-        const vector<vector<uint8_t>>& headers = request->args.headers();
-
-        for (vector<vector<uint8_t>>::const_iterator buf=headers.begin(); buf!=headers.end(); buf++) {
-            if (buf->empty()) continue;
-
-            // So the idea is only requests with negative fd are written to dropbox file.
-            int fd = request->fd >= 0 ? request->fd : requests->mainFd();
-            write_section_header(fd, FIELD_ID_INCIDENT_HEADER, buf->size());
-            write_all(fd, (uint8_t const*)buf->data(), buf->size());
-            // If there was an error now, there will be an error later and we will remove
-            // it from the list then.
-        }
-    }
-    return NO_ERROR;
-}
-
-// ================================================================================
 FileSection::FileSection(int id, const char* filename, const int64_t timeoutMs)
-    :Section(id, timeoutMs),
-     mFilename(filename)
-{
-    name = filename;
-    mIsSysfs = strncmp(filename, "/sys/", 5) == 0;
+    : Section(id, timeoutMs), mFilename(filename) {
+    name = "file ";
+    name += filename;
+    mIsSysfs = isSysfs(filename);
 }
 
 FileSection::~FileSection() {}
 
-status_t
-FileSection::Execute(ReportRequestSet* requests) const
-{
+status_t FileSection::Execute(ReportWriter* writer) const {
     // read from mFilename first, make sure the file is available
     // add O_CLOEXEC to make sure it is closed when exec incident helper
-    int fd = open(mFilename, O_RDONLY | O_CLOEXEC);
-    if (fd == -1) {
-       ALOGW("FileSection '%s' failed to open file", this->name.string());
-       return -errno;
+    unique_fd fd(open(mFilename, O_RDONLY | O_CLOEXEC));
+    if (fd.get() == -1) {
+        ALOGW("[%s] failed to open file", this->name.string());
+        // There may be some devices/architectures that won't have the file.
+        // Just return here without an error.
+        return NO_ERROR;
     }
 
-    FdBuffer buffer;
     Fpipe p2cPipe;
     Fpipe c2pPipe;
     // initiate pipes to pass data to/from incident_helper
     if (!p2cPipe.init() || !c2pPipe.init()) {
-        ALOGW("FileSection '%s' failed to setup pipes", this->name.string());
+        ALOGW("[%s] failed to setup pipes", this->name.string());
         return -errno;
     }
 
-    pid_t pid = fork_execute_incident_helper(this->id, this->name.string(), p2cPipe, c2pPipe);
+    pid_t pid = fork_execute_incident_helper(this->id, &p2cPipe, &c2pPipe);
     if (pid == -1) {
-        ALOGW("FileSection '%s' failed to fork", this->name.string());
+        ALOGW("[%s] failed to fork", this->name.string());
         return -errno;
     }
 
     // parent process
-    status_t readStatus = buffer.readProcessedDataInStream(fd, p2cPipe.writeFd(), c2pPipe.readFd(),
-            this->timeoutMs, mIsSysfs);
+    FdBuffer buffer;
+    status_t readStatus = buffer.readProcessedDataInStream(fd.get(), std::move(p2cPipe.writeFd()),
+                                                           std::move(c2pPipe.readFd()),
+                                                           this->timeoutMs, mIsSysfs);
+    writer->setSectionStats(buffer);
     if (readStatus != NO_ERROR || buffer.timedOut()) {
-        ALOGW("FileSection '%s' failed to read data from incident helper: %s, timedout: %s",
-            this->name.string(), strerror(-readStatus), buffer.timedOut() ? "true" : "false");
+        ALOGW("[%s] failed to read data from incident helper: %s, timedout: %s",
+              this->name.string(), strerror(-readStatus), buffer.timedOut() ? "true" : "false");
         kill_child(pid);
         return readStatus;
     }
 
     status_t ihStatus = wait_child(pid);
     if (ihStatus != NO_ERROR) {
-        ALOGW("FileSection '%s' abnormal child process: %s", this->name.string(), strerror(-ihStatus));
-        return ihStatus;
+        ALOGW("[%s] abnormal child process: %s", this->name.string(), strerror(-ihStatus));
+        return OK; // Not a fatal error.
     }
 
-    ALOGD("FileSection '%s' wrote %zd bytes in %d ms", this->name.string(), buffer.size(),
-            (int)buffer.durationMs());
-    status_t err = write_report_requests(this->id, buffer, requests);
-    if (err != NO_ERROR) {
-        ALOGW("FileSection '%s' failed writing: %s", this->name.string(), strerror(-err));
-        return err;
-    }
-
-    return NO_ERROR;
+    return writer->writeSection(buffer);
 }
-
 // ================================================================================
-struct WorkerThreadData : public virtual RefBase
-{
-    const WorkerThreadSection* section;
-    int fds[2];
-
-    // Lock protects these fields
-    mutex lock;
-    bool workerDone;
-    status_t workerError;
-
-    WorkerThreadData(const WorkerThreadSection* section);
-    virtual ~WorkerThreadData();
-
-    int readFd() { return fds[0]; }
-    int writeFd() { return fds[1]; }
-};
-
-WorkerThreadData::WorkerThreadData(const WorkerThreadSection* sec)
-    :section(sec),
-     workerDone(false),
-     workerError(NO_ERROR)
-{
-    fds[0] = -1;
-    fds[1] = -1;
-}
-
-WorkerThreadData::~WorkerThreadData()
-{
-}
-
-// ================================================================================
-WorkerThreadSection::WorkerThreadSection(int id)
-    :Section(id)
-{
-}
-
-WorkerThreadSection::~WorkerThreadSection()
-{
-}
-
-static void*
-worker_thread_func(void* cookie)
-{
-    WorkerThreadData* data = (WorkerThreadData*)cookie;
-    status_t err = data->section->BlockingCall(data->writeFd());
-
-    {
-        unique_lock<mutex> lock(data->lock);
-        data->workerDone = true;
-        data->workerError = err;
+GZipSection::GZipSection(int id, const char* filename, ...) : Section(id) {
+    va_list args;
+    va_start(args, filename);
+    mFilenames = varargs(filename, args);
+    va_end(args);
+    name = "gzip";
+    for (int i = 0; mFilenames[i] != NULL; i++) {
+        name += " ";
+        name += mFilenames[i];
     }
-
-    close(data->writeFd());
-    data->decStrong(data->section);
-    // data might be gone now. don't use it after this point in this thread.
-    return NULL;
 }
 
-status_t
-WorkerThreadSection::Execute(ReportRequestSet* requests) const
-{
-    status_t err = NO_ERROR;
-    pthread_t thread;
-    pthread_attr_t attr;
-    bool timedOut = false;
+GZipSection::~GZipSection() { free(mFilenames); }
+
+status_t GZipSection::Execute(ReportWriter* writer) const {
+    // Reads the files in order, use the first available one.
+    int index = 0;
+    unique_fd fd;
+    while (mFilenames[index] != NULL) {
+        fd.reset(open(mFilenames[index], O_RDONLY | O_CLOEXEC));
+        if (fd.get() != -1) {
+            break;
+        }
+        ALOGW("GZipSection failed to open file %s", mFilenames[index]);
+        index++;  // look at the next file.
+    }
+    if (fd.get() == -1) {
+        ALOGW("[%s] can't open all the files", this->name.string());
+        return NO_ERROR;  // e.g. LAST_KMSG will reach here in user build.
+    }
     FdBuffer buffer;
-
-    // Data shared between this thread and the worker thread.
-    sp<WorkerThreadData> data = new WorkerThreadData(this);
-
-    // Create the pipe
-    err = pipe(data->fds);
-    if (err != 0) {
+    Fpipe p2cPipe;
+    Fpipe c2pPipe;
+    // initiate pipes to pass data to/from gzip
+    if (!p2cPipe.init() || !c2pPipe.init()) {
+        ALOGW("[%s] failed to setup pipes", this->name.string());
         return -errno;
     }
 
-    // The worker thread needs a reference and we can't let the count go to zero
-    // if that thread is slow to start.
-    data->incStrong(this);
+    pid_t pid = fork_execute_cmd((char* const*)GZIP, &p2cPipe, &c2pPipe);
+    if (pid == -1) {
+        ALOGW("[%s] failed to fork", this->name.string());
+        return -errno;
+    }
+    // parent process
 
-    // Create the thread
-    err = pthread_attr_init(&attr);
-    if (err != 0) {
-        return -err;
+    // construct Fdbuffer to output GZippedfileProto, the reason to do this instead of using
+    // ProtoOutputStream is to avoid allocation of another buffer inside ProtoOutputStream.
+    sp<EncodedBuffer> internalBuffer = buffer.data();
+    internalBuffer->writeHeader((uint32_t)GZippedFileProto::FILENAME, WIRE_TYPE_LENGTH_DELIMITED);
+    size_t fileLen = strlen(mFilenames[index]);
+    internalBuffer->writeRawVarint32(fileLen);
+    for (size_t i = 0; i < fileLen; i++) {
+        internalBuffer->writeRawByte(mFilenames[index][i]);
     }
-    // TODO: Do we need to tweak thread priority?
-    err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (err != 0) {
-        pthread_attr_destroy(&attr);
-        return -err;
+    internalBuffer->writeHeader((uint32_t)GZippedFileProto::GZIPPED_DATA,
+                                WIRE_TYPE_LENGTH_DELIMITED);
+    size_t editPos = internalBuffer->wp()->pos();
+    internalBuffer->wp()->move(8);  // reserve 8 bytes for the varint of the data size.
+    size_t dataBeginAt = internalBuffer->wp()->pos();
+    VLOG("[%s] editPos=%zu, dataBeginAt=%zu", this->name.string(), editPos, dataBeginAt);
+
+    status_t readStatus = buffer.readProcessedDataInStream(
+            fd.get(), std::move(p2cPipe.writeFd()), std::move(c2pPipe.readFd()), this->timeoutMs,
+            isSysfs(mFilenames[index]));
+    writer->setSectionStats(buffer);
+    if (readStatus != NO_ERROR || buffer.timedOut()) {
+        ALOGW("[%s] failed to read data from gzip: %s, timedout: %s", this->name.string(),
+              strerror(-readStatus), buffer.timedOut() ? "true" : "false");
+        kill_child(pid);
+        return readStatus;
     }
-    err = pthread_create(&thread, &attr, worker_thread_func, (void*)data.get());
-    if (err != 0) {
-        pthread_attr_destroy(&attr);
-        return -err;
+
+    status_t gzipStatus = wait_child(pid);
+    if (gzipStatus != NO_ERROR) {
+        ALOGW("[%s] abnormal child process: %s", this->name.string(), strerror(-gzipStatus));
+        return gzipStatus;
     }
-    pthread_attr_destroy(&attr);
+    // Revisit the actual size from gzip result and edit the internal buffer accordingly.
+    size_t dataSize = buffer.size() - dataBeginAt;
+    internalBuffer->wp()->rewind()->move(editPos);
+    internalBuffer->writeRawVarint32(dataSize);
+    internalBuffer->copy(dataBeginAt, dataSize);
+
+    return writer->writeSection(buffer);
+}
+
+// ================================================================================
+struct WorkerThreadData : public virtual RefBase {
+    const WorkerThreadSection* section;
+    Fpipe pipe;
+
+    // Lock protects these fields
+    std::mutex lock;
+    bool workerDone;
+    status_t workerError;
+
+    explicit WorkerThreadData(const WorkerThreadSection* section);
+    virtual ~WorkerThreadData();
+};
+
+WorkerThreadData::WorkerThreadData(const WorkerThreadSection* sec)
+    : section(sec), workerDone(false), workerError(NO_ERROR) {}
+
+WorkerThreadData::~WorkerThreadData() {}
+
+// ================================================================================
+WorkerThreadSection::WorkerThreadSection(int id, const int64_t timeoutMs)
+    : Section(id, timeoutMs) {}
+
+WorkerThreadSection::~WorkerThreadSection() {}
+
+void sigpipe_handler(int signum) {
+    if (signum == SIGPIPE) {
+        ALOGE("Wrote to a broken pipe\n");
+    } else {
+        ALOGE("Received unexpected signal: %d\n", signum);
+    }
+}
+
+status_t WorkerThreadSection::Execute(ReportWriter* writer) const {
+    // Create shared data and pipe. Don't put data on the stack since this thread may exit early.
+    sp<WorkerThreadData> data = new WorkerThreadData(this);
+    if (!data->pipe.init()) {
+        return -errno;
+    }
+    data->incStrong(this);
+    std::thread([data, this]() {
+        // Don't crash the service if writing to a closed pipe (may happen if dumping times out)
+        signal(SIGPIPE, sigpipe_handler);
+        status_t err = data->section->BlockingCall(data->pipe.writeFd());
+        {
+            std::scoped_lock<std::mutex> lock(data->lock);
+            data->workerDone = true;
+            data->workerError = err;
+            // unique_fd is not thread safe. If we don't lock it, reset() may pause half way while
+            // the other thread executes to the end, calling ~Fpipe, which is a race condition.
+            data->pipe.writeFd().reset();
+        }
+        data->decStrong(this);
+    }).detach();
 
     // Loop reading until either the timeout or the worker side is done (i.e. eof).
-    err = buffer.read(data->readFd(), this->timeoutMs);
+    status_t err = NO_ERROR;
+    bool workerDone = false;
+    FdBuffer buffer;
+    err = buffer.read(data->pipe.readFd().get(), this->timeoutMs);
     if (err != NO_ERROR) {
-        // TODO: Log this error into the incident report.
-        ALOGW("WorkerThreadSection '%s' reader failed with error '%s'", this->name.string(),
-                strerror(-err));
+        ALOGE("[%s] reader failed with error '%s'", this->name.string(), strerror(-err));
     }
-
-    // Done with the read fd. The worker thread closes the write one so
-    // we never race and get here first.
-    close(data->readFd());
 
     // If the worker side is finished, then return its error (which may overwrite
-    // our possible error -- but it's more interesting anyway).  If not, then we timed out.
+    // our possible error -- but it's more interesting anyway). If not, then we timed out.
     {
-        unique_lock<mutex> lock(data->lock);
-        if (!data->workerDone) {
-            // We timed out
-            timedOut = true;
-        } else {
-            if (data->workerError != NO_ERROR) {
-                err = data->workerError;
-                // TODO: Log this error into the incident report.
-                ALOGW("WorkerThreadSection '%s' worker failed with error '%s'", this->name.string(),
-                        strerror(-err));
-            }
+        std::scoped_lock<std::mutex> lock(data->lock);
+        data->pipe.close();
+        if (data->workerError != NO_ERROR) {
+            err = data->workerError;
+            ALOGE("[%s] worker failed with error '%s'", this->name.string(), strerror(-err));
         }
+        workerDone = data->workerDone;
     }
 
-    if (timedOut || buffer.timedOut()) {
-        ALOGW("WorkerThreadSection '%s' timed out", this->name.string());
+    writer->setSectionStats(buffer);
+    if (err != NO_ERROR) {
+        char errMsg[128];
+        snprintf(errMsg, 128, "[%s] failed with error '%s'",
+            this->name.string(), strerror(-err));
+        writer->error(this, err, "WorkerThreadSection failed.");
         return NO_ERROR;
     }
-
     if (buffer.truncated()) {
-        // TODO: Log this into the incident report.
+        ALOGW("[%s] too large, truncating", this->name.string());
+        // Do not write a truncated section. It won't pass through the PrivacyFilter.
+        return NO_ERROR;
     }
-
-    // TODO: There was an error with the command or buffering. Report that.  For now
-    // just exit with a log messasge.
-    if (err != NO_ERROR) {
-        ALOGW("WorkerThreadSection '%s' failed with error '%s'", this->name.string(),
-                strerror(-err));
+    if (!workerDone || buffer.timedOut()) {
+        ALOGW("[%s] timed out", this->name.string());
         return NO_ERROR;
     }
 
     // Write the data that was collected
-    ALOGD("WorkerThreadSection '%s' wrote %zd bytes in %d ms", name.string(), buffer.size(),
-            (int)buffer.durationMs());
-    err = write_report_requests(this->id, buffer, requests);
-    if (err != NO_ERROR) {
-        ALOGW("WorkerThreadSection '%s' failed writing: '%s'", this->name.string(), strerror(-err));
-        return err;
-    }
-
-    return NO_ERROR;
+    return writer->writeSection(buffer);
 }
 
 // ================================================================================
-void
-CommandSection::init(const char* command, va_list args)
-{
-    va_list copied_args;
-    int numOfArgs = 0;
-
-    va_copy(copied_args, args);
-    while(va_arg(copied_args, const char*) != NULL) {
-        numOfArgs++;
-    }
-    va_end(copied_args);
-
-    // allocate extra 1 for command and 1 for NULL terminator
-    mCommand = (const char**)malloc(sizeof(const char*) * (numOfArgs + 2));
-
-    mCommand[0] = command;
-    name = command;
-    for (int i=0; i<numOfArgs; i++) {
-        const char* arg = va_arg(args, const char*);
-        mCommand[i+1] = arg;
-        name += " ";
-        name += arg;
-    }
-    mCommand[numOfArgs+1] = NULL;
-}
-
 CommandSection::CommandSection(int id, const int64_t timeoutMs, const char* command, ...)
-    :Section(id, timeoutMs)
-{
+    : Section(id, timeoutMs) {
     va_list args;
     va_start(args, command);
-    init(command, args);
+    mCommand = varargs(command, args);
     va_end(args);
+    name = "cmd";
+    for (int i = 0; mCommand[i] != NULL; i++) {
+        name += " ";
+        name += mCommand[i];
+    }
 }
 
-CommandSection::CommandSection(int id, const char* command, ...)
-    :Section(id)
-{
+CommandSection::CommandSection(int id, const char* command, ...) : Section(id) {
     va_list args;
     va_start(args, command);
-    init(command, args);
+    mCommand = varargs(command, args);
     va_end(args);
+    name = "cmd";
+    for (int i = 0; mCommand[i] != NULL; i++) {
+        name += " ";
+        name += mCommand[i];
+    }
 }
 
-CommandSection::~CommandSection()
-{
-    free(mCommand);
-}
+CommandSection::~CommandSection() { free(mCommand); }
 
-status_t
-CommandSection::Execute(ReportRequestSet* requests) const
-{
-    FdBuffer buffer;
+status_t CommandSection::Execute(ReportWriter* writer) const {
     Fpipe cmdPipe;
     Fpipe ihPipe;
 
     if (!cmdPipe.init() || !ihPipe.init()) {
-        ALOGW("CommandSection '%s' failed to setup pipes", this->name.string());
+        ALOGW("[%s] failed to setup pipes", this->name.string());
         return -errno;
     }
 
-    pid_t cmdPid = fork();
+    pid_t cmdPid = fork_execute_cmd((char* const*)mCommand, NULL, &cmdPipe);
     if (cmdPid == -1) {
-        ALOGW("CommandSection '%s' failed to fork", this->name.string());
+        ALOGW("[%s] failed to fork", this->name.string());
         return -errno;
     }
-    // child process to execute the command as root
-    if (cmdPid == 0) {
-        // replace command's stdout with ihPipe's write Fd
-        if (dup2(cmdPipe.writeFd(), STDOUT_FILENO) != 1 || !ihPipe.close() || !cmdPipe.close()) {
-            ALOGW("CommandSection '%s' failed to set up stdout: %s", this->name.string(), strerror(errno));
-            _exit(EXIT_FAILURE);
-        }
-        execvp(this->mCommand[0], (char *const *) this->mCommand);
-        int err = errno; // record command error code
-        ALOGW("CommandSection '%s' failed in executing command: %s", this->name.string(), strerror(errno));
-        _exit(err); // exit with command error code
-    }
-    pid_t ihPid = fork_execute_incident_helper(this->id, this->name.string(), cmdPipe, ihPipe);
+    pid_t ihPid = fork_execute_incident_helper(this->id, &cmdPipe, &ihPipe);
     if (ihPid == -1) {
-        ALOGW("CommandSection '%s' failed to fork", this->name.string());
+        ALOGW("[%s] failed to fork", this->name.string());
         return -errno;
     }
 
-    close(cmdPipe.writeFd());
-    status_t readStatus = buffer.read(ihPipe.readFd(), this->timeoutMs);
+    cmdPipe.writeFd().reset();
+    FdBuffer buffer;
+    status_t readStatus = buffer.read(ihPipe.readFd().get(), this->timeoutMs);
+    writer->setSectionStats(buffer);
     if (readStatus != NO_ERROR || buffer.timedOut()) {
-        ALOGW("CommandSection '%s' failed to read data from incident helper: %s, timedout: %s",
-            this->name.string(), strerror(-readStatus), buffer.timedOut() ? "true" : "false");
+        ALOGW("[%s] failed to read data from incident helper: %s, timedout: %s",
+              this->name.string(), strerror(-readStatus), buffer.timedOut() ? "true" : "false");
         kill_child(cmdPid);
         kill_child(ihPid);
         return readStatus;
     }
 
-    // TODO: wait for command here has one trade-off: the failed status of command won't be detected until
-    //       buffer timeout, but it has advatage on starting the data stream earlier.
+    // Waiting for command here has one trade-off: the failed status of command won't be detected
+    // until buffer timeout, but it has advatage on starting the data stream earlier.
     status_t cmdStatus = wait_child(cmdPid);
-    status_t ihStatus  = wait_child(ihPid);
+    status_t ihStatus = wait_child(ihPid);
     if (cmdStatus != NO_ERROR || ihStatus != NO_ERROR) {
-        ALOGW("CommandSection '%s' abnormal child processes, return status: command: %s, incident helper: %s",
-            this->name.string(), strerror(-cmdStatus), strerror(-ihStatus));
-        return cmdStatus != NO_ERROR ? cmdStatus : ihStatus;
+        ALOGW("[%s] abnormal child processes, return status: command: %s, incident helper: %s",
+              this->name.string(), strerror(-cmdStatus), strerror(-ihStatus));
+        // Not a fatal error.
+        return NO_ERROR;
     }
 
-    ALOGD("CommandSection '%s' wrote %zd bytes in %d ms", this->name.string(), buffer.size(),
-            (int)buffer.durationMs());
-    status_t err = write_report_requests(this->id, buffer, requests);
-    if (err != NO_ERROR) {
-        ALOGW("CommandSection '%s' failed writing: %s", this->name.string(), strerror(-err));
-        return err;
-    }
-    return NO_ERROR;
+    return writer->writeSection(buffer);
 }
 
 // ================================================================================
 DumpsysSection::DumpsysSection(int id, const char* service, ...)
-    :WorkerThreadSection(id),
-     mService(service)
-{
+    : WorkerThreadSection(id, REMOTE_CALL_TIMEOUT_MS), mService(service) {
     name = "dumpsys ";
     name += service;
 
@@ -603,60 +421,144 @@ DumpsysSection::DumpsysSection(int id, const char* service, ...)
     va_end(args);
 }
 
-DumpsysSection::~DumpsysSection()
-{
-}
+DumpsysSection::~DumpsysSection() {}
 
-status_t
-DumpsysSection::BlockingCall(int pipeWriteFd) const
-{
+status_t DumpsysSection::BlockingCall(unique_fd& pipeWriteFd) const {
     // checkService won't wait for the service to show up like getService will.
     sp<IBinder> service = defaultServiceManager()->checkService(mService);
 
     if (service == NULL) {
-        // Returning an error interrupts the entire incident report, so just
-        // log the failure.
-        // TODO: have a meta record inside the report that would log this
-        // failure inside the report, because the fact that we can't find
-        // the service is good data in and of itself. This is running in
-        // another thread so lock that carefully...
         ALOGW("DumpsysSection: Can't lookup service: %s", String8(mService).string());
-        return NO_ERROR;
+        return NAME_NOT_FOUND;
     }
 
-    service->dump(pipeWriteFd, mArgs);
+    service->dump(pipeWriteFd.get(), mArgs);
 
     return NO_ERROR;
+}
+
+// ================================================================================
+TextDumpsysSection::TextDumpsysSection(int id, const char* service, ...)
+        :Section(id), mService(service) {
+    name = "dumpsys ";
+    name += service;
+
+    va_list args;
+    va_start(args, service);
+    while (true) {
+        const char* arg = va_arg(args, const char*);
+        if (arg == NULL) {
+            break;
+        }
+        mArgs.add(String16(arg));
+        name += " ";
+        name += arg;
+    }
+    va_end(args);
+}
+
+TextDumpsysSection::~TextDumpsysSection() {}
+
+status_t TextDumpsysSection::Execute(ReportWriter* writer) const {
+    // checkService won't wait for the service to show up like getService will.
+    sp<IBinder> service = defaultServiceManager()->checkService(mService);
+    if (service == NULL) {
+        ALOGW("TextDumpsysSection: Can't lookup service: %s", String8(mService).string());
+        return NAME_NOT_FOUND;
+    }
+
+    // Create pipe
+    Fpipe dumpPipe;
+    if (!dumpPipe.init()) {
+        ALOGW("[%s] failed to setup pipe", this->name.string());
+        return -errno;
+    }
+
+    // Run dumping thread
+    const uint64_t start = Nanotime();
+    std::thread worker([write_fd = std::move(dumpPipe.writeFd()), service = std::move(service),
+                        this]() mutable {
+        // Don't crash the service if writing to a closed pipe (may happen if dumping times out)
+        signal(SIGPIPE, sigpipe_handler);
+        status_t err = service->dump(write_fd.get(), this->mArgs);
+        if (err != OK) {
+            ALOGW("[%s] dump thread failed. Error: %s", this->name.string(), strerror(-err));
+        }
+        write_fd.reset();
+    });
+
+    // Collect dump content
+    FdBuffer buffer;
+    ProtoOutputStream proto;
+    proto.write(TextDumpProto::COMMAND, std::string(name.string()));
+    proto.write(TextDumpProto::DUMP_DURATION_NS, int64_t(Nanotime() - start));
+    buffer.write(proto.data());
+
+    sp<EncodedBuffer> internalBuffer = buffer.data();
+    internalBuffer->writeHeader((uint32_t)TextDumpProto::CONTENT, WIRE_TYPE_LENGTH_DELIMITED);
+    size_t editPos = internalBuffer->wp()->pos();
+    internalBuffer->wp()->move(8); // reserve 8 bytes for the varint of the data size
+    size_t dataBeginPos = internalBuffer->wp()->pos();
+
+    status_t readStatus = buffer.read(dumpPipe.readFd(), this->timeoutMs);
+    dumpPipe.readFd().reset();
+    writer->setSectionStats(buffer);
+    if (readStatus != OK || buffer.timedOut()) {
+        ALOGW("[%s] failed to read from dumpsys: %s, timedout: %s", this->name.string(),
+              strerror(-readStatus), buffer.timedOut() ? "true" : "false");
+        worker.detach();
+        return readStatus;
+    }
+    worker.join(); // wait for worker to finish
+
+    // Revisit the actual size from dumpsys and edit the internal buffer accordingly.
+    size_t dumpSize = buffer.size() - dataBeginPos;
+    internalBuffer->wp()->rewind()->move(editPos);
+    internalBuffer->writeRawVarint32(dumpSize);
+    internalBuffer->copy(dataBeginPos, dumpSize);
+
+    return writer->writeSection(buffer);
 }
 
 // ================================================================================
 // initialization only once in Section.cpp.
 map<log_id_t, log_time> LogSection::gLastLogsRetrieved;
 
-LogSection::LogSection(int id, log_id_t logID)
-    :WorkerThreadSection(id),
-     mLogID(logID)
-{
-    name += "logcat ";
-    name += android_log_id_to_name(logID);
-    switch (logID) {
-    case LOG_ID_EVENTS:
-    case LOG_ID_STATS:
-    case LOG_ID_SECURITY:
-        mBinary = true;
-        break;
-    default:
-        mBinary = false;
+LogSection::LogSection(int id, const char* logID, ...) : WorkerThreadSection(id), mLogMode(logModeBase) {
+    name = "logcat -b ";
+    name += logID;
+
+    va_list args;
+    va_start(args, logID);
+    mLogID = android_name_to_log_id(logID);
+    while(true) {
+        const char* arg = va_arg(args, const char*);
+        if (arg == NULL) {
+            break;
+        }
+        if (!strcmp(arg, "-L")) {
+          // Read from last logcat buffer
+          mLogMode = mLogMode | ANDROID_LOG_PSTORE;
+        }
+        name += " ";
+        name += arg;
+    }
+    va_end(args);
+
+    switch (mLogID) {
+        case LOG_ID_EVENTS:
+        case LOG_ID_STATS:
+        case LOG_ID_SECURITY:
+            mBinary = true;
+            break;
+        default:
+            mBinary = false;
     }
 }
 
-LogSection::~LogSection()
-{
-}
+LogSection::~LogSection() {}
 
-static size_t
-trimTail(char const* buf, size_t len)
-{
+static size_t trimTail(char const* buf, size_t len) {
     while (len > 0) {
         char c = buf[len - 1];
         if (c == '\0' || c == ' ' || c == '\n' || c == '\r' || c == ':') {
@@ -672,84 +574,100 @@ static inline int32_t get4LE(uint8_t const* src) {
     return src[0] | (src[1] << 8) | (src[2] << 16) | (src[3] << 24);
 }
 
-status_t
-LogSection::BlockingCall(int pipeWriteFd) const
-{
-    status_t err = NO_ERROR;
+status_t LogSection::BlockingCall(unique_fd& pipeWriteFd) const {
+    // heap profile shows that liblog malloc & free significant amount of memory in this process.
+    // Hence forking a new process to prevent memory fragmentation.
+    pid_t pid = fork();
+    if (pid < 0) {
+        ALOGW("[%s] failed to fork", this->name.string());
+        return errno;
+    }
+    if (pid > 0) {
+        return wait_child(pid, this->timeoutMs);
+    }
     // Open log buffer and getting logs since last retrieved time if any.
     unique_ptr<logger_list, void (*)(logger_list*)> loggers(
-        gLastLogsRetrieved.find(mLogID) == gLastLogsRetrieved.end() ?
-        android_logger_list_alloc(ANDROID_LOG_RDONLY | ANDROID_LOG_NONBLOCK, 0, 0) :
-        android_logger_list_alloc_time(ANDROID_LOG_RDONLY | ANDROID_LOG_NONBLOCK,
-            gLastLogsRetrieved[mLogID], 0),
-        android_logger_list_free);
+            gLastLogsRetrieved.find(mLogID) == gLastLogsRetrieved.end()
+                    ? android_logger_list_alloc(mLogMode, 0, 0)
+                    : android_logger_list_alloc_time(mLogMode, gLastLogsRetrieved[mLogID], 0),
+            android_logger_list_free);
 
     if (android_logger_open(loggers.get(), mLogID) == NULL) {
-        ALOGW("LogSection %s: Can't get logger.", this->name.string());
-        return err;
+        ALOGE("[%s] Can't get logger.", this->name.string());
+        _exit(EXIT_FAILURE);
     }
 
     log_msg msg;
     log_time lastTimestamp(0);
 
     ProtoOutputStream proto;
-    while (true) { // keeps reading until logd buffer is fully read.
-        status_t err = android_logger_list_read(loggers.get(), &msg);
-        // err = 0 - no content, unexpected connection drop or EOF.
-        // err = +ive number - size of retrieved data from logger
-        // err = -ive number, OS supplied error _except_ for -EAGAIN
-        // err = -EAGAIN, graceful indication for ANDRODI_LOG_NONBLOCK that this is the end of data.
-        if (err <= 0) {
-            if (err != -EAGAIN) {
-                ALOGE("LogSection %s: fails to read a log_msg.\n", this->name.string());
+    status_t err = OK;
+    while (true) {  // keeps reading until logd buffer is fully read.
+        status_t status = android_logger_list_read(loggers.get(), &msg);
+        // status = 0 - no content, unexpected connection drop or EOF.
+        // status = +ive number - size of retrieved data from logger
+        // status = -ive number, OS supplied error _except_ for -EAGAIN
+        // status = -EAGAIN, graceful indication for ANDRODI_LOG_NONBLOCK that this is the end.
+        if (status <= 0) {
+            if (status != -EAGAIN) {
+                ALOGW("[%s] fails to read a log_msg.\n", this->name.string());
+                err = -status;
             }
             break;
         }
         if (mBinary) {
             // remove the first uint32 which is tag's index in event log tags
             android_log_context context = create_android_log_parser(msg.msg() + sizeof(uint32_t),
-                    msg.len() - sizeof(uint32_t));;
+                                                                    msg.len() - sizeof(uint32_t));
             android_log_list_element elem;
 
-            lastTimestamp.tv_sec = msg.entry_v1.sec;
-            lastTimestamp.tv_nsec = msg.entry_v1.nsec;
+            lastTimestamp.tv_sec = msg.entry.sec;
+            lastTimestamp.tv_nsec = msg.entry.nsec;
 
             // format a BinaryLogEntry
-            long long token = proto.start(LogProto::BINARY_LOGS);
-            proto.write(BinaryLogEntry::SEC, msg.entry_v1.sec);
-            proto.write(BinaryLogEntry::NANOSEC, msg.entry_v1.nsec);
-            proto.write(BinaryLogEntry::UID, (int) msg.entry_v4.uid);
-            proto.write(BinaryLogEntry::PID, msg.entry_v1.pid);
-            proto.write(BinaryLogEntry::TID, msg.entry_v1.tid);
-            proto.write(BinaryLogEntry::TAG_INDEX, get4LE(reinterpret_cast<uint8_t const*>(msg.msg())));
+            uint64_t token = proto.start(LogProto::BINARY_LOGS);
+            proto.write(BinaryLogEntry::SEC, (int32_t)msg.entry.sec);
+            proto.write(BinaryLogEntry::NANOSEC, (int32_t)msg.entry.nsec);
+            proto.write(BinaryLogEntry::UID, (int)msg.entry.uid);
+            proto.write(BinaryLogEntry::PID, msg.entry.pid);
+            proto.write(BinaryLogEntry::TID, (int32_t)msg.entry.tid);
+            proto.write(BinaryLogEntry::TAG_INDEX,
+                        get4LE(reinterpret_cast<uint8_t const*>(msg.msg())));
             do {
                 elem = android_log_read_next(context);
-                long long elemToken = proto.start(BinaryLogEntry::ELEMS);
+                uint64_t elemToken = proto.start(BinaryLogEntry::ELEMS);
                 switch (elem.type) {
                     case EVENT_TYPE_INT:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_INT);
-                        proto.write(BinaryLogEntry::Elem::VAL_INT32, (int) elem.data.int32);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_INT);
+                        proto.write(BinaryLogEntry::Elem::VAL_INT32, (int)elem.data.int32);
                         break;
                     case EVENT_TYPE_LONG:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_LONG);
-                        proto.write(BinaryLogEntry::Elem::VAL_INT64, (long long) elem.data.int64);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_LONG);
+                        proto.write(BinaryLogEntry::Elem::VAL_INT64, (long long)elem.data.int64);
                         break;
                     case EVENT_TYPE_STRING:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_STRING);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_STRING);
                         proto.write(BinaryLogEntry::Elem::VAL_STRING, elem.data.string, elem.len);
                         break;
                     case EVENT_TYPE_FLOAT:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_FLOAT);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_FLOAT);
                         proto.write(BinaryLogEntry::Elem::VAL_FLOAT, elem.data.float32);
                         break;
                     case EVENT_TYPE_LIST:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_LIST);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_LIST);
                         break;
                     case EVENT_TYPE_LIST_STOP:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_LIST_STOP);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_LIST_STOP);
                         break;
                     case EVENT_TYPE_UNKNOWN:
-                        proto.write(BinaryLogEntry::Elem::TYPE, BinaryLogEntry::Elem::EVENT_TYPE_UNKNOWN);
+                        proto.write(BinaryLogEntry::Elem::TYPE,
+                                    BinaryLogEntry::Elem::EVENT_TYPE_UNKNOWN);
                         break;
                 }
                 proto.end(elemToken);
@@ -760,16 +678,17 @@ LogSection::BlockingCall(int pipeWriteFd) const
             }
         } else {
             AndroidLogEntry entry;
-            err = android_log_processLogBuffer(&msg.entry_v1, &entry);
-            if (err != NO_ERROR) {
-                ALOGE("LogSection %s: fails to process to an entry.\n", this->name.string());
+            status = android_log_processLogBuffer(&msg.entry, &entry);
+            if (status != OK) {
+                ALOGW("[%s] fails to process to an entry.\n", this->name.string());
+                err = status;
                 break;
             }
             lastTimestamp.tv_sec = entry.tv_sec;
             lastTimestamp.tv_nsec = entry.tv_nsec;
 
             // format a TextLogEntry
-            long long token = proto.start(LogProto::TEXT_LOGS);
+            uint64_t token = proto.start(LogProto::TEXT_LOGS);
             proto.write(TextLogEntry::SEC, (long long)entry.tv_sec);
             proto.write(TextLogEntry::NANOSEC, (long long)entry.tv_nsec);
             proto.write(TextLogEntry::PRIORITY, (int)entry.priority);
@@ -777,11 +696,192 @@ LogSection::BlockingCall(int pipeWriteFd) const
             proto.write(TextLogEntry::PID, entry.pid);
             proto.write(TextLogEntry::TID, entry.tid);
             proto.write(TextLogEntry::TAG, entry.tag, trimTail(entry.tag, entry.tagLen));
-            proto.write(TextLogEntry::LOG, entry.message, trimTail(entry.message, entry.messageLen));
+            proto.write(TextLogEntry::LOG, entry.message,
+                        trimTail(entry.message, entry.messageLen));
             proto.end(token);
         }
+        if (!proto.flush(pipeWriteFd.get())) {
+            if (errno == EPIPE) {
+                ALOGW("[%s] wrote to a broken pipe\n", this->name.string());
+            }
+            err = errno;
+            break;
+        }
+        proto.clear();
     }
     gLastLogsRetrieved[mLogID] = lastTimestamp;
-    proto.flush(pipeWriteFd);
+    _exit(err);
+}
+
+// ================================================================================
+
+const int LINK_NAME_LEN = 64;
+const int EXE_NAME_LEN = 1024;
+
+TombstoneSection::TombstoneSection(int id, const char* type, const int64_t timeoutMs)
+    : WorkerThreadSection(id, timeoutMs), mType(type) {
+    name = "tombstone ";
+    name += type;
+}
+
+TombstoneSection::~TombstoneSection() {}
+
+status_t TombstoneSection::BlockingCall(unique_fd& pipeWriteFd) const {
+    std::unique_ptr<DIR, decltype(&closedir)> proc(opendir("/proc"), closedir);
+    if (proc.get() == nullptr) {
+        ALOGE("opendir /proc failed: %s\n", strerror(errno));
+        return -errno;
+    }
+
+    const std::set<int> hal_pids = get_interesting_pids();
+
+    auto pooledBuffer = get_buffer_from_pool();
+    ProtoOutputStream proto(pooledBuffer);
+    // dumpBufferSize should be a multiple of page size (4 KB) to reduce memory fragmentation
+    size_t dumpBufferSize = 64 * 1024; // 64 KB is enough for most tombstone dump
+    char* dumpBuffer = (char*)mmap(NULL, dumpBufferSize, PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    struct dirent* d;
+    char link_name[LINK_NAME_LEN];
+    char exe_name[EXE_NAME_LEN];
+    status_t err = NO_ERROR;
+    while ((d = readdir(proc.get()))) {
+        int pid = atoi(d->d_name);
+        if (pid <= 0) {
+            continue;
+        }
+        snprintf(link_name, LINK_NAME_LEN, "/proc/%d/exe", pid);
+        struct stat fileStat;
+        if (stat(link_name, &fileStat) != OK) {
+            continue;
+        }
+        ssize_t exe_name_len = readlink(link_name, exe_name, EXE_NAME_LEN);
+        if (exe_name_len < 0 || exe_name_len >= EXE_NAME_LEN) {
+            ALOGE("[%s] Can't read '%s': %s", name.string(), link_name, strerror(errno));
+            continue;
+        }
+        // readlink(2) does not put a null terminator at the end
+        exe_name[exe_name_len] = '\0';
+
+        bool is_java_process;
+        if (strncmp(exe_name, "/system/bin/app_process32", LINK_NAME_LEN) == 0 ||
+                strncmp(exe_name, "/system/bin/app_process64", LINK_NAME_LEN) == 0) {
+            if (mType != "java") continue;
+            // Don't bother dumping backtraces for the zygote.
+            if (IsZygote(pid)) {
+                VLOG("Skipping Zygote");
+                continue;
+            }
+
+            is_java_process = true;
+        } else if (should_dump_native_traces(exe_name)) {
+            if (mType != "native") continue;
+            is_java_process = false;
+        } else if (hal_pids.find(pid) != hal_pids.end()) {
+            if (mType != "hal") continue;
+            is_java_process = false;
+        } else {
+            // Probably a native process we don't care about, continue.
+            VLOG("Skipping %d", pid);
+            continue;
+        }
+
+        Fpipe dumpPipe;
+        if (!dumpPipe.init()) {
+            ALOGW("[%s] failed to setup dump pipe", this->name.string());
+            err = -errno;
+            break;
+        }
+
+        const uint64_t start = Nanotime();
+        pid_t child = fork();
+        if (child < 0) {
+            ALOGE("Failed to fork child process");
+            break;
+        } else if (child == 0) {
+            // This is the child process.
+            dumpPipe.readFd().reset();
+            const int ret = dump_backtrace_to_file_timeout(
+                    pid, is_java_process ? kDebuggerdJavaBacktrace : kDebuggerdNativeBacktrace,
+                    is_java_process ? 5 : 20, dumpPipe.writeFd().get());
+            if (ret == -1) {
+                if (errno == 0) {
+                    ALOGW("Dumping failed for pid '%d', likely due to a timeout\n", pid);
+                } else {
+                    ALOGE("Dumping failed for pid '%d': %s\n", pid, strerror(errno));
+                }
+            }
+            dumpPipe.writeFd().reset();
+            _exit(EXIT_SUCCESS);
+        }
+        dumpPipe.writeFd().reset();
+        // Parent process.
+        // Read from the pipe concurrently to avoid blocking the child.
+        FdBuffer buffer;
+        err = buffer.readFully(dumpPipe.readFd().get());
+        // Wait on the child to avoid it becoming a zombie process.
+        status_t cStatus = wait_child(child);
+        if (err != NO_ERROR) {
+            ALOGW("[%s] failed to read stack dump: %d", this->name.string(), err);
+            dumpPipe.readFd().reset();
+            break;
+        }
+        if (cStatus != NO_ERROR) {
+            ALOGE("[%s] child had an issue: %s\n", this->name.string(), strerror(-cStatus));
+        }
+
+        // Resize dump buffer
+        if (dumpBufferSize < buffer.size()) {
+            munmap(dumpBuffer, dumpBufferSize);
+            while(dumpBufferSize < buffer.size()) dumpBufferSize = dumpBufferSize << 1;
+            dumpBuffer = (char*)mmap(NULL, dumpBufferSize, PROT_READ | PROT_WRITE,
+                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        }
+        sp<ProtoReader> reader = buffer.data()->read();
+        int i = 0;
+        while (reader->hasNext()) {
+            dumpBuffer[i] = reader->next();
+            i++;
+        }
+        uint64_t token = proto.start(android::os::BackTraceProto::TRACES);
+        proto.write(android::os::BackTraceProto::Stack::PID, pid);
+        proto.write(android::os::BackTraceProto::Stack::DUMP, dumpBuffer, i);
+        proto.write(android::os::BackTraceProto::Stack::DUMP_DURATION_NS,
+                    static_cast<long long>(Nanotime() - start));
+        proto.end(token);
+        dumpPipe.readFd().reset();
+        if (!proto.flush(pipeWriteFd.get())) {
+            if (errno == EPIPE) {
+                ALOGE("[%s] wrote to a broken pipe\n", this->name.string());
+            }
+            err = errno;
+            break;
+        }
+        proto.clear();
+    }
+    munmap(dumpBuffer, dumpBufferSize);
+    return_buffer_to_pool(pooledBuffer);
     return err;
 }
+
+// ================================================================================
+BringYourOwnSection::BringYourOwnSection(int id, const char* customName, const uid_t callingUid,
+        const sp<IIncidentDumpCallback>& callback)
+    : WorkerThreadSection(id, REMOTE_CALL_TIMEOUT_MS), uid(callingUid), mCallback(callback) {
+    name = "registered ";
+    name += customName;
+}
+
+BringYourOwnSection::~BringYourOwnSection() {}
+
+status_t BringYourOwnSection::BlockingCall(unique_fd& pipeWriteFd) const {
+    android::os::ParcelFileDescriptor pfd(std::move(pipeWriteFd));
+    if(mCallback != nullptr) {
+        mCallback->onDumpSection(pfd);
+    }
+    return NO_ERROR;
+}
+
+}  // namespace incidentd
+}  // namespace os
+}  // namespace android

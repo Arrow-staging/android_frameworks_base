@@ -22,11 +22,10 @@ import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
-import com.android.internal.util.Preconditions;
-
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * A {@link KeyChainSnapshot} is protected with a key derived from the user's lock screen. This
@@ -50,9 +49,25 @@ import java.util.Arrays;
  */
 @SystemApi
 public final class KeyChainProtectionParams implements Parcelable {
+
+    // IMPORTANT! PLEASE READ!
+    // -----------------------
+    // If you edit this file (e.g., to add new fields), please MAKE SURE to also do the following:
+    // - Update the #writeToParcel(Parcel) method below
+    // - Update the #(Parcel) constructor below
+    // - Update android.security.keystore.recovery.KeyChainSnapshotTest to make sure nobody
+    //     accidentally breaks your fields in the Parcel in the future.
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly serialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly deserialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeychainSnapshotSerializerTest to make sure nobody breaks serialization of your field
+    //     in the future.
+
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef(prefix = {"TYPE_"}, value = {TYPE_LOCKSCREEN, TYPE_CUSTOM_PASSWORD})
+    @IntDef(prefix = {"TYPE_"}, value = {TYPE_LOCKSCREEN})
     public @interface UserSecretType {
     }
 
@@ -60,11 +75,6 @@ public final class KeyChainProtectionParams implements Parcelable {
      * Lockscreen secret is required to recover KeyStore.
      */
     public static final int TYPE_LOCKSCREEN = 100;
-
-    /**
-     * Custom passphrase, unrelated to lock screen, is required to recover KeyStore.
-     */
-    public static final int TYPE_CUSTOM_PASSWORD = 101;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -99,28 +109,12 @@ public final class KeyChainProtectionParams implements Parcelable {
     private KeyDerivationParams mKeyDerivationParams;
     private byte[] mSecret; // Derived from user secret. The field must have limited visibility.
 
-    /**
-     * @param secret Constructor creates a reference to the secret. Caller must use
-     * @link {#clearSecret} to overwrite its value in memory.
-     * @hide
-     */
-    public KeyChainProtectionParams(@UserSecretType int userSecretType,
-            @LockScreenUiFormat int lockScreenUiFormat,
-            @NonNull KeyDerivationParams keyDerivationParams,
-            @NonNull byte[] secret) {
-        mUserSecretType = userSecretType;
-        mLockScreenUiFormat = lockScreenUiFormat;
-        mKeyDerivationParams = Preconditions.checkNotNull(keyDerivationParams);
-        mSecret = Preconditions.checkNotNull(secret);
-    }
-
     private KeyChainProtectionParams() {
 
     }
 
     /**
      * @see TYPE_LOCKSCREEN
-     * @see TYPE_CUSTOM_PASSWORD
      */
     public @UserSecretType int getUserSecretType() {
         return mUserSecretType;
@@ -164,13 +158,13 @@ public final class KeyChainProtectionParams implements Parcelable {
 
         /**
          * Sets user secret type.
+         * Default value is {@link TYPE_LOCKSCREEN}.
          *
          * @see TYPE_LOCKSCREEN
-         * @see TYPE_CUSTOM_PASSWORD
          * @param userSecretType The secret type
          * @return This builder.
          */
-        public Builder setUserSecretType(@UserSecretType int userSecretType) {
+        public @NonNull Builder setUserSecretType(@UserSecretType int userSecretType) {
             mInstance.mUserSecretType = userSecretType;
             return this;
         }
@@ -184,7 +178,7 @@ public final class KeyChainProtectionParams implements Parcelable {
          * @param lockScreenUiFormat The UI format
          * @return This builder.
          */
-        public Builder setLockScreenUiFormat(@LockScreenUiFormat int lockScreenUiFormat) {
+        public @NonNull Builder setLockScreenUiFormat(@LockScreenUiFormat int lockScreenUiFormat) {
             mInstance.mLockScreenUiFormat = lockScreenUiFormat;
             return this;
         }
@@ -192,10 +186,10 @@ public final class KeyChainProtectionParams implements Parcelable {
         /**
          * Sets parameters of the key derivation function.
          *
-         * @param keyDerivationParams Key derivation Params
+         * @param keyDerivationParams Key derivation parameters
          * @return This builder.
          */
-        public Builder setKeyDerivationParams(@NonNull KeyDerivationParams
+        public @NonNull Builder setKeyDerivationParams(@NonNull KeyDerivationParams
                 keyDerivationParams) {
             mInstance.mKeyDerivationParams = keyDerivationParams;
             return this;
@@ -207,7 +201,7 @@ public final class KeyChainProtectionParams implements Parcelable {
          * @param secret The secret.
          * @return This builder.
          */
-        public Builder setSecret(@NonNull byte[] secret) {
+        public @NonNull Builder setSecret(@NonNull byte[] secret) {
             mInstance.mSecret = secret;
             return this;
         }
@@ -215,18 +209,18 @@ public final class KeyChainProtectionParams implements Parcelable {
 
         /**
          * Creates a new {@link KeyChainProtectionParams} instance.
-         * The instance will include default values, if {@link setSecret}
-         * or {@link setUserSecretType} were not called.
+         * The instance will include default values, if {@link #setSecret}
+         * or {@link #setUserSecretType} were not called.
          *
          * @return new instance
          * @throws NullPointerException if some required fields were not set.
          */
-        @NonNull public KeyChainProtectionParams build() {
+        public @NonNull KeyChainProtectionParams build() {
             if (mInstance.mUserSecretType == null) {
                 mInstance.mUserSecretType = TYPE_LOCKSCREEN;
             }
-            Preconditions.checkNotNull(mInstance.mLockScreenUiFormat);
-            Preconditions.checkNotNull(mInstance.mKeyDerivationParams);
+            Objects.requireNonNull(mInstance.mLockScreenUiFormat);
+            Objects.requireNonNull(mInstance.mKeyDerivationParams);
             if (mInstance.mSecret == null) {
                 mInstance.mSecret = new byte[]{};
             }
@@ -241,7 +235,7 @@ public final class KeyChainProtectionParams implements Parcelable {
         Arrays.fill(mSecret, (byte) 0);
     }
 
-    public static final Parcelable.Creator<KeyChainProtectionParams> CREATOR =
+    public static final @NonNull Parcelable.Creator<KeyChainProtectionParams> CREATOR =
             new Parcelable.Creator<KeyChainProtectionParams>() {
         public KeyChainProtectionParams createFromParcel(Parcel in) {
             return new KeyChainProtectionParams(in);

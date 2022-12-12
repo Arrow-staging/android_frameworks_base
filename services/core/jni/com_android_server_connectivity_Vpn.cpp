@@ -34,6 +34,7 @@
 #include <sys/types.h>
 
 #include <log/log.h>
+#include <android/log.h>
 
 #include "netutils/ifc.h"
 
@@ -57,7 +58,7 @@ static inline in_addr_t *as_in_addr(sockaddr *sa) {
 
 static int create_interface(int mtu)
 {
-    int tun = open("/dev/tun", O_RDWR | O_NONBLOCK);
+    int tun = open("/dev/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
 
     ifreq ifr4;
     memset(&ifr4, 0, sizeof(ifr4));

@@ -17,9 +17,11 @@
 package com.android.internal.util;
 
 import android.os.Process;
+import android.util.Slog;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -36,6 +38,8 @@ public class ConcurrentUtils {
 
     private ConcurrentUtils() {
     }
+
+    public static final Executor DIRECT_EXECUTOR = new DirectExecutor();
 
     /**
      * Creates a thread pool using
@@ -109,6 +113,37 @@ public class ConcurrentUtils {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(description + " interrupted.");
+        }
+    }
+
+    /**
+     * Calls {@link Slog#wtf} if a given lock is held.
+     */
+    public static void wtfIfLockHeld(String tag, Object lock) {
+        if (Thread.holdsLock(lock)) {
+            Slog.wtf(tag, "Lock mustn't be held");
+        }
+    }
+
+    /**
+     * Calls {@link Slog#wtf} if a given lock is not held.
+     */
+    public static void wtfIfLockNotHeld(String tag, Object lock) {
+        if (!Thread.holdsLock(lock)) {
+            Slog.wtf(tag, "Lock must be held");
+        }
+    }
+
+    private static class DirectExecutor implements Executor {
+
+        @Override
+        public void execute(Runnable command) {
+            command.run();
+        }
+
+        @Override
+        public String toString() {
+            return "DIRECT_EXECUTOR";
         }
     }
 }

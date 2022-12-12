@@ -130,26 +130,44 @@ static inline void mapRect(const Matrix4* matrix, const SkRect& in, SkRect* out)
         // calculations. Just give up and expand to DIRTY_MIN/DIRTY_MAX
         temp.set(DIRTY_MIN, DIRTY_MIN, DIRTY_MAX, DIRTY_MAX);
     }
-    out->join(RECT_ARGS(temp));
+    out->join({RECT_ARGS(temp)});
 }
 
 void DamageAccumulator::applyMatrix4Transform(DirtyStack* frame) {
     mapRect(frame->matrix4, frame->pendingDirty, &mHead->pendingDirty);
 }
 
-static inline void mapRect(const RenderProperties& props, const SkRect& in, SkRect* out) {
-    if (in.isEmpty()) return;
-    const SkMatrix* transform = props.getTransformMatrix();
-    SkRect temp(in);
+static inline void applyMatrix(const SkMatrix* transform, SkRect* rect) {
     if (transform && !transform->isIdentity()) {
         if (CC_LIKELY(!transform->hasPerspective())) {
-            transform->mapRect(&temp);
+            transform->mapRect(rect);
         } else {
             // Don't attempt to calculate damage for a perspective transform
             // as the numbers this works with can break the perspective
             // calculations. Just give up and expand to DIRTY_MIN/DIRTY_MAX
-            temp.set(DIRTY_MIN, DIRTY_MIN, DIRTY_MAX, DIRTY_MAX);
+            rect->setLTRB(DIRTY_MIN, DIRTY_MIN, DIRTY_MAX, DIRTY_MAX);
         }
+    }
+}
+
+static inline void applyMatrix(const SkMatrix& transform, SkRect* rect) {
+    return applyMatrix(&transform, rect);
+}
+
+static inline void mapRect(const RenderProperties& props, const SkRect& in, SkRect* out) {
+    if (in.isEmpty()) return;
+    SkRect temp(in);
+    if (Properties::getStretchEffectBehavior() == StretchEffectBehavior::UniformScale) {
+        const StretchEffect& stretch = props.layerProperties().getStretchEffect();
+        if (!stretch.isEmpty()) {
+            applyMatrix(stretch.makeLinearStretch(props.getWidth(), props.getHeight()), &temp);
+        }
+    }
+    applyMatrix(props.getTransformMatrix(), &temp);
+    if (props.getStaticMatrix()) {
+        applyMatrix(props.getStaticMatrix(), &temp);
+    } else if (props.getAnimationMatrix()) {
+        applyMatrix(props.getAnimationMatrix(), &temp);
     }
     temp.offset(props.getLeft(), props.getTop());
     out->join(temp);
@@ -189,6 +207,27 @@ static void applyTransforms(DirtyStack* frame, DirtyStack* end) {
     }
 }
 
+static void computeTransformImpl(const DirtyStack* frame, const DirtyStack* end,
+                                 Matrix4* outMatrix) {
+  while (frame != end) {
+    switch (frame->type) {
+        case TransformRenderNode:
+            frame->renderNode->applyViewPropertyTransforms(*outMatrix);
+            break;
+        case TransformMatrix4:
+            outMatrix->multiply(*frame->matrix4);
+            break;
+        case TransformNone:
+            // nothing to be done
+            break;
+        default:
+            LOG_ALWAYS_FATAL("Tried to compute transform with an invalid type: %d",
+                             frame->type);
+    }
+    frame = frame->prev;
+  }
+}
+
 void DamageAccumulator::applyRenderNodeTransform(DirtyStack* frame) {
     if (frame->pendingDirty.isEmpty()) {
         return;
@@ -201,7 +240,7 @@ void DamageAccumulator::applyRenderNodeTransform(DirtyStack* frame) {
 
     // Perform clipping
     if (props.getClipDamageToBounds() && !frame->pendingDirty.isEmpty()) {
-        if (!frame->pendingDirty.intersect(0, 0, props.getWidth(), props.getHeight())) {
+        if (!frame->pendingDirty.intersect(SkRect::MakeIWH(props.getWidth(), props.getHeight()))) {
             frame->pendingDirty.setEmpty();
         }
     }
@@ -225,7 +264,7 @@ void DamageAccumulator::applyRenderNodeTransform(DirtyStack* frame) {
 }
 
 void DamageAccumulator::dirty(float left, float top, float right, float bottom) {
-    mHead->pendingDirty.join(left, top, right, bottom);
+    mHead->pendingDirty.join({left, top, right, bottom});
 }
 
 void DamageAccumulator::peekAtDirty(SkRect* dest) const {
@@ -239,6 +278,43 @@ void DamageAccumulator::finish(SkRect* totalDirty) {
     *totalDirty = mHead->pendingDirty;
     totalDirty->roundOut(totalDirty);
     mHead->pendingDirty.setEmpty();
+}
+
+DamageAccumulator::StretchResult DamageAccumulator::findNearestStretchEffect() const {
+    DirtyStack* frame = mHead;
+    const auto& headProperties = mHead->renderNode->properties();
+    float startWidth = headProperties.getWidth();
+    float startHeight = headProperties.getHeight();
+    while (frame->prev != frame) {
+        if (frame->type == TransformRenderNode) {
+            const auto& renderNode = frame->renderNode;
+            const auto& frameRenderNodeProperties = renderNode->properties();
+            const auto& effect =
+                    frameRenderNodeProperties.layerProperties().getStretchEffect();
+            const float width = (float) frameRenderNodeProperties.getWidth();
+            const float height = (float) frameRenderNodeProperties.getHeight();
+            if (!effect.isEmpty()) {
+                Matrix4 stretchMatrix;
+                computeTransformImpl(mHead, frame, &stretchMatrix);
+                Rect stretchRect = Rect(0.f, 0.f, startWidth, startHeight);
+                stretchMatrix.mapRect(stretchRect);
+
+                return StretchResult{
+                    .stretchEffect = &effect,
+                    .childRelativeBounds = SkRect::MakeLTRB(
+                        stretchRect.left,
+                        stretchRect.top,
+                        stretchRect.right,
+                        stretchRect.bottom
+                    ),
+                    .width = width,
+                    .height = height
+                };
+            }
+        }
+        frame = frame->prev;
+    }
+    return StretchResult{};
 }
 
 } /* namespace uirenderer */

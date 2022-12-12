@@ -18,9 +18,13 @@ package com.android.server.backup;
 
 import static com.google.common.truth.Truth.assertThat;
 
+import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
+
 import android.platform.test.annotations.Presubmit;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Before;
 import org.junit.Rule;
@@ -35,7 +39,8 @@ import org.mockito.MockitoAnnotations;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.util.ArrayList;
+import java.io.IOException;
+import java.util.function.Consumer;
 
 @SmallTest
 @Presubmit
@@ -47,7 +52,8 @@ public class DataChangedJournalTest {
 
     @Rule public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
 
-    @Mock private DataChangedJournal.Consumer mConsumer;
+    @Mock private Consumer<String> mConsumer;
+    @Mock private File invalidFile;
 
     private File mFile;
     private DataChangedJournal mJournal;
@@ -84,7 +90,13 @@ public class DataChangedJournalTest {
 
     @Test
     public void equals_isTrueForTheSameFile() throws Exception {
-        assertThat(mJournal.equals(new DataChangedJournal(mFile))).isTrue();
+        assertEqualsBothWaysAndHashCode(mJournal, new DataChangedJournal(mFile));
+    }
+
+    private static <T> void assertEqualsBothWaysAndHashCode(T a, T b) {
+        assertEquals(a, b);
+        assertEquals(b, a);
+        assertEquals(a.hashCode(), b.hashCode());
     }
 
     @Test
@@ -111,9 +123,7 @@ public class DataChangedJournalTest {
         DataChangedJournal.newJournal(folder);
         DataChangedJournal.newJournal(folder);
 
-        ArrayList<DataChangedJournal> journals = DataChangedJournal.listJournals(folder);
-
-        assertThat(journals).hasSize(2);
+        assertThat(DataChangedJournal.listJournals(folder)).hasSize(2);
     }
 
     @Test
@@ -125,8 +135,25 @@ public class DataChangedJournalTest {
         assertThat(folder.listFiles()).hasLength(1);
     }
 
+    @Test(expected = NullPointerException.class)
+    public void newJournal_nullJournalDir() throws IOException {
+        DataChangedJournal.newJournal(null);
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void nullFile() {
+        new DataChangedJournal(null);
+    }
+
     @Test
     public void toString_isSameAsFileToString() throws Exception {
         assertThat(mJournal.toString()).isEqualTo(mFile.toString());
+    }
+
+    @Test
+    public void listJournals_invalidJournalFile_returnsEmptyList() throws Exception {
+        when(invalidFile.listFiles()).thenReturn(null);
+
+        assertThat(DataChangedJournal.listJournals(invalidFile)).isEmpty();
     }
 }

@@ -256,6 +256,10 @@ void JNICameraContext::copyAndPost(JNIEnv* env, const sp<IMemory>& dataPtr, int 
         ssize_t offset;
         size_t size;
         sp<IMemoryHeap> heap = dataPtr->getMemory(&offset, &size);
+        if (heap == NULL) {
+            ALOGV("copyAndPost: skipping null memory callback!");
+            return;
+        }
         ALOGV("copyAndPost: off=%zd, size=%zu", offset, size);
         uint8_t *heapBase = (uint8_t*)heap->base();
 
@@ -552,7 +556,7 @@ static void android_hardware_Camera_getCameraInfo(JNIEnv *env, jobject thiz,
 
 // connect to camera service
 static jint android_hardware_Camera_native_setup(JNIEnv *env, jobject thiz,
-    jobject weak_this, jint cameraId, jint halVersion, jstring clientPackageName)
+    jobject weak_this, jint cameraId, jstring clientPackageName)
 {
     // Convert jstring to String16
     const char16_t *rawClientName = reinterpret_cast<const char16_t*>(
@@ -562,19 +566,9 @@ static jint android_hardware_Camera_native_setup(JNIEnv *env, jobject thiz,
     env->ReleaseStringChars(clientPackageName,
                             reinterpret_cast<const jchar*>(rawClientName));
 
-    sp<Camera> camera;
-    if (halVersion == CAMERA_HAL_API_VERSION_NORMAL_CONNECT) {
-        // Default path: hal version is don't care, do normal camera connect.
-        camera = Camera::connect(cameraId, clientName,
-                Camera::USE_CALLING_UID, Camera::USE_CALLING_PID);
-    } else {
-        jint status = Camera::connectLegacy(cameraId, halVersion, clientName,
-                Camera::USE_CALLING_UID, camera);
-        if (status != NO_ERROR) {
-            return status;
-        }
-    }
-
+    int targetSdkVersion = android_get_application_target_sdk_version();
+    sp<Camera> camera = Camera::connect(cameraId, clientName, Camera::USE_CALLING_UID,
+                                        Camera::USE_CALLING_PID, targetSdkVersion);
     if (camera == NULL) {
         return -EACCES;
     }
@@ -604,6 +598,7 @@ static jint android_hardware_Camera_native_setup(JNIEnv *env, jobject thiz,
     CameraInfo cameraInfo;
     status_t rc = Camera::getCameraInfo(cameraId, &cameraInfo);
     if (rc != NO_ERROR) {
+        ALOGE("%s: getCameraInfo error: %d", __FUNCTION__, rc);
         return rc;
     }
     int defaultOrientation = 0;
@@ -1018,6 +1013,41 @@ static void android_hardware_Camera_enableFocusMoveCallback(JNIEnv *env, jobject
     }
 }
 
+static void android_hardware_Camera_setAudioRestriction(
+        JNIEnv *env, jobject thiz, jint mode)
+{
+    ALOGV("setAudioRestriction");
+    sp<Camera> camera = get_native_camera(env, thiz, NULL);
+    if (camera == 0) {
+        jniThrowRuntimeException(env, "camera has been disconnected");
+        return;
+    }
+
+    int32_t ret = camera->setAudioRestriction(mode);
+    if (ret < 0) {
+        jniThrowRuntimeException(env, "Illegal argument or low-level eror");
+        return;
+    }
+}
+
+static int32_t android_hardware_Camera_getAudioRestriction(
+        JNIEnv *env, jobject thiz)
+{
+    ALOGV("getAudioRestriction");
+    sp<Camera> camera = get_native_camera(env, thiz, NULL);
+    if (camera == 0) {
+        jniThrowRuntimeException(env, "camera has been disconnected");
+        return -1;
+    }
+
+    int32_t ret = camera->getGlobalAudioRestriction();
+    if (ret < 0) {
+        jniThrowRuntimeException(env, "Illegal argument or low-level eror");
+        return -1;
+    }
+    return ret;
+}
+
 //-------------------------------------------------
 
 static const JNINativeMethod camMethods[] = {
@@ -1028,7 +1058,7 @@ static const JNINativeMethod camMethods[] = {
     "(ILandroid/hardware/Camera$CameraInfo;)V",
     (void*)android_hardware_Camera_getCameraInfo },
   { "native_setup",
-    "(Ljava/lang/Object;IILjava/lang/String;)I",
+    "(Ljava/lang/Object;ILjava/lang/String;)I",
     (void*)android_hardware_Camera_native_setup },
   { "native_release",
     "()V",
@@ -1102,6 +1132,12 @@ static const JNINativeMethod camMethods[] = {
   { "enableFocusMoveCallback",
     "(I)V",
     (void *)android_hardware_Camera_enableFocusMoveCallback},
+  { "setAudioRestriction",
+    "(I)V",
+    (void *)android_hardware_Camera_setAudioRestriction},
+  { "getAudioRestriction",
+    "()I",
+    (void *)android_hardware_Camera_getAudioRestriction},
 };
 
 struct field {

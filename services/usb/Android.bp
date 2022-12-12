@@ -1,6 +1,23 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
+filegroup {
+    name: "services.usb-sources",
+    srcs: ["java/**/*.java"],
+    path: "java",
+    visibility: ["//frameworks/base/services"],
+}
+
 java_library_static {
     name: "services.usb",
-    srcs: ["java/**/*.java"],
+    defaults: ["platform_service_defaults"],
+    srcs: [":services.usb-sources"],
 
     libs: [
         "services.core",
@@ -10,6 +27,11 @@ java_library_static {
     static_libs: [
         "android.hardware.usb-V1.0-java",
         "android.hardware.usb-V1.1-java",
+        "android.hardware.usb-V1.2-java",
+        "android.hardware.usb-V1.3-java",
+	"android.hardware.usb-V1-java",
         "android.hardware.usb.gadget-V1.0-java",
+        "android.hardware.usb.gadget-V1.1-java",
+        "android.hardware.usb.gadget-V1.2-java",
     ],
 }

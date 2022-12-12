@@ -16,20 +16,21 @@
 
 package com.android.systemui.doze;
 
-import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.app.IWallpaperManager;
-import android.os.Handler;
 import android.os.RemoteException;
-import android.support.test.filters.SmallTest;
 
-import com.android.keyguard.KeyguardUpdateMonitor;
+import androidx.test.filters.SmallTest;
+
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.statusbar.notification.stack.StackStateAnimator;
+import com.android.systemui.statusbar.phone.BiometricUnlockController;
 import com.android.systemui.statusbar.phone.DozeParameters;
 
 import org.junit.Before;
@@ -37,7 +38,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 
 @RunWith(JUnit4.class)
@@ -46,14 +46,14 @@ public class DozeWallpaperStateTest extends SysuiTestCase {
 
     private DozeWallpaperState mDozeWallpaperState;
     @Mock IWallpaperManager mIWallpaperManager;
+    @Mock BiometricUnlockController mBiometricUnlockController;
     @Mock DozeParameters mDozeParameters;
-    @Mock KeyguardUpdateMonitor mKeyguardUpdateMonitor;
 
     @Before
     public void setUp() {
         MockitoAnnotations.initMocks(this);
-        mDozeWallpaperState = new DozeWallpaperState(mIWallpaperManager, mDozeParameters,
-                mKeyguardUpdateMonitor);
+        mDozeWallpaperState = new DozeWallpaperState(mIWallpaperManager, mBiometricUnlockController,
+                mDozeParameters);
     }
 
     @Test
@@ -63,43 +63,88 @@ public class DozeWallpaperStateTest extends SysuiTestCase {
 
         mDozeWallpaperState.transitionTo(DozeMachine.State.UNINITIALIZED,
                 DozeMachine.State.DOZE_AOD);
-        verify(mIWallpaperManager).setInAmbientMode(eq(true), anyBoolean());
+        verify(mIWallpaperManager).setInAmbientMode(eq(true), anyLong());
         mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_AOD, DozeMachine.State.FINISH);
-        verify(mIWallpaperManager).setInAmbientMode(eq(false), anyBoolean());
+        verify(mIWallpaperManager).setInAmbientMode(eq(false), anyLong());
 
         // Make sure we're sending false when AoD is off
         reset(mDozeParameters);
         mDozeWallpaperState.transitionTo(DozeMachine.State.FINISH, DozeMachine.State.DOZE_AOD);
-        verify(mIWallpaperManager).setInAmbientMode(eq(false), anyBoolean());
+        verify(mIWallpaperManager).setInAmbientMode(eq(false), anyLong());
     }
 
     @Test
     public void testAnimates_whenSupported() throws RemoteException {
         // Pre-conditions
         when(mDozeParameters.getDisplayNeedsBlanking()).thenReturn(false);
-        when(mDozeParameters.getCanControlScreenOffAnimation()).thenReturn(true);
+        when(mDozeParameters.shouldControlScreenOff()).thenReturn(true);
         when(mDozeParameters.getAlwaysOn()).thenReturn(true);
 
         mDozeWallpaperState.transitionTo(DozeMachine.State.UNINITIALIZED,
                 DozeMachine.State.DOZE_AOD);
-        verify(mIWallpaperManager).setInAmbientMode(eq(true), eq(true));
+        verify(mIWallpaperManager).setInAmbientMode(eq(true),
+                eq((long) StackStateAnimator.ANIMATION_DURATION_WAKEUP));
 
         mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_AOD, DozeMachine.State.FINISH);
-        verify(mIWallpaperManager).setInAmbientMode(eq(false), eq(true));
+        verify(mIWallpaperManager).setInAmbientMode(eq(false),
+                eq((long) StackStateAnimator.ANIMATION_DURATION_WAKEUP));
     }
 
     @Test
     public void testDoesNotAnimate_whenNotSupported() throws RemoteException {
         // Pre-conditions
         when(mDozeParameters.getDisplayNeedsBlanking()).thenReturn(true);
-        when(mDozeParameters.getCanControlScreenOffAnimation()).thenReturn(false);
         when(mDozeParameters.getAlwaysOn()).thenReturn(true);
+        when(mDozeParameters.shouldControlScreenOff()).thenReturn(false);
 
         mDozeWallpaperState.transitionTo(DozeMachine.State.UNINITIALIZED,
                 DozeMachine.State.DOZE_AOD);
-        verify(mIWallpaperManager).setInAmbientMode(eq(true), eq(false));
+        verify(mIWallpaperManager).setInAmbientMode(eq(true), eq(0L));
 
         mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_AOD, DozeMachine.State.FINISH);
-        verify(mIWallpaperManager).setInAmbientMode(eq(false), eq(false));
+        verify(mIWallpaperManager).setInAmbientMode(eq(false), eq(0L));
+    }
+
+    @Test
+    public void testDoesNotAnimate_whenWakeAndUnlock() throws RemoteException {
+        // Pre-conditions
+        when(mDozeParameters.getAlwaysOn()).thenReturn(true);
+        when(mBiometricUnlockController.unlockedByWakeAndUnlock()).thenReturn(true);
+
+        mDozeWallpaperState.transitionTo(DozeMachine.State.UNINITIALIZED,
+                DozeMachine.State.DOZE_AOD);
+        clearInvocations(mIWallpaperManager);
+
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_AOD, DozeMachine.State.FINISH);
+        verify(mIWallpaperManager).setInAmbientMode(eq(false), eq(0L));
+    }
+
+    @Test
+    public void testTransitionTo_requestPulseIsAmbientMode() throws RemoteException {
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE,
+                DozeMachine.State.DOZE_REQUEST_PULSE);
+        verify(mIWallpaperManager).setInAmbientMode(eq(true), eq(0L));
+    }
+
+    @Test
+    public void testTransitionTo_wakeFromPulseIsNotAmbientMode() throws RemoteException {
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_AOD,
+                DozeMachine.State.DOZE_REQUEST_PULSE);
+        reset(mIWallpaperManager);
+
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_REQUEST_PULSE,
+                DozeMachine.State.DOZE_PULSING_BRIGHT);
+        verify(mIWallpaperManager).setInAmbientMode(eq(false), anyLong());
+    }
+
+    @Test
+    public void testTransitionTo_animatesWhenWakingUpFromPulse() throws RemoteException {
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_REQUEST_PULSE,
+                DozeMachine.State.DOZE_PULSING);
+        reset(mIWallpaperManager);
+        mDozeWallpaperState.transitionTo(DozeMachine.State.DOZE_PULSING,
+                DozeMachine.State.FINISH);
+        verify(mIWallpaperManager).setInAmbientMode(eq(false),
+                eq((long) StackStateAnimator.ANIMATION_DURATION_WAKEUP));
     }
 }

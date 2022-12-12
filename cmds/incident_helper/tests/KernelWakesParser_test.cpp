@@ -52,14 +52,14 @@ protected:
 TEST_F(KernelWakesParserTest, Short) {
     const string testFile = kTestDataPath + "kernel_wakeups_short.txt";
     KernelWakesParser parser;
-    KernelWakeSources expected;
+    KernelWakeSourcesProto expected;
 
-    WakeupSourceProto* record1 = expected.add_wakeup_sources();
+    KernelWakeSourcesProto::WakeupSource* record1 = expected.add_wakeup_sources();
     record1->set_name("ab");
     record1->set_active_count(8);
     record1->set_last_change(123456123456LL);
 
-    WakeupSourceProto* record2 = expected.add_wakeup_sources();
+    KernelWakeSourcesProto::WakeupSource* record2 = expected.add_wakeup_sources();
     record2->set_name("df");
     record2->set_active_count(143);
     record2->set_last_change(0LL);
@@ -76,29 +76,29 @@ TEST_F(KernelWakesParserTest, Short) {
 TEST_F(KernelWakesParserTest, Normal) {
     const string testFile = kTestDataPath + "kernel_wakeups.txt";
     KernelWakesParser parser;
-    KernelWakeSources expected;
+    KernelWakeSourcesProto expected;
 
-    WakeupSourceProto* record1 = expected.add_wakeup_sources();
+    KernelWakeSourcesProto::WakeupSource* record1 = expected.add_wakeup_sources();
     record1->set_name("ipc000000ab_ATFWD-daemon");
     record1->set_active_count(8);
     record1->set_event_count(8);
     record1->set_wakeup_count(0);
     record1->set_expire_count(0);
-    record1->set_active_since(0l);
-    record1->set_total_time(0l);
-    record1->set_max_time(0l);
+    record1->set_active_since(0L);
+    record1->set_total_time(0L);
+    record1->set_max_time(0L);
     record1->set_last_change(131348LL);
     record1->set_prevent_suspend_time(0LL);
 
-    WakeupSourceProto* record2 = expected.add_wakeup_sources();
+    KernelWakeSourcesProto::WakeupSource* record2 = expected.add_wakeup_sources();
     record2->set_name("ipc000000aa_ATFWD-daemon");
     record2->set_active_count(143);
     record2->set_event_count(143);
     record2->set_wakeup_count(0);
     record2->set_expire_count(0);
-    record2->set_active_since(0l);
-    record2->set_total_time(123l);
-    record2->set_max_time(3l);
+    record2->set_active_since(0L);
+    record2->set_total_time(123L);
+    record2->set_max_time(3L);
     record2->set_last_change(2067286206LL);
     record2->set_prevent_suspend_time(0LL);
 

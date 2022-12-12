@@ -16,10 +16,16 @@
 
 package android.util;
 
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
+
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.Preconditions;
-import java.util.Arrays;
+
 import libcore.util.EmptyArray;
+
+import java.util.Arrays;
 
 /**
  * Implements a growing array of long primitives.
@@ -40,6 +46,7 @@ public class LongArray implements Cloneable {
     /**
      * Creates an empty LongArray with the default initial capacity.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public LongArray() {
         this(10);
     }
@@ -98,11 +105,12 @@ public class LongArray implements Cloneable {
      *
      * @throws IndexOutOfBoundsException when index &lt; 0 || index &gt; size()
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void add(int index, long value) {
         ensureCapacity(1);
         int rightSegment = mSize - index;
         mSize++;
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
 
         if (rightSegment != 0) {
             // Move by 1 all values from the right of 'index'
@@ -161,8 +169,9 @@ public class LongArray implements Cloneable {
     /**
      * Returns the value at the specified position in this array.
      */
+    @UnsupportedAppUsage
     public long get(int index) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         return mValues[index];
     }
 
@@ -170,7 +179,7 @@ public class LongArray implements Cloneable {
      * Sets the value at the specified position in this array.
      */
     public void set(int index, long value) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         mValues[index] = value;
     }
 
@@ -192,7 +201,7 @@ public class LongArray implements Cloneable {
      * Removes the value at the specified index from this array.
      */
     public void remove(int index) {
-        checkBounds(index);
+        ArrayUtils.checkBounds(mSize, index);
         System.arraycopy(mValues, index + 1, mValues, index, mSize - index - 1);
         mSize--;
     }
@@ -200,6 +209,7 @@ public class LongArray implements Cloneable {
     /**
      * Returns the number of values in this array.
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int size() {
         return mSize;
     }
@@ -211,9 +221,17 @@ public class LongArray implements Cloneable {
         return Arrays.copyOf(mValues, mSize);
     }
 
-    private void checkBounds(int index) {
-        if (index < 0 || mSize <= index) {
-            throw new ArrayIndexOutOfBoundsException(mSize, index);
+    /**
+     * Test if each element of {@code a} equals corresponding element from {@code b}
+     */
+    public static boolean elementsEqual(@Nullable LongArray a, @Nullable LongArray b) {
+        if (a == null || b == null) return a == b;
+        if (a.mSize != b.mSize) return false;
+        for (int i = 0; i < a.mSize; i++) {
+            if (a.get(i) != b.get(i)) {
+                return false;
+            }
         }
+        return true;
     }
 }

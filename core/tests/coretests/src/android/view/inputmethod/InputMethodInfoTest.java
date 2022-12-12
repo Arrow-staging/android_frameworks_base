@@ -26,16 +26,17 @@ import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.os.Bundle;
 import android.os.Parcel;
-import android.support.test.filters.LargeTest;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.frameworks.coretests.R;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-@LargeTest
+@SmallTest
 @RunWith(AndroidJUnit4.class)
 public class InputMethodInfoTest {
 
@@ -53,10 +54,14 @@ public class InputMethodInfoTest {
         final InputMethodInfo imi = buildInputMethodForTest(R.xml.ime_meta);
 
         assertThat(imi.supportsSwitchingToNextInputMethod(), is(false));
+        assertThat(imi.isInlineSuggestionsEnabled(), is(false));
+        assertThat(imi.supportsInlineSuggestionsWithTouchExploration(), is(false));
 
         final InputMethodInfo clone = cloneViaParcel(imi);
 
         assertThat(clone.supportsSwitchingToNextInputMethod(), is(false));
+        assertThat(imi.isInlineSuggestionsEnabled(), is(false));
+        assertThat(imi.supportsInlineSuggestionsWithTouchExploration(), is(false));
     }
 
     @Test
@@ -68,6 +73,29 @@ public class InputMethodInfoTest {
         final InputMethodInfo clone = cloneViaParcel(imi);
 
         assertThat(clone.supportsSwitchingToNextInputMethod(), is(true));
+    }
+
+    @Test
+    public void testInlineSuggestionsEnabled() throws Exception {
+        final InputMethodInfo imi = buildInputMethodForTest(R.xml.ime_meta_inline_suggestions);
+
+        assertThat(imi.isInlineSuggestionsEnabled(), is(true));
+
+        final InputMethodInfo clone = cloneViaParcel(imi);
+
+        assertThat(clone.isInlineSuggestionsEnabled(), is(true));
+    }
+
+    @Test
+    public void testInlineSuggestionsEnabledWithTouchExploration() throws Exception {
+        final InputMethodInfo imi =
+                buildInputMethodForTest(R.xml.ime_meta_inline_suggestions_with_touch_exploration);
+
+        assertThat(imi.supportsInlineSuggestionsWithTouchExploration(), is(true));
+
+        final InputMethodInfo clone = cloneViaParcel(imi);
+
+        assertThat(clone.supportsInlineSuggestionsWithTouchExploration(), is(true));
     }
 
     @Test

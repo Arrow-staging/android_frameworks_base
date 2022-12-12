@@ -17,7 +17,6 @@
 #include <iostream>
 #include <string>
 
-#include "util/Maybe.h"
 #include "util/Util.h"
 #include "xml/XmlPullParser.h"
 #include "xml/XmlUtil.h"
@@ -38,6 +37,7 @@ XmlPullParser::XmlPullParser(InputStream* in) : in_(in), empty_(), depth_(0) {
                               EndNamespaceHandler);
   XML_SetCharacterDataHandler(parser_, CharacterDataHandler);
   XML_SetCommentHandler(parser_, CommentDataHandler);
+  XML_SetCdataSectionHandler(parser_, StartCdataSectionHandler, EndCdataSectionHandler);
   event_queue_.push(EventData{Event::kStartDocument, 0, depth_++});
 }
 
@@ -83,8 +83,7 @@ XmlPullParser::Event XmlPullParser::Next() {
   // handling of references that use namespace aliases.
   if (next_event == Event::kStartNamespace ||
       next_event == Event::kEndNamespace) {
-    Maybe<ExtractedPackage> result =
-        ExtractPackageFromNamespace(namespace_uri());
+    std::optional<ExtractedPackage> result = ExtractPackageFromNamespace(namespace_uri());
     if (next_event == Event::kStartNamespace) {
       if (result) {
         package_aliases_.emplace_back(
@@ -141,7 +140,8 @@ const std::string& XmlPullParser::namespace_uri() const {
   return event_queue_.front().data2;
 }
 
-Maybe<ExtractedPackage> XmlPullParser::TransformPackageAlias(const StringPiece& alias) const {
+std::optional<ExtractedPackage> XmlPullParser::TransformPackageAlias(
+    const StringPiece& alias) const {
   if (alias.empty()) {
     return ExtractedPackage{{}, false /*private*/};
   }
@@ -174,6 +174,10 @@ const std::string& XmlPullParser::element_name() const {
     return empty_;
   }
   return event_queue_.front().data2;
+}
+
+const std::vector<XmlPullParser::PackageDecl>& XmlPullParser::package_decls() const {
+  return package_aliases_;
 }
 
 XmlPullParser::const_iterator XmlPullParser::begin_attributes() const {
@@ -287,8 +291,23 @@ void XMLCALL XmlPullParser::CommentDataHandler(void* user_data,
                                       parser->depth_, comment});
 }
 
-Maybe<StringPiece> FindAttribute(const XmlPullParser* parser,
-                                 const StringPiece& name) {
+void XMLCALL XmlPullParser::StartCdataSectionHandler(void* user_data) {
+  XmlPullParser* parser = reinterpret_cast<XmlPullParser*>(user_data);
+
+  parser->event_queue_.push(EventData{Event::kCdataStart,
+                                      XML_GetCurrentLineNumber(parser->parser_),
+                                      parser->depth_ });
+}
+
+void XMLCALL XmlPullParser::EndCdataSectionHandler(void* user_data) {
+  XmlPullParser* parser = reinterpret_cast<XmlPullParser*>(user_data);
+
+  parser->event_queue_.push(EventData{Event::kCdataEnd,
+                                      XML_GetCurrentLineNumber(parser->parser_),
+                                      parser->depth_ });
+}
+
+std::optional<StringPiece> FindAttribute(const XmlPullParser* parser, const StringPiece& name) {
   auto iter = parser->FindAttribute("", name);
   if (iter != parser->end_attributes()) {
     return StringPiece(util::TrimWhitespace(iter->value));
@@ -296,8 +315,8 @@ Maybe<StringPiece> FindAttribute(const XmlPullParser* parser,
   return {};
 }
 
-Maybe<StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
-                                         const StringPiece& name) {
+std::optional<StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
+                                                 const StringPiece& name) {
   auto iter = parser->FindAttribute("", name);
   if (iter != parser->end_attributes()) {
     StringPiece trimmed = util::TrimWhitespace(iter->value);

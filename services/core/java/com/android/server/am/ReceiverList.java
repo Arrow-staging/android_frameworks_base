@@ -17,12 +17,14 @@
 package com.android.server.am;
 
 import android.content.IIntentReceiver;
+import android.content.IntentFilter;
 import android.os.Binder;
 import android.os.IBinder;
 import android.util.PrintWriterPrinter;
 import android.util.Printer;
 import android.util.proto.ProtoOutputStream;
-import com.android.server.am.proto.ReceiverListProto;
+
+import com.android.server.IntentResolver;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -67,20 +69,31 @@ final class ReceiverList extends ArrayList<BroadcastFilter>
         owner.unregisterReceiver(receiver);
     }
 
-    void writeToProto(ProtoOutputStream proto, long fieldId) {
+    public boolean containsFilter(IntentFilter filter) {
+        final int N = size();
+        for (int i = 0; i < N; i++) {
+            final BroadcastFilter f = get(i);
+            if (IntentResolver.filterEquals(f, filter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void dumpDebug(ProtoOutputStream proto, long fieldId) {
         long token = proto.start(fieldId);
-        app.writeToProto(proto, ReceiverListProto.APP);
+        app.dumpDebug(proto, ReceiverListProto.APP);
         proto.write(ReceiverListProto.PID, pid);
         proto.write(ReceiverListProto.UID, uid);
         proto.write(ReceiverListProto.USER, userId);
         if (curBroadcast != null) {
-            curBroadcast.writeToProto(proto, ReceiverListProto.CURRENT);
+            curBroadcast.dumpDebug(proto, ReceiverListProto.CURRENT);
         }
         proto.write(ReceiverListProto.LINKED_TO_DEATH, linkedToDeath);
         final int N = size();
         for (int i=0; i<N; i++) {
             BroadcastFilter bf = get(i);
-            bf.writeToProto(proto, ReceiverListProto.FILTERS);
+            bf.dumpDebug(proto, ReceiverListProto.FILTERS);
         }
         proto.write(ReceiverListProto.HEX_HASH, Integer.toHexString(System.identityHashCode(this)));
         proto.end(token);

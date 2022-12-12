@@ -20,6 +20,7 @@
 #include <string>
 
 #include "android-base/macros.h"
+#include "androidfw/ConfigDescription.h"
 #include "androidfw/ResourceTypes.h"
 
 #include "ResourceTable.h"
@@ -50,26 +51,36 @@ class BinaryResourceParser {
 
   bool ParseTable(const android::ResChunk_header* chunk);
   bool ParsePackage(const android::ResChunk_header* chunk);
-  bool ParseTypeSpec(const ResourceTablePackage* package, const android::ResChunk_header* chunk);
-  bool ParseType(const ResourceTablePackage* package, const android::ResChunk_header* chunk);
+  bool ParseTypeSpec(const ResourceTablePackage* package, const android::ResChunk_header* chunk,
+                     uint8_t package_id);
+  bool ParseType(const ResourceTablePackage* package, const android::ResChunk_header* chunk,
+                 uint8_t package_id);
   bool ParseLibrary(const android::ResChunk_header* chunk);
+  bool ParseOverlayable(const android::ResChunk_header* chunk);
+  bool ParseStagedAliases(const android::ResChunk_header* chunk);
 
-  std::unique_ptr<Item> ParseValue(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Item> ParseValue(const ResourceNameRef& name,
+                                   const android::ConfigDescription& config,
                                    const android::Res_value& value);
 
-  std::unique_ptr<Value> ParseMapEntry(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Value> ParseMapEntry(const ResourceNameRef& name,
+                                       const android::ConfigDescription& config,
                                        const android::ResTable_map_entry* map);
 
-  std::unique_ptr<Style> ParseStyle(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Style> ParseStyle(const ResourceNameRef& name,
+                                    const android::ConfigDescription& config,
                                     const android::ResTable_map_entry* map);
 
-  std::unique_ptr<Attribute> ParseAttr(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Attribute> ParseAttr(const ResourceNameRef& name,
+                                       const android::ConfigDescription& config,
                                        const android::ResTable_map_entry* map);
 
-  std::unique_ptr<Array> ParseArray(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Array> ParseArray(const ResourceNameRef& name,
+                                    const android::ConfigDescription& config,
                                     const android::ResTable_map_entry* map);
 
-  std::unique_ptr<Plural> ParsePlural(const ResourceNameRef& name, const ConfigDescription& config,
+  std::unique_ptr<Plural> ParsePlural(const ResourceNameRef& name,
+                                      const android::ConfigDescription& config,
                                       const android::ResTable_map_entry* map);
 
   /**
@@ -108,6 +119,10 @@ class BinaryResourceParser {
 
   // A mapping of resource ID to type spec flags.
   std::unordered_map<ResourceId, uint32_t> entry_type_spec_flags_;
+
+  // A collection of staged resources that got finalized already and we're supposed to prune -
+  // but the original staged resource record hasn't been parsed yet.
+  std::set<std::pair<ResourceName, ResourceId>> staged_entries_to_remove_;
 };
 
 }  // namespace aapt

@@ -16,11 +16,19 @@
 
 package com.android.server.wm;
 
+import static com.android.server.wm.AnimationAdapterProto.LOCAL;
+import static com.android.server.wm.LocalAnimationAdapterProto.ANIMATION_SPEC;
+
+import android.annotation.NonNull;
 import android.os.SystemClock;
+import android.util.proto.ProtoOutputStream;
 import android.view.SurfaceControl;
 import android.view.SurfaceControl.Transaction;
 
+import com.android.server.wm.SurfaceAnimator.AnimationType;
 import com.android.server.wm.SurfaceAnimator.OnAnimationFinishedCallback;
+
+import java.io.PrintWriter;
 
 /**
  * Animation that can be executed without holding the window manager lock. See
@@ -38,8 +46,13 @@ class LocalAnimationAdapter implements AnimationAdapter {
     }
 
     @Override
-    public boolean getDetachWallpaper() {
-        return mSpec.getDetachWallpaper();
+    public boolean getShowWallpaper() {
+        return mSpec.getShowWallpaper();
+    }
+
+    @Override
+    public boolean getShowBackground() {
+        return mSpec.getShowBackground();
     }
 
     @Override
@@ -49,9 +62,9 @@ class LocalAnimationAdapter implements AnimationAdapter {
 
     @Override
     public void startAnimation(SurfaceControl animationLeash, Transaction t,
-            OnAnimationFinishedCallback finishCallback) {
+            @AnimationType int type, @NonNull OnAnimationFinishedCallback finishCallback) {
         mAnimator.startAnimation(mSpec, animationLeash, t,
-                () -> finishCallback.onAnimationFinished(this));
+                () -> finishCallback.onAnimationFinished(type, this));
     }
 
     @Override
@@ -69,15 +82,34 @@ class LocalAnimationAdapter implements AnimationAdapter {
         return mSpec.calculateStatusBarTransitionStartTime();
     }
 
+    @Override
+    public void dump(PrintWriter pw, String prefix) {
+        mSpec.dump(pw, prefix);
+    }
+
+    @Override
+    public void dumpDebug(ProtoOutputStream proto) {
+        final long token = proto.start(LOCAL);
+        mSpec.dumpDebug(proto, ANIMATION_SPEC);
+        proto.end(token);
+    }
+
     /**
      * Describes how to apply an animation.
      */
     interface AnimationSpec {
 
         /**
-         * @see AnimationAdapter#getDetachWallpaper
+         * @see AnimationAdapter#getShowWallpaper
          */
-        default boolean getDetachWallpaper() {
+        default boolean getShowWallpaper() {
+            return false;
+        }
+
+        /**
+         * @see AnimationAdapter#getShowBackground
+         */
+        default boolean getShowBackground() {
             return false;
         }
 
@@ -114,6 +146,37 @@ class LocalAnimationAdapter implements AnimationAdapter {
          */
         default boolean canSkipFirstFrame() {
             return false;
+        }
+
+        /**
+         * @return {@code true} if we need to wake-up SurfaceFlinger earlier during this animation.
+         *
+         * @see Transaction#setEarlyWakeupStart and Transaction#setEarlyWakeupEnd
+         */
+        default boolean needsEarlyWakeup() { return false; }
+
+        /**
+         * @return The fraction of the animation, returns 1 if duration is 0.
+         *
+         * @param currentPlayTime The current play time.
+         */
+        default float getFraction(float currentPlayTime) {
+            final float duration = getDuration();
+            return duration > 0 ? currentPlayTime / duration : 1.0f;
+        }
+
+        void dump(PrintWriter pw, String prefix);
+
+        default void dumpDebug(ProtoOutputStream proto, long fieldId) {
+            final long token = proto.start(fieldId);
+            dumpDebugInner(proto);
+            proto.end(token);
+        }
+
+        void dumpDebugInner(ProtoOutputStream proto);
+
+        default WindowAnimationSpec asWindowAnimationSpec() {
+            return null;
         }
     }
 }

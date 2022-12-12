@@ -24,15 +24,10 @@ import android.app.Notification;
 import android.content.Context;
 import android.text.Layout;
 import android.util.AttributeSet;
-import android.util.Pools;
 import android.view.LayoutInflater;
-import android.view.ViewGroup;
-import android.view.ViewParent;
 import android.widget.RemoteViews;
 
 import com.android.internal.R;
-
-import java.util.Objects;
 
 /**
  * A message of a {@link MessagingLayout}.
@@ -40,8 +35,8 @@ import java.util.Objects;
 @RemoteViews.RemoteView
 public class MessagingTextMessage extends ImageFloatingTextView implements MessagingMessage {
 
-    private static Pools.SimplePool<MessagingTextMessage> sInstancePool
-            = new Pools.SynchronizedPool<>(20);
+    private static final MessagingPool<MessagingTextMessage> sInstancePool =
+            new MessagingPool<>(20);
     private final MessagingMessageState mState = new MessagingMessageState(this);
 
     public MessagingTextMessage(@NonNull Context context) {
@@ -74,7 +69,7 @@ public class MessagingTextMessage extends ImageFloatingTextView implements Messa
         return true;
     }
 
-    static MessagingMessage createMessage(MessagingLayout layout,
+    static MessagingMessage createMessage(IMessagingLayout layout,
             Notification.MessagingStyle.Message m) {
         MessagingLinearLayout messagingLinearLayout = layout.getMessagingLinearLayout();
         MessagingTextMessage createdMessage = sInstancePool.acquire();
@@ -92,20 +87,18 @@ public class MessagingTextMessage extends ImageFloatingTextView implements Messa
 
     public void recycle() {
         MessagingMessage.super.recycle();
-        setAlpha(1.0f);
-        setTranslationY(0);
         sInstancePool.release(this);
     }
 
     public static void dropCache() {
-        sInstancePool = new Pools.SynchronizedPool<>(10);
+        sInstancePool.clear();
     }
 
     @Override
     public int getMeasuredType() {
         boolean measuredTooSmall = getMeasuredHeight()
                 < getLayoutHeight() + getPaddingTop() + getPaddingBottom();
-        if (measuredTooSmall) {
+        if (measuredTooSmall && getLineCount() <= 1) {
             return MEASURED_TOO_SMALL;
         } else {
             Layout layout = getLayout();

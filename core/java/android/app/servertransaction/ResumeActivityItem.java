@@ -18,11 +18,14 @@ package android.app.servertransaction;
 
 import static android.os.Trace.TRACE_TAG_ACTIVITY_MANAGER;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.app.ActivityClient;
 import android.app.ActivityManager;
+import android.app.ActivityThread.ActivityClientRecord;
 import android.app.ClientTransactionHandler;
 import android.os.IBinder;
 import android.os.Parcel;
-import android.os.RemoteException;
 import android.os.Trace;
 
 /**
@@ -45,22 +48,19 @@ public class ResumeActivityItem extends ActivityLifecycleItem {
     }
 
     @Override
-    public void execute(ClientTransactionHandler client, IBinder token,
+    public void execute(ClientTransactionHandler client, ActivityClientRecord r,
             PendingTransactionActions pendingActions) {
         Trace.traceBegin(TRACE_TAG_ACTIVITY_MANAGER, "activityResume");
-        client.handleResumeActivity(token, true /* clearHide */, mIsForward, "RESUME_ACTIVITY");
+        client.handleResumeActivity(r, true /* finalStateRequest */, mIsForward,
+                "RESUME_ACTIVITY");
         Trace.traceEnd(TRACE_TAG_ACTIVITY_MANAGER);
     }
 
     @Override
     public void postExecute(ClientTransactionHandler client, IBinder token,
             PendingTransactionActions pendingActions) {
-        try {
-            // TODO(lifecycler): Use interface callback instead of AMS.
-            ActivityManager.getService().activityResumed(token);
-        } catch (RemoteException ex) {
-            throw ex.rethrowFromSystemServer();
-        }
+        // TODO(lifecycler): Use interface callback instead of actual implementation.
+        ActivityClient.getInstance().activityResumed(token, client.isHandleSplashScreenExit(token));
     }
 
     @Override
@@ -101,6 +101,7 @@ public class ResumeActivityItem extends ActivityLifecycleItem {
 
     @Override
     public void recycle() {
+        super.recycle();
         mProcState = ActivityManager.PROCESS_STATE_UNKNOWN;
         mUpdateProcState = false;
         mIsForward = false;
@@ -113,7 +114,6 @@ public class ResumeActivityItem extends ActivityLifecycleItem {
     /** Write to Parcel. */
     @Override
     public void writeToParcel(Parcel dest, int flags) {
-        super.writeToParcel(dest, flags);
         dest.writeInt(mProcState);
         dest.writeBoolean(mUpdateProcState);
         dest.writeBoolean(mIsForward);
@@ -121,13 +121,12 @@ public class ResumeActivityItem extends ActivityLifecycleItem {
 
     /** Read from Parcel. */
     private ResumeActivityItem(Parcel in) {
-        super(in);
         mProcState = in.readInt();
         mUpdateProcState = in.readBoolean();
         mIsForward = in.readBoolean();
     }
 
-    public static final Creator<ResumeActivityItem> CREATOR =
+    public static final @NonNull Creator<ResumeActivityItem> CREATOR =
             new Creator<ResumeActivityItem>() {
         public ResumeActivityItem createFromParcel(Parcel in) {
             return new ResumeActivityItem(in);
@@ -139,7 +138,7 @@ public class ResumeActivityItem extends ActivityLifecycleItem {
     };
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (this == o) {
             return true;
         }

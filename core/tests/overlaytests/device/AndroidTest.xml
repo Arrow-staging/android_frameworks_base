@@ -17,9 +17,18 @@
 <configuration description="Test module config for OverlayDeviceTests">
     <option name="test-tag" value="OverlayDeviceTests" />
     <option name="test-suite-tag" value="apct" />
+    <option name="test-suite-tag" value="apct-instrumentation" />
+
+    <target_preparer class="com.android.tradefed.targetprep.RootTargetPreparer" />
+    <target_preparer class="com.android.compatibility.common.tradefed.targetprep.FilePusher">
+        <option name="cleanup" value="true" />
+        <option name="remount-system" value="true" />
+        <option name="push" value="OverlayDeviceTests.apk->/system/app/OverlayDeviceTests.apk" />
+    </target_preparer>
+    <target_preparer class="com.android.tradefed.targetprep.RebootTargetPreparer" />
 
     <target_preparer class="com.android.tradefed.targetprep.TestAppInstallSetup">
-        <option name="test-file-name" value="OverlayDeviceTests.apk" />
+        <option name="cleanup-apks" value="true" />
         <option name="test-file-name" value="OverlayDeviceTests_AppOverlayOne.apk" />
         <option name="test-file-name" value="OverlayDeviceTests_AppOverlayTwo.apk" />
         <option name="test-file-name" value="OverlayDeviceTests_FrameworkOverlay.apk" />
@@ -42,6 +51,5 @@
 
     <test class="com.android.tradefed.testtype.AndroidJUnitTest">
         <option name="package" value="com.android.overlaytest" />
-        <option name="runner" value="android.support.test.runner.AndroidJUnitRunner" />
     </test>
 </configuration>

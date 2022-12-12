@@ -22,16 +22,20 @@ import static org.junit.Assert.assertThat;
 
 import android.os.Parcel;
 import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.ParcelableKeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.support.test.runner.AndroidJUnit4;
+import android.security.keystore.ParcelableKeyGenParameterSpec;
+
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
 import java.math.BigInteger;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.RSAKeyGenParameterSpec;
 import java.util.Date;
+
 import javax.security.auth.x500.X500Principal;
-import org.junit.Test;
-import org.junit.runner.RunWith;
 
 /** Unit tests for {@link ParcelableKeyGenParameterSpec}. */
 @RunWith(AndroidJUnit4.class)
@@ -39,7 +43,6 @@ public final class ParcelableKeyGenParameterSpecTest {
     static final String ALIAS = "keystore-alias";
     static final String ANOTHER_ALIAS = "another-keystore-alias";
     static final int KEY_PURPOSES = KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY;
-    static final int UID = 1230;
     static final int KEYSIZE = 2048;
     static final X500Principal SUBJECT = new X500Principal("CN=subject");
     static final BigInteger SERIAL = new BigInteger("1234567890");
@@ -57,7 +60,7 @@ public final class ParcelableKeyGenParameterSpecTest {
 
     public static KeyGenParameterSpec configureDefaultSpec() {
         return new KeyGenParameterSpec.Builder(ALIAS, KEY_PURPOSES)
-                .setUid(UID)
+                .setNamespace(KeyProperties.NAMESPACE_WIFI)
                 .setKeySize(KEYSIZE)
                 .setCertificateSubject(SUBJECT)
                 .setCertificateSerialNumber(SERIAL)
@@ -77,13 +80,18 @@ public final class ParcelableKeyGenParameterSpecTest {
                 .setUniqueIdIncluded(true)
                 .setUserAuthenticationValidWhileOnBody(true)
                 .setInvalidatedByBiometricEnrollment(true)
+                .setIsStrongBoxBacked(true)
+                .setUserConfirmationRequired(true)
+                .setUnlockedDeviceRequired(true)
+                .setCriticalToDeviceEncryption(true)
                 .build();
     }
 
-    public static void validateSpecValues(KeyGenParameterSpec spec, int uid, String alias) {
+    public static void validateSpecValues(KeyGenParameterSpec spec,
+            @KeyProperties.Namespace int namespace, String alias) {
         assertThat(spec.getKeystoreAlias(), is(alias));
         assertThat(spec.getPurposes(), is(KEY_PURPOSES));
-        assertThat(spec.getUid(), is(uid));
+        assertThat(spec.getNamespace(), is(namespace));
         assertThat(spec.getKeySize(), is(KEYSIZE));
         assertThat(spec.getCertificateSubject(), is(SUBJECT));
         assertThat(spec.getCertificateSerialNumber(), is(SERIAL));
@@ -105,6 +113,10 @@ public final class ParcelableKeyGenParameterSpecTest {
         assertThat(spec.isUniqueIdIncluded(), is(true));
         assertThat(spec.isUserAuthenticationValidWhileOnBody(), is(true));
         assertThat(spec.isInvalidatedByBiometricEnrollment(), is(true));
+        assertThat(spec.isStrongBoxBacked(), is(true));
+        assertThat(spec.isUserConfirmationRequired(), is(true));
+        assertThat(spec.isUnlockedDeviceRequired(), is(true));
+        assertThat(spec.isCriticalToDeviceEncryption(), is(true));
     }
 
     private Parcel parcelForReading(ParcelableKeyGenParameterSpec spec) {
@@ -122,7 +134,7 @@ public final class ParcelableKeyGenParameterSpecTest {
         Parcel parcel = parcelForReading(spec);
         ParcelableKeyGenParameterSpec fromParcel =
             ParcelableKeyGenParameterSpec.CREATOR.createFromParcel(parcel);
-        validateSpecValues(fromParcel.getSpec(), UID, ALIAS);
+        validateSpecValues(fromParcel.getSpec(), KeyProperties.NAMESPACE_WIFI, ALIAS);
         assertThat(parcel.dataAvail(), is(0));
     }
 

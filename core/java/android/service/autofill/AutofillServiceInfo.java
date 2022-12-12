@@ -18,10 +18,14 @@ package android.service.autofill;
 import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.app.AppGlobals;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -35,9 +39,9 @@ import android.util.Log;
 import android.util.Xml;
 
 import com.android.internal.R;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
-
 import com.android.internal.util.XmlUtils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -45,7 +49,8 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * {@link ServiceInfo} and meta-data about an {@link AutofillService}.
@@ -78,9 +83,13 @@ public final class AutofillServiceInfo {
 
     @Nullable
     private final String mSettingsActivity;
+    @Nullable
+    private final String mPasswordsActivity;
 
     @Nullable
-    private final Map<String, Long> mCompatibilityPackages;
+    private final ArrayMap<String, Long> mCompatibilityPackages;
+
+    private final boolean mInlineSuggestionsEnabled;
 
     public AutofillServiceInfo(Context context, ComponentName comp, int userHandle)
             throws PackageManager.NameNotFoundException {
@@ -113,12 +122,16 @@ public final class AutofillServiceInfo {
                 AutofillService.SERVICE_META_DATA);
         if (parser == null) {
             mSettingsActivity = null;
+            mPasswordsActivity = null;
             mCompatibilityPackages = null;
+            mInlineSuggestionsEnabled = false;
             return;
         }
 
         String settingsActivity = null;
-        Map<String, Long> compatibilityPackages = null;
+        String passwordsActivity = null;
+        ArrayMap<String, Long> compatibilityPackages = null;
+        boolean inlineSuggestionsEnabled = false; // false by default.
 
         try {
             final Resources resources = context.getPackageManager().getResourcesForApplication(
@@ -137,6 +150,10 @@ public final class AutofillServiceInfo {
                             com.android.internal.R.styleable.AutofillService);
                     settingsActivity = afsAttributes.getString(
                             R.styleable.AutofillService_settingsActivity);
+                    passwordsActivity = afsAttributes.getString(
+                            R.styleable.AutofillService_passwordsActivity);
+                    inlineSuggestionsEnabled = afsAttributes.getBoolean(
+                            R.styleable.AutofillService_supportsInlineSuggestions, false);
                 } finally {
                     if (afsAttributes != null) {
                         afsAttributes.recycle();
@@ -151,12 +168,14 @@ public final class AutofillServiceInfo {
         }
 
         mSettingsActivity = settingsActivity;
+        mPasswordsActivity = passwordsActivity;
         mCompatibilityPackages = compatibilityPackages;
+        mInlineSuggestionsEnabled = inlineSuggestionsEnabled;
     }
 
-    private Map<String, Long> parseCompatibilityPackages(XmlPullParser parser, Resources resources)
-            throws IOException, XmlPullParserException {
-        Map<String, Long> compatibilityPackages = null;
+    private ArrayMap<String, Long> parseCompatibilityPackages(XmlPullParser parser,
+            Resources resources) throws IOException, XmlPullParserException {
+        ArrayMap<String, Long> compatibilityPackages = null;
 
         final int outerDepth = parser.getDepth();
         int type;
@@ -200,7 +219,6 @@ public final class AutofillServiceInfo {
                     } else {
                         maxVersionCode = Long.MAX_VALUE;
                     }
-
                     if (compatibilityPackages == null) {
                         compatibilityPackages = new ArrayMap<>();
                     }
@@ -217,6 +235,40 @@ public final class AutofillServiceInfo {
         return compatibilityPackages;
     }
 
+    /**
+     * Used by {@link TestDataBuilder}.
+     */
+    private AutofillServiceInfo(String passwordsActivity) {
+        mServiceInfo = new ServiceInfo();
+        mServiceInfo.applicationInfo = new ApplicationInfo();
+        mServiceInfo.packageName = "com.android.test";
+        mSettingsActivity = null;
+        mPasswordsActivity = passwordsActivity;
+        mCompatibilityPackages = null;
+        mInlineSuggestionsEnabled = false;
+    }
+
+    /**
+     * Builds test data for unit tests.
+     */
+    @VisibleForTesting
+    public static final class TestDataBuilder {
+        private String mPasswordsActivity;
+
+        public TestDataBuilder() {
+        }
+
+        public TestDataBuilder setPasswordsActivity(String passwordsActivity) {
+            mPasswordsActivity = passwordsActivity;
+            return this;
+        }
+
+        public AutofillServiceInfo build() {
+            return new AutofillServiceInfo(mPasswordsActivity);
+        }
+    }
+
+    @NonNull
     public ServiceInfo getServiceInfo() {
         return mServiceInfo;
     }
@@ -227,15 +279,41 @@ public final class AutofillServiceInfo {
     }
 
     @Nullable
-    public boolean isCompatibilityModeRequested(String packageName, long versionCode) {
-        if (mCompatibilityPackages == null) {
-            return false;
+    public String getPasswordsActivity() {
+        return mPasswordsActivity;
+    }
+
+    @Nullable
+    public ArrayMap<String, Long> getCompatibilityPackages() {
+        return mCompatibilityPackages;
+    }
+
+    public boolean isInlineSuggestionsEnabled() {
+        return mInlineSuggestionsEnabled;
+    }
+
+    /**
+     * Queries the valid autofill services available for the user.
+     */
+    public static List<AutofillServiceInfo> getAvailableServices(
+            Context context, @UserIdInt int user) {
+        final List<AutofillServiceInfo> services = new ArrayList<>();
+
+        final List<ResolveInfo> resolveInfos =
+                context.getPackageManager().queryIntentServicesAsUser(
+                        new Intent(AutofillService.SERVICE_INTERFACE),
+                        PackageManager.GET_META_DATA,
+                        user);
+        for (ResolveInfo resolveInfo : resolveInfos) {
+            final ServiceInfo serviceInfo = resolveInfo.serviceInfo;
+            try {
+                services.add(new AutofillServiceInfo(context, serviceInfo));
+            } catch (SecurityException e) {
+                // Service does not declare the proper permission, ignore it.
+                Log.w(TAG, "Error getting info for " + serviceInfo + ": " + e);
+            }
         }
-        final Long maxVersionCode = mCompatibilityPackages.get(packageName);
-        if (maxVersionCode == null) {
-            return false;
-        }
-        return versionCode <= maxVersionCode;
+        return services;
     }
 
     @Override
@@ -244,8 +322,10 @@ public final class AutofillServiceInfo {
         builder.append(getClass().getSimpleName());
         builder.append("[").append(mServiceInfo);
         builder.append(", settings:").append(mSettingsActivity);
+        builder.append(", passwords activity:").append(mPasswordsActivity);
         builder.append(", hasCompatPckgs:").append(mCompatibilityPackages != null
                 && !mCompatibilityPackages.isEmpty()).append("]");
+        builder.append(", inline suggestions enabled:").append(mInlineSuggestionsEnabled);
         return builder.toString();
     }
 
@@ -255,6 +335,9 @@ public final class AutofillServiceInfo {
     public void dump(String prefix, PrintWriter pw) {
         pw.print(prefix); pw.print("Component: "); pw.println(getServiceInfo().getComponentName());
         pw.print(prefix); pw.print("Settings: "); pw.println(mSettingsActivity);
+        pw.print(prefix); pw.print("Passwords activity: "); pw.println(mPasswordsActivity);
         pw.print(prefix); pw.print("Compat packages: "); pw.println(mCompatibilityPackages);
+        pw.print(prefix); pw.print("Inline Suggestions Enabled: ");
+        pw.println(mInlineSuggestionsEnabled);
     }
 }

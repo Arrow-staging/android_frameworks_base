@@ -60,8 +60,19 @@ axis 0x11 HAT_Y
 key 0x138    BUTTON_SELECT
 # Options
 key 0x139    BUTTON_START
-
 # PS key
-key 0x13c    HOME
+key 0x13c    BUTTON_MODE
+
 # Touchpad press
-key 0x13d   BUTTON_MODE
+# The touchpad for this joystick will become a separate input device in future releases
+# and this button will be equivalent to left mouse button
+# Therefore, map it to KEYCODE_BUTTON_1 here to allow apps to still handle this on earlier versions
+key 0x13d   BUTTON_1
+
+# SENSORs
+sensor 0x00 ACCELEROMETER X
+sensor 0x01 ACCELEROMETER Y
+sensor 0x02 ACCELEROMETER Z
+sensor 0x03 GYROSCOPE X
+sensor 0x04 GYROSCOPE Y
+sensor 0x05 GYROSCOPE Z

@@ -28,11 +28,12 @@ import android.content.pm.UserInfo;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.LargeTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.support.test.uiautomator.UiDevice;
 import android.util.ArraySet;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.LargeTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.After;
 import org.junit.Before;
@@ -50,6 +51,7 @@ public class BatteryStatsUserLifecycleTests {
     private static final long POLL_INTERVAL_MS = 500;
     private static final long USER_REMOVE_TIMEOUT_MS = 5_000;
     private static final long STOP_USER_TIMEOUT_MS = 10_000;
+    private static final long USER_UIDS_REMOVE_TIMEOUT_MS = 15_000;
     private static final long BATTERYSTATS_POLLING_TIMEOUT_MS = 5_000;
 
     private static final String CPU_DATA_TAG = "cpu";
@@ -106,7 +108,7 @@ public class BatteryStatsUserLifecycleTests {
             return true;
         }, USER_REMOVE_TIMEOUT_MS);
         waitUntilTrue("Uids still found for removed user " + mTestUserId,
-                () -> getNumberOfUidsInBatteryStats() == 0, BATTERYSTATS_POLLING_TIMEOUT_MS);
+                () -> getNumberOfUidsInBatteryStats() == 0, USER_UIDS_REMOVE_TIMEOUT_MS);
     }
 
     @After

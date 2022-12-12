@@ -3,17 +3,23 @@ package com.android.server.notification;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
+import android.app.Application;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.Uri;
 import android.service.notification.Condition;
 import android.service.notification.ScheduleCalendar;
 import android.service.notification.ZenModeConfig;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+import android.testing.AndroidTestingRunner;
+import android.testing.TestableLooper.RunWithLooper;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.server.UiServiceTestCase;
+import com.android.server.pm.PackageManagerService;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -23,8 +29,9 @@ import org.mockito.MockitoAnnotations;
 import java.util.Calendar;
 import java.util.GregorianCalendar;
 
-@RunWith(AndroidJUnit4.class)
+@RunWith(AndroidTestingRunner.class)
 @SmallTest
+@RunWithLooper
 public class ScheduleConditionProviderTest extends UiServiceTestCase {
 
     ScheduleConditionProvider mService;
@@ -42,7 +49,7 @@ public class ScheduleConditionProviderTest extends UiServiceTestCase {
                 null,               // ActivityThread not actually used in Service
                 ScheduleConditionProvider.class.getName(),
                 null,               // token not needed when not talking with the activity manager
-                null,
+                mock(Application.class),
                 null                // mocked services don't talk with the activity manager
                 );
         service.onCreate();
@@ -274,17 +281,17 @@ public class ScheduleConditionProviderTest extends UiServiceTestCase {
                 conditionId, cal, now.getTimeInMillis(), now.getTimeInMillis() + 500);
         assertEquals(Condition.STATE_TRUE, condition.state);
 
-        // in schedule, update with later alarm time, should be in dnd
+        // in schedule, update with nextAlarm = later alarm time (1000), should be in dnd
         condition = mService.evaluateSubscriptionLocked(
                 conditionId, cal, now.getTimeInMillis() + 250, now.getTimeInMillis() + 1000);
         assertEquals(Condition.STATE_TRUE, condition.state);
 
-        // at earliest alarm fire time, should exit dnd
-        assertTrue(cal.isInSchedule(now.getTimeInMillis() + 500));
+        // at next alarm fire time (1000), should exit dnd
+        assertTrue(cal.isInSchedule(now.getTimeInMillis() + 1000));
         assertTrue("" + info.nextAlarm + " " + now.getTimeInMillis(),
-                cal.shouldExitForAlarm(now.getTimeInMillis() + 500));
+                cal.shouldExitForAlarm(now.getTimeInMillis() + 1000));
         condition = mService.evaluateSubscriptionLocked(
-                conditionId, cal, now.getTimeInMillis() + 500, 0);
+                conditionId, cal, now.getTimeInMillis() + 1000, 0);
         assertEquals(Condition.STATE_FALSE, condition.state);
     }
 
@@ -319,6 +326,12 @@ public class ScheduleConditionProviderTest extends UiServiceTestCase {
         now.add(Calendar.HOUR_OF_DAY, 1);
         condition = mService.evaluateSubscriptionLocked(conditionId, cal, now.getTimeInMillis(), 0);
         assertEquals(Condition.STATE_FALSE, condition.state);
+    }
+
+    @Test
+    public void testGetPendingIntent() {
+        PendingIntent pi = mService.getPendingIntent(1000);
+        assertEquals(PackageManagerService.PLATFORM_PACKAGE_NAME, pi.getIntent().getPackage());
     }
 
     private Calendar getNow() {

@@ -1,9 +1,13 @@
-per-file TextView.java = siyamed@google.com
-per-file TextView.java = nona@google.com
-per-file TextView.java = clarabayarri@google.com
-per-file EditText.java = siyamed@google.com
-per-file EditText.java = nona@google.com
-per-file EditText.java = clarabayarri@google.com
-per-file Editor.java = siyamed@google.com
-per-file Editor.java = nona@google.com
-per-file Editor.java = clarabayarri@google.com
+# Bug component: 25700
+
+romainguy@google.com
+alanv@google.com
+adamp@google.com
+aurimas@google.com
+siyamed@google.com
+mount@google.com
+njawad@google.com
+
+per-file TextView*, EditText.java, Editor.java = siyamed@google.com, nona@google.com, clarabayarri@google.com
+
+per-file SpellChecker.java = file:../view/inputmethod/OWNERS

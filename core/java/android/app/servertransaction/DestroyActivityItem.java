@@ -18,6 +18,9 @@ package android.app.servertransaction;
 
 import static android.os.Trace.TRACE_TAG_ACTIVITY_MANAGER;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.app.ActivityThread.ActivityClientRecord;
 import android.app.ClientTransactionHandler;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -33,11 +36,16 @@ public class DestroyActivityItem extends ActivityLifecycleItem {
     private int mConfigChanges;
 
     @Override
-    public void execute(ClientTransactionHandler client, IBinder token,
+    public void preExecute(ClientTransactionHandler client, IBinder token) {
+        client.getActivitiesToBeDestroyed().put(token, this);
+    }
+
+    @Override
+    public void execute(ClientTransactionHandler client, ActivityClientRecord r,
             PendingTransactionActions pendingActions) {
         Trace.traceBegin(TRACE_TAG_ACTIVITY_MANAGER, "activityDestroy");
-        client.handleDestroyActivity(token, mFinished, mConfigChanges,
-                false /* getNonConfigInstance */, getDescription());
+        client.handleDestroyActivity(r, mFinished, mConfigChanges,
+                false /* getNonConfigInstance */, "DestroyActivityItem");
         Trace.traceEnd(TRACE_TAG_ACTIVITY_MANAGER);
     }
 
@@ -65,6 +73,7 @@ public class DestroyActivityItem extends ActivityLifecycleItem {
 
     @Override
     public void recycle() {
+        super.recycle();
         mFinished = false;
         mConfigChanges = 0;
         ObjectPool.recycle(this);
@@ -76,19 +85,17 @@ public class DestroyActivityItem extends ActivityLifecycleItem {
     /** Write to Parcel. */
     @Override
     public void writeToParcel(Parcel dest, int flags) {
-        super.writeToParcel(dest, flags);
         dest.writeBoolean(mFinished);
         dest.writeInt(mConfigChanges);
     }
 
     /** Read from Parcel. */
     private DestroyActivityItem(Parcel in) {
-        super(in);
         mFinished = in.readBoolean();
         mConfigChanges = in.readInt();
     }
 
-    public static final Creator<DestroyActivityItem> CREATOR =
+    public static final @NonNull Creator<DestroyActivityItem> CREATOR =
             new Creator<DestroyActivityItem>() {
         public DestroyActivityItem createFromParcel(Parcel in) {
             return new DestroyActivityItem(in);
@@ -100,7 +107,7 @@ public class DestroyActivityItem extends ActivityLifecycleItem {
     };
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (this == o) {
             return true;
         }

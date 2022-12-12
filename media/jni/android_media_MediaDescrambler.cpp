@@ -25,17 +25,64 @@
 
 #include <android/hardware/cas/native/1.0/BpHwDescrambler.h>
 #include <android/hardware/cas/native/1.0/BnHwDescrambler.h>
+#include <android/hardware/cas/native/1.0/IDescrambler.h>
 #include <binder/MemoryDealer.h>
 #include <hidl/HidlSupport.h>
+#include <hidlmemory/FrameworkUtils.h>
 #include <media/stagefright/foundation/ADebug.h>
+#include <media/cas/DescramblerAPI.h>
 #include <nativehelper/ScopedLocalRef.h>
 
 namespace android {
+class IMemory;
+class MemoryDealer;
 
-using hardware::hidl_handle;
+namespace hardware {
+class HidlMemory;
+};
+using hardware::fromHeap;
+using hardware::HidlMemory;
+using hardware::hidl_string;
+using hardware::hidl_vec;
+using namespace hardware::cas::V1_0;
+using namespace hardware::cas::native::V1_0;
+
+struct JDescrambler : public RefBase {
+    JDescrambler(JNIEnv *env, jobject descramberBinderObj);
+
+    status_t descramble(
+            uint32_t key,
+            ssize_t totalLength,
+            const hidl_vec<SubSample>& subSamples,
+            const void *srcPtr,
+            jint srcOffset,
+            void *dstPtr,
+            jint dstOffset,
+            Status *status,
+            uint32_t *bytesWritten,
+            hidl_string *detailedError);
+
+
+protected:
+    virtual ~JDescrambler();
+
+private:
+    sp<IDescrambler> mDescrambler;
+    sp<IMemory> mMem;
+    sp<MemoryDealer> mDealer;
+    sp<HidlMemory> mHidlMemory;
+    SharedBuffer mDescramblerSrcBuffer;
+
+    Mutex mSharedMemLock;
+
+    bool ensureBufferCapacity(size_t neededSize);
+
+    DISALLOW_EVIL_CONSTRUCTORS(JDescrambler);
+};
 
 struct fields_t {
     jfieldID context;
+    jbyte flagPesHeader;
 };
 
 static fields_t gFields;
@@ -110,8 +157,7 @@ JDescrambler::~JDescrambler() {
     mDealer.clear();
 }
 
-// static
-sp<IDescrambler> JDescrambler::GetDescrambler(JNIEnv *env, jobject obj) {
+sp<IDescrambler> GetDescrambler(JNIEnv *env, jobject obj) {
     if (obj != NULL) {
         sp<hardware::IBinder> hwBinder =
                 JHwRemoteBinder::GetNativeContext(env, obj)->getBinder();
@@ -146,21 +192,15 @@ bool JDescrambler::ensureBufferCapacity(size_t neededSize) {
         return false;
     }
 
-    native_handle_t* nativeHandle = native_handle_create(1, 0);
-    if (!nativeHandle) {
-        ALOGE("ensureBufferCapacity: failed to create native handle");
-        return false;
-    }
-    nativeHandle->data[0] = heap->getHeapID();
-    mDescramblerSrcBuffer.heapBase = hidl_memory("ashmem",
-            hidl_handle(nativeHandle), heap->getSize());
+    mHidlMemory = fromHeap(heap);
+    mDescramblerSrcBuffer.heapBase = *mHidlMemory;
     mDescramblerSrcBuffer.offset = (uint64_t) offset;
     mDescramblerSrcBuffer.size = (uint64_t) size;
     return true;
 }
 
 status_t JDescrambler::descramble(
-        jbyte key,
+        uint32_t key,
         ssize_t totalLength,
         const hidl_vec<SubSample>& subSamples,
         const void *srcPtr,
@@ -180,7 +220,7 @@ status_t JDescrambler::descramble(
         return NO_MEMORY;
     }
 
-    memcpy(mMem->pointer(),
+    memcpy(mMem->unsecurePointer(),
             (const void*)((const uint8_t*)srcPtr + srcOffset), totalLength);
 
     DestinationBuffer dstBuffer;
@@ -208,7 +248,8 @@ status_t JDescrambler::descramble(
 
     if (*status == Status::OK) {
         if (*bytesWritten > 0 && (ssize_t) *bytesWritten <= totalLength) {
-            memcpy((void*)((uint8_t*)dstPtr + dstOffset), mMem->pointer(), *bytesWritten);
+            memcpy((void*)((uint8_t*)dstPtr + dstOffset), mMem->unsecurePointer(),
+                *bytesWritten);
         } else {
             // status seems OK but bytesWritten is invalid, we really
             // have no idea what is wrong.
@@ -233,6 +274,12 @@ static void android_media_MediaDescrambler_native_init(JNIEnv *env) {
 
     gFields.context = env->GetFieldID(clazz.get(), "mNativeContext", "J");
     CHECK(gFields.context != NULL);
+
+    jfieldID fieldPesHeader = env->GetStaticFieldID(
+            clazz.get(), "SCRAMBLE_FLAG_PES_HEADER", "B");
+    CHECK(fieldPesHeader != NULL);
+
+    gFields.flagPesHeader = env->GetStaticByteField(clazz.get(), fieldPesHeader);
 }
 
 static void android_media_MediaDescrambler_native_setup(
@@ -328,7 +375,7 @@ static jthrowable createServiceSpecificException(
 }
 
 static jint android_media_MediaDescrambler_native_descramble(
-        JNIEnv *env, jobject thiz, jbyte key, jint numSubSamples,
+        JNIEnv *env, jobject thiz, jbyte key, jbyte flags, jint numSubSamples,
         jintArray numBytesOfClearDataObj, jintArray numBytesOfEncryptedDataObj,
         jobject srcBuf, jint srcOffset, jint srcLimit,
         jobject dstBuf, jint dstOffset, jint dstLimit) {
@@ -369,12 +416,18 @@ static jint android_media_MediaDescrambler_native_descramble(
         return -1;
     }
 
+    uint32_t scramblingControl = (uint32_t)key;
+
+    if (flags & gFields.flagPesHeader) {
+        scramblingControl |= DescramblerPlugin::kScrambling_Flag_PesHeader;
+    }
+
     Status status;
     uint32_t bytesWritten;
     hidl_string detailedError;
 
     err = descrambler->descramble(
-            key, totalLength, subSamples,
+            scramblingControl, totalLength, subSamples,
             srcPtr, srcOffset, dstPtr, dstOffset,
             &status, &bytesWritten, &detailedError);
 
@@ -406,7 +459,7 @@ static const JNINativeMethod gMethods[] = {
             (void *)android_media_MediaDescrambler_native_init },
     { "native_setup", "(Landroid/os/IHwBinder;)V",
             (void *)android_media_MediaDescrambler_native_setup },
-    { "native_descramble", "(BI[I[ILjava/nio/ByteBuffer;IILjava/nio/ByteBuffer;II)I",
+    { "native_descramble", "(BBI[I[ILjava/nio/ByteBuffer;IILjava/nio/ByteBuffer;II)I",
             (void *)android_media_MediaDescrambler_native_descramble },
 };
 

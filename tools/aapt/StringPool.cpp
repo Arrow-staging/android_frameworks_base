@@ -12,13 +12,6 @@
 
 #include "ResourceTable.h"
 
-// SSIZE: mingw does not have signed size_t == ssize_t.
-#if !defined(_WIN32)
-#  define SSIZE(x) x
-#else
-#  define SSIZE(x) (signed size_t)x
-#endif
-
 // Set to true for noisy debug output.
 static const bool kIsDebug = false;
 
@@ -59,9 +52,9 @@ void printStringPool(const ResStringPool* pool)
     for (size_t i=0; i<N; i++) {
         size_t len;
         if (pool->isUTF8()) {
-            uniqueStrings.add(pool->string8At(i, &len));
+            uniqueStrings.add(UnpackOptionalString(pool->string8At(i), &len));
         } else {
-            uniqueStrings.add(pool->stringAt(i, &len));
+            uniqueStrings.add(UnpackOptionalString(pool->stringAt(i), &len));
         }
     }
 
@@ -73,8 +66,8 @@ void printStringPool(const ResStringPool* pool)
 
     const size_t NS = pool->size();
     for (size_t s=0; s<NS; s++) {
-        String8 str = pool->string8ObjectAt(s);
-        printf("String #" ZD ": %s\n", (ZD_TYPE) s, str.string());
+        auto str = pool->string8ObjectAt(s);
+        printf("String #" ZD ": %s\n", (ZD_TYPE) s, (str.has_value() ? str->string() : ""));
     }
 }
 
@@ -202,7 +195,7 @@ ssize_t StringPool::add(const String16& value,
 
     if (kIsDebug) {
         printf("Adding string %s to pool: pos=%zd eidx=%zd vidx=%zd\n",
-                String8(value).string(), SSIZE(pos), SSIZE(eidx), SSIZE(vidx));
+                String8(value).string(), pos, eidx, vidx);
     }
 
     return pos;
@@ -598,7 +591,7 @@ ssize_t StringPool::offsetForString(const String16& val) const
     const Vector<size_t>* indices = offsetsForString(val);
     ssize_t res = indices != NULL && indices->size() > 0 ? indices->itemAt(0) : -1;
     if (kIsDebug) {
-        printf("Offset for string %s: %zd (%s)\n", String8(val).string(), SSIZE(res),
+        printf("Offset for string %s: %zd (%s)\n", String8(val).string(), res,
                 res >= 0 ? String8(mEntries[mEntryArray[res]].value).string() : String8());
     }
     return res;

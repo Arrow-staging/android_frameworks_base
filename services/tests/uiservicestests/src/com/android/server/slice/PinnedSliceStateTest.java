@@ -1,6 +1,6 @@
 package com.android.server.slice;
 
-import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+import static android.testing.TestableContentResolver.UNSTABLE;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -12,31 +12,28 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doReturn;
+import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.app.slice.ISliceListener;
-import android.app.slice.Slice;
 import android.app.slice.SliceProvider;
 import android.app.slice.SliceSpec;
 import android.content.ContentProvider;
-import android.content.Context;
 import android.content.IContentProvider;
 import android.net.Uri;
 import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.IBinder.DeathRecipient;
 import android.os.RemoteException;
-import android.support.test.filters.SmallTest;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableLooper;
 import android.testing.TestableLooper.RunWithLooper;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.server.UiServiceTestCase;
 
@@ -71,18 +68,20 @@ public class PinnedSliceStateTest extends UiServiceTestCase {
     private PinnedSliceState mPinnedSliceManager;
     private IContentProvider mIContentProvider;
     private ContentProvider mContentProvider;
+    private IBinder mToken = new Binder();
 
     @Before
-    public void setup() {
+    public void setUp() {
         mSliceService = mock(SliceManagerService.class);
         when(mSliceService.getContext()).thenReturn(mContext);
         when(mSliceService.getLock()).thenReturn(new Object());
-        when(mSliceService.getHandler()).thenReturn(new Handler(TestableLooper.get(this).getLooper()));
+        when(mSliceService.getHandler()).thenReturn(
+                new Handler(TestableLooper.get(this).getLooper()));
         mContentProvider = mock(ContentProvider.class);
         mIContentProvider = mock(IContentProvider.class);
         when(mContentProvider.getIContentProvider()).thenReturn(mIContentProvider);
-        mContext.getContentResolver().addProvider(AUTH, mContentProvider);
-        mPinnedSliceManager = new PinnedSliceState(mSliceService, TEST_URI);
+        mContext.getContentResolver().addProvider(AUTH, mContentProvider, UNSTABLE);
+        mPinnedSliceManager = new PinnedSliceState(mSliceService, TEST_URI, "pkg");
     }
 
     @Test
@@ -108,62 +107,11 @@ public class PinnedSliceStateTest extends UiServiceTestCase {
         TestableLooper.get(this).processAllMessages();
 
         // When pinned for the first time, a pinned message should be sent.
-        mPinnedSliceManager.pin("pkg", FIRST_SPECS);
+        mPinnedSliceManager.pin("pkg", FIRST_SPECS, mToken);
         TestableLooper.get(this).processAllMessages();
 
-        verify(mIContentProvider).call(anyString(), eq(SliceProvider.METHOD_PIN), eq(null),
-                argThat(b -> {
-                    assertEquals(TEST_URI, b.getParcelable(SliceProvider.EXTRA_BIND_URI));
-                    return true;
-                }));
-    }
-
-    @Test
-    public void testSendPinnedOnListen() throws RemoteException {
-        TestableLooper.get(this).processAllMessages();
-
-        // When a listener is added for the first time, a pinned message should be sent.
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
-        TestableLooper.get(this).processAllMessages();
-
-        verify(mIContentProvider).call(anyString(), eq(SliceProvider.METHOD_PIN), eq(null),
-                argThat(b -> {
-                    assertEquals(TEST_URI, b.getParcelable(SliceProvider.EXTRA_BIND_URI));
-                    return true;
-                }));
-    }
-
-    @Test
-    public void testNoSendPinnedWithoutPermission() throws RemoteException {
-        TestableLooper.get(this).processAllMessages();
-
-        // When a listener is added for the first time, a pinned message should be sent.
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                false);
-        TestableLooper.get(this).processAllMessages();
-
-        verify(mIContentProvider, never()).call(anyString(), eq(SliceProvider.METHOD_PIN), eq(null),
-                any());
-    }
-
-    @Test
-    public void testSendUnpinnedOnDestroy() throws RemoteException {
-        TestableLooper.get(this).processAllMessages();
-        clearInvocations(mIContentProvider);
-
-        mPinnedSliceManager.pin("pkg", FIRST_SPECS);
-        mPinnedSliceManager.destroy();
-        TestableLooper.get(this).processAllMessages();
-
-        verify(mIContentProvider).call(anyString(), eq(SliceProvider.METHOD_UNPIN), eq(null),
-                argThat(b -> {
+        verify(mIContentProvider).call(any(), anyString(),
+                eq(SliceProvider.METHOD_PIN), eq(null), argThat(b -> {
                     assertEquals(TEST_URI, b.getParcelable(SliceProvider.EXTRA_BIND_URI));
                     return true;
                 }));
@@ -173,58 +121,24 @@ public class PinnedSliceStateTest extends UiServiceTestCase {
     public void testPkgPin() {
         assertFalse(mPinnedSliceManager.hasPinOrListener());
 
-        mPinnedSliceManager.pin("pkg", FIRST_SPECS);
+        mPinnedSliceManager.pin("pkg", FIRST_SPECS, mToken);
         assertTrue(mPinnedSliceManager.hasPinOrListener());
 
-        assertTrue(mPinnedSliceManager.unpin("pkg"));
+        assertTrue(mPinnedSliceManager.unpin("pkg", mToken));
         assertFalse(mPinnedSliceManager.hasPinOrListener());
     }
 
     @Test
     public void testMultiPkgPin() {
+        IBinder t2 = new Binder();
         assertFalse(mPinnedSliceManager.hasPinOrListener());
 
-        mPinnedSliceManager.pin("pkg", FIRST_SPECS);
+        mPinnedSliceManager.pin("pkg", FIRST_SPECS, mToken);
         assertTrue(mPinnedSliceManager.hasPinOrListener());
-        mPinnedSliceManager.pin("pkg2", FIRST_SPECS);
+        mPinnedSliceManager.pin("pkg2", FIRST_SPECS, t2);
 
-        assertFalse(mPinnedSliceManager.unpin("pkg"));
-        assertTrue(mPinnedSliceManager.unpin("pkg2"));
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-    }
-
-    @Test
-    public void testListenerPin() {
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
-        assertTrue(mPinnedSliceManager.hasPinOrListener());
-
-        assertTrue(mPinnedSliceManager.removeSliceListener(listener));
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-    }
-
-    @Test
-    public void testMultiListenerPin() {
-        ISliceListener listener = mock(ISliceListener.class);
-        Binder value = new Binder();
-        when(listener.asBinder()).thenReturn(value);
-        ISliceListener listener2 = mock(ISliceListener.class);
-        Binder value2 = new Binder();
-        when(listener2.asBinder()).thenReturn(value2);
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
-        assertTrue(mPinnedSliceManager.hasPinOrListener());
-        mPinnedSliceManager.addSliceListener(listener2, mContext.getPackageName(), FIRST_SPECS,
-                true);
-
-        assertFalse(mPinnedSliceManager.removeSliceListener(listener));
-        assertTrue(mPinnedSliceManager.removeSliceListener(listener2));
+        assertFalse(mPinnedSliceManager.unpin("pkg", mToken));
+        assertTrue(mPinnedSliceManager.unpin("pkg2", t2));
         assertFalse(mPinnedSliceManager.hasPinOrListener());
     }
 
@@ -236,8 +150,7 @@ public class PinnedSliceStateTest extends UiServiceTestCase {
         when(listener.asBinder()).thenReturn(binder);
         assertFalse(mPinnedSliceManager.hasPinOrListener());
 
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
+        mPinnedSliceManager.pin(mContext.getPackageName(), FIRST_SPECS, binder);
         assertTrue(mPinnedSliceManager.hasPinOrListener());
 
         ArgumentCaptor<DeathRecipient> arg = ArgumentCaptor.forClass(DeathRecipient.class);
@@ -246,77 +159,26 @@ public class PinnedSliceStateTest extends UiServiceTestCase {
         when(binder.isBinderAlive()).thenReturn(false);
         arg.getValue().binderDied();
 
-        verify(mSliceService).unlisten(eq(TEST_URI));
         verify(mSliceService).removePinnedSlice(eq(TEST_URI));
         assertFalse(mPinnedSliceManager.hasPinOrListener());
     }
 
     @Test
-    public void testPkgListenerPin() {
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
+    public void testPinFailed() throws Exception {
+        // Throw exception when trying to pin
+        doAnswer(invocation -> {
+            throw new Exception("Pin failed");
+        }).when(mIContentProvider).call(any(), anyString(), anyString(),
+                nullable(String.class), any());
 
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
-        assertTrue(mPinnedSliceManager.hasPinOrListener());
-        mPinnedSliceManager.pin("pkg", FIRST_SPECS);
-
-        assertFalse(mPinnedSliceManager.removeSliceListener(listener));
-        assertTrue(mPinnedSliceManager.unpin("pkg"));
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-    }
-
-    @Test
-    public void testBind() throws RemoteException {
-        TestableLooper.get(this).processAllMessages();
-        clearInvocations(mIContentProvider);
-
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-        Slice s = new Slice.Builder(TEST_URI).build();
-        Bundle b = new Bundle();
-        b.putParcelable(SliceProvider.EXTRA_SLICE, s);
-        when(mIContentProvider.call(anyString(), eq(SliceProvider.METHOD_SLICE), eq(null),
-                any())).thenReturn(b);
-
-        assertFalse(mPinnedSliceManager.hasPinOrListener());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                true);
-
-        mPinnedSliceManager.onChange();
         TestableLooper.get(this).processAllMessages();
 
-        verify(mIContentProvider).call(anyString(), eq(SliceProvider.METHOD_SLICE), eq(null),
-                argThat(bundle -> {
-                    assertEquals(TEST_URI, bundle.getParcelable(SliceProvider.EXTRA_BIND_URI));
-                    return true;
-                }));
-        verify(listener).onSliceUpdated(eq(s));
-    }
-
-    @Test
-    public void testRecheckPackage() throws RemoteException {
+        // When pinned for the first time, a pinned message should be sent.
+        mPinnedSliceManager.pin("pkg", FIRST_SPECS, mToken);
         TestableLooper.get(this).processAllMessages();
 
-        ISliceListener listener = mock(ISliceListener.class);
-        when(listener.asBinder()).thenReturn(new Binder());
-
-        mPinnedSliceManager.addSliceListener(listener, mContext.getPackageName(), FIRST_SPECS,
-                false);
-        TestableLooper.get(this).processAllMessages();
-
-        verify(mIContentProvider, never()).call(anyString(), eq(SliceProvider.METHOD_PIN), eq(null),
-                any());
-
-        when(mSliceService.checkAccess(any(), any(), anyInt(), anyInt()))
-                .thenReturn(PERMISSION_GRANTED);
-        mPinnedSliceManager.recheckPackage(mContext.getPackageName());
-        TestableLooper.get(this).processAllMessages();
-
-        verify(mIContentProvider).call(anyString(), eq(SliceProvider.METHOD_PIN), eq(null),
-                argThat(b -> {
+        verify(mIContentProvider).call(any(), anyString(),
+                eq(SliceProvider.METHOD_PIN), eq(null), argThat(b -> {
                     assertEquals(TEST_URI, b.getParcelable(SliceProvider.EXTRA_BIND_URI));
                     return true;
                 }));

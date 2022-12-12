@@ -16,6 +16,10 @@
 
 package com.android.server.locksettings.recoverablekeystore;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.util.Log;
+
 import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDb;
 
 import java.security.InvalidKeyException;
@@ -25,20 +29,24 @@ import java.util.Locale;
 
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Generates keys and stores them both in AndroidKeyStore and on disk, in wrapped form.
+ * Generates/imports keys and stores them both in AndroidKeyStore and on disk, in wrapped form.
  *
- * <p>Generates 256-bit AES keys, which can be used for encrypt / decrypt with AES/GCM/NoPadding.
+ * <p>Generates/imports 256-bit AES keys, which can be used for encrypt and decrypt with AES-GCM.
  * They are synced to disk wrapped by a platform key. This allows them to be exported to a remote
  * service.
  *
  * @hide
  */
 public class RecoverableKeyGenerator {
+
+    private static final String TAG = "PlatformKeyGen";
     private static final int RESULT_CANNOT_INSERT_ROW = -1;
-    private static final String KEY_GENERATOR_ALGORITHM = "AES";
-    private static final int KEY_SIZE_BITS = 256;
+    private static final String SECRET_KEY_ALGORITHM = "AES";
+
+    static final int KEY_SIZE_BITS = 256;
 
     /**
      * A new {@link RecoverableKeyGenerator} instance.
@@ -52,7 +60,7 @@ public class RecoverableKeyGenerator {
             throws NoSuchAlgorithmException {
         // NB: This cannot use AndroidKeyStore as the provider, as we need access to the raw key
         // material, so that it can be synced to disk in encrypted form.
-        KeyGenerator keyGenerator = KeyGenerator.getInstance(KEY_GENERATOR_ALGORITHM);
+        KeyGenerator keyGenerator = KeyGenerator.getInstance(SECRET_KEY_ALGORITHM);
         return new RecoverableKeyGenerator(keyGenerator, database);
     }
 
@@ -77,6 +85,8 @@ public class RecoverableKeyGenerator {
      * @param userId The user ID of the profile to which the calling app belongs.
      * @param uid The uid of the application that will own the key.
      * @param alias The alias by which the key will be known in the recoverable key store.
+     * @param metadata The optional metadata that will be authenticated (but unencrypted) together
+     *     with the key material when the key is uploaded to cloud.
      * @throws RecoverableKeyStorageException if there is some error persisting the key either to
      *     the database.
      * @throws KeyStoreException if there is a KeyStore error wrapping the generated key.
@@ -85,12 +95,57 @@ public class RecoverableKeyGenerator {
      * @hide
      */
     public byte[] generateAndStoreKey(
-            PlatformEncryptionKey platformKey, int userId, int uid, String alias)
+            PlatformEncryptionKey platformKey, int userId, int uid, String alias,
+            @Nullable byte[] metadata)
             throws RecoverableKeyStorageException, KeyStoreException, InvalidKeyException {
         mKeyGenerator.init(KEY_SIZE_BITS);
         SecretKey key = mKeyGenerator.generateKey();
 
-        WrappedKey wrappedKey = WrappedKey.fromSecretKey(platformKey, key);
+        WrappedKey wrappedKey = WrappedKey.fromSecretKey(platformKey, key, metadata);
+        long result = mDatabase.insertKey(userId, uid, alias, wrappedKey);
+
+        if (result == RESULT_CANNOT_INSERT_ROW) {
+            throw new RecoverableKeyStorageException(
+                    String.format(
+                            Locale.US, "Failed writing (%d, %s) to database.", uid, alias));
+        }
+
+        long updatedRows = mDatabase.setShouldCreateSnapshot(userId, uid, true);
+        if (updatedRows < 0) {
+            Log.e(TAG, "Failed to set the shoudCreateSnapshot flag in the local DB.");
+        }
+
+        return key.getEncoded();
+    }
+
+    /**
+     * Imports an AES key with the given alias.
+     *
+     * <p>Stores in the AndroidKeyStore, as well as persisting in wrapped form to disk. It is
+     * persisted to disk so that it can be synced remotely, and then recovered on another device.
+     * The generated key allows encrypt/decrypt only using AES/GCM/NoPadding.
+     *
+     * @param platformKey The user's platform key, with which to wrap the generated key.
+     * @param userId The user ID of the profile to which the calling app belongs.
+     * @param uid The uid of the application that will own the key.
+     * @param alias The alias by which the key will be known in the recoverable key store.
+     * @param keyBytes The raw bytes of the AES key to be imported.
+     * @param metadata The optional metadata that will be authenticated (but unencrypted) together
+     *     with the key material when the key is uploaded to cloud.
+     * @throws RecoverableKeyStorageException if there is some error persisting the key either to
+     *     the database.
+     * @throws KeyStoreException if there is a KeyStore error wrapping the generated key.
+     * @throws InvalidKeyException if the platform key cannot be used to wrap keys.
+     *
+     * @hide
+     */
+    public void importKey(
+            @NonNull PlatformEncryptionKey platformKey, int userId, int uid, @NonNull String alias,
+            @NonNull byte[] keyBytes, @Nullable byte[] metadata)
+            throws RecoverableKeyStorageException, KeyStoreException, InvalidKeyException {
+        SecretKey key = new SecretKeySpec(keyBytes, SECRET_KEY_ALGORITHM);
+
+        WrappedKey wrappedKey = WrappedKey.fromSecretKey(platformKey, key, metadata);
         long result = mDatabase.insertKey(userId, uid, alias, wrappedKey);
 
         if (result == RESULT_CANNOT_INSERT_ROW) {
@@ -100,6 +155,5 @@ public class RecoverableKeyGenerator {
         }
 
         mDatabase.setShouldCreateSnapshot(userId, uid, true);
-        return key.getEncoded();
     }
 }

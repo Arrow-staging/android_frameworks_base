@@ -16,22 +16,6 @@
 
 package com.android.server.accessibility;
 
-import android.accessibilityservice.FingerprintGestureController;
-import android.hardware.fingerprint.IFingerprintService;
-import android.os.Handler;
-import android.os.Message;
-import android.view.KeyEvent;
-
-import com.android.server.accessibility.FingerprintGestureDispatcher.FingerprintGestureClient;
-
-import org.junit.Before;
-import org.junit.Test;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-
-import java.util.Arrays;
-import java.util.Collections;
-
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.anyBoolean;
@@ -41,6 +25,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import android.accessibilityservice.FingerprintGestureController;
+import android.content.res.Resources;
+import android.hardware.fingerprint.IFingerprintService;
+import android.view.KeyEvent;
+
+import com.android.server.accessibility.FingerprintGestureDispatcher.FingerprintGestureClient;
+import com.android.server.accessibility.test.MessageCapturingHandler;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import java.util.Arrays;
+import java.util.Collections;
+
 /**
  * Tests for FingerprintGestureDispatcher
  */
@@ -49,19 +50,29 @@ public class FingerprintGestureDispatcherTest {
     private @Mock IFingerprintService mMockFingerprintService;
     private @Mock FingerprintGestureClient mNonGestureCapturingClient;
     private @Mock FingerprintGestureClient mGestureCapturingClient;
-    private @Mock FingerprintGestureDispatcher mFingerprintGestureDispatcher;
+    private @Mock Resources mMockResources;
+
     private MessageCapturingHandler mMessageCapturingHandler;
+    private FingerprintGestureDispatcher mFingerprintGestureDispatcher;
 
     @Before
     public void setup() {
         MockitoAnnotations.initMocks(this);
+        // For most tests, we support fingerprint gestures
+        when(mMockResources.getBoolean(anyInt())).thenReturn(true);
         mMessageCapturingHandler = new MessageCapturingHandler(
                 msg -> mFingerprintGestureDispatcher.handleMessage(msg));
         mFingerprintGestureDispatcher = new FingerprintGestureDispatcher(mMockFingerprintService,
-                new Object(), mMessageCapturingHandler);
+                mMockResources, new Object(), mMessageCapturingHandler);
         when(mNonGestureCapturingClient.isCapturingFingerprintGestures()).thenReturn(false);
         when(mGestureCapturingClient.isCapturingFingerprintGestures()).thenReturn(true);
     }
+
+    @After
+    public void tearDown() {
+        mMessageCapturingHandler.removeAllMessages();
+    }
+
 
     @Test
     public void testNoServices_doesNotCrashOrConsumeGestures() {
@@ -149,10 +160,23 @@ public class FingerprintGestureDispatcherTest {
     }
 
     @Test
-    public void testIsGestureDetectionActive_dependsOnFingerprintService() throws Exception {
+    public void testIsGestureDetectionAvailable_dependsOnFingerprintService() throws Exception {
         when(mMockFingerprintService.isClientActive()).thenReturn(true);
         assertFalse(mFingerprintGestureDispatcher.isFingerprintGestureDetectionAvailable());
         when(mMockFingerprintService.isClientActive()).thenReturn(false);
         assertTrue(mFingerprintGestureDispatcher.isFingerprintGestureDetectionAvailable());
+    }
+
+    @Test
+    public void ifGestureDetectionNotSupported_neverSaysAvailable() throws Exception {
+        when(mMockResources.getBoolean(anyInt())).thenReturn(false);
+        // Need to create a new dispatcher, since it picks up the resource value in its
+        // constructor. This is fine since hardware config values don't change dynamically.
+        FingerprintGestureDispatcher fingerprintGestureDispatcher =
+                new FingerprintGestureDispatcher(mMockFingerprintService, mMockResources,
+                        new Object(), mMessageCapturingHandler);
+
+        when(mMockFingerprintService.isClientActive()).thenReturn(false);
+        assertFalse(fingerprintGestureDispatcher.isFingerprintGestureDetectionAvailable());
     }
 }

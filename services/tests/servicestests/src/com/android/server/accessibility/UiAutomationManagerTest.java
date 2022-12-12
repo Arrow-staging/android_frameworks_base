@@ -16,6 +16,8 @@
 
 package com.android.server.accessibility;
 
+import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -25,20 +27,22 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.accessibilityservice.AccessibilityTrace;
 import android.accessibilityservice.IAccessibilityServiceClient;
 import android.app.UiAutomation;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
+import android.hardware.display.DisplayManager;
 import android.os.IBinder;
-import android.os.Looper;
 import android.view.accessibility.AccessibilityEvent;
 
+import com.android.server.accessibility.test.MessageCapturingHandler;
 import com.android.server.wm.WindowManagerInternal;
 
+import org.junit.After;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -50,28 +54,22 @@ import org.mockito.MockitoAnnotations;
 public class UiAutomationManagerTest {
     static final int SERVICE_ID = 42;
 
-    final UiAutomationManager mUiAutomationManager = new UiAutomationManager();
+    final UiAutomationManager mUiAutomationManager = new UiAutomationManager(new Object());
 
     MessageCapturingHandler mMessageCapturingHandler;
 
-    @Mock AccessibilityManagerService.UserState mMockUserState;
     @Mock Context mMockContext;
     @Mock AccessibilityServiceInfo mMockServiceInfo;
     @Mock ResolveInfo mMockResolveInfo;
-    @Mock AccessibilityManagerService.SecurityPolicy mMockSecurityPolicy;
+    @Mock AccessibilitySecurityPolicy mMockSecurityPolicy;
+    @Mock AccessibilityWindowManager mMockA11yWindowManager;
     @Mock AbstractAccessibilityServiceConnection.SystemSupport mMockSystemSupport;
+    @Mock AccessibilityTrace mMockA11yTrace;
     @Mock WindowManagerInternal mMockWindowManagerInternal;
-    @Mock GlobalActionPerformer mMockGlobalActionPerformer;
+    @Mock SystemActionPerformer mMockSystemActionPerformer;
     @Mock IBinder mMockOwner;
     @Mock IAccessibilityServiceClient mMockAccessibilityServiceClient;
     @Mock IBinder mMockServiceAsBinder;
-
-    @BeforeClass
-    public static void oneTimeInitialization() {
-        if (Looper.myLooper() == null) {
-            Looper.prepare();
-        }
-    }
 
     @Before
     public void setup() {
@@ -84,9 +82,21 @@ public class UiAutomationManagerTest {
         mMockResolveInfo.serviceInfo.applicationInfo = mock(ApplicationInfo.class);
 
         when(mMockAccessibilityServiceClient.asBinder()).thenReturn(mMockServiceAsBinder);
+        when(mMockA11yTrace.isA11yTracingEnabled()).thenReturn(false);
+
+        final Context context = getInstrumentation().getTargetContext();
+        when(mMockContext.getSystemService(Context.DISPLAY_SERVICE)).thenReturn(
+                context.getSystemService(
+                        DisplayManager.class));
 
         mMessageCapturingHandler = new MessageCapturingHandler(null);
     }
+
+    @After
+    public void tearDown() {
+        mMessageCapturingHandler.removeAllMessages();
+    }
+
 
     @Test
     public void isRunning_returnsTrueOnlyWhenRunning() {
@@ -160,14 +170,39 @@ public class UiAutomationManagerTest {
         verify(mMockOwner).linkToDeath(captor.capture(), anyInt());
         captor.getValue().binderDied();
         mMessageCapturingHandler.sendAllMessages();
-        verify(mMockSystemSupport).onClientChange(false);
+        verify(mMockSystemSupport).onClientChangeLocked(false);
+    }
+
+    @Test
+    public void uiAutomationWithDontUseAccessibilityFlagAfterUnregistering_notifiesSystem()
+            throws Exception {
+        register(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
+        unregister();
+        verify(mMockSystemSupport).onClientChangeLocked(false);
+    }
+
+    @Test
+    public void uiAutomationWithDontUseAccessibilityFlag_disableAccessibilityFunctions()
+            throws Exception {
+        register(0);
+        assertTrue(mUiAutomationManager.isUiAutomationRunningLocked());
+        unregister();
+        assertFalse(mUiAutomationManager.isUiAutomationRunningLocked());
+        register(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
+        assertTrue(mUiAutomationManager.isUiAutomationRunningLocked());
+        assertFalse(mUiAutomationManager.useAccessibility());
+        assertFalse(mUiAutomationManager.canRetrieveInteractiveWindowsLocked());
+        assertFalse(mUiAutomationManager.isTouchExplorationEnabledLocked());
+        assertEquals(0, mUiAutomationManager.getRelevantEventTypes());
+        assertEquals(0, mUiAutomationManager.getRequestedEventMaskLocked());
     }
 
     private void register(int flags) {
         mUiAutomationManager.registerUiTestAutomationServiceLocked(mMockOwner,
                 mMockAccessibilityServiceClient, mMockContext, mMockServiceInfo, SERVICE_ID,
-                mMessageCapturingHandler, new Object(), mMockSecurityPolicy, mMockSystemSupport,
-                mMockWindowManagerInternal, mMockGlobalActionPerformer, flags);
+                mMessageCapturingHandler, mMockSecurityPolicy, mMockSystemSupport, mMockA11yTrace,
+                mMockWindowManagerInternal, mMockSystemActionPerformer,
+                mMockA11yWindowManager, flags);
     }
 
     private void unregister() {

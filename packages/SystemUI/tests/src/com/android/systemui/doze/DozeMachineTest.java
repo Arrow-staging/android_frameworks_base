@@ -18,9 +18,12 @@ package com.android.systemui.doze;
 
 import static com.android.systemui.doze.DozeMachine.State.DOZE;
 import static com.android.systemui.doze.DozeMachine.State.DOZE_AOD;
+import static com.android.systemui.doze.DozeMachine.State.DOZE_AOD_DOCKED;
 import static com.android.systemui.doze.DozeMachine.State.DOZE_PULSE_DONE;
 import static com.android.systemui.doze.DozeMachine.State.DOZE_PULSING;
+import static com.android.systemui.doze.DozeMachine.State.DOZE_PULSING_BRIGHT;
 import static com.android.systemui.doze.DozeMachine.State.DOZE_REQUEST_PULSE;
+import static com.android.systemui.doze.DozeMachine.State.DOZE_SUSPEND_TRIGGERS;
 import static com.android.systemui.doze.DozeMachine.State.FINISH;
 import static com.android.systemui.doze.DozeMachine.State.INITIALIZED;
 import static com.android.systemui.doze.DozeMachine.State.UNINITIALIZED;
@@ -28,8 +31,8 @@ import static com.android.systemui.doze.DozeMachine.State.UNINITIALIZED;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -38,19 +41,26 @@ import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import android.support.test.filters.SmallTest;
+import android.app.UiModeManager;
+import android.content.res.Configuration;
+import android.hardware.display.AmbientDisplayConfiguration;
 import android.testing.AndroidTestingRunner;
+import android.testing.UiThreadTest;
 import android.view.Display;
 
-import com.android.internal.hardware.AmbientDisplayConfiguration;
-import com.android.systemui.SysuiTestCase;
-import com.android.systemui.util.wakelock.WakeLockFake;
+import androidx.test.filters.SmallTest;
 
-import android.testing.UiThreadTest;
+import com.android.systemui.SysuiTestCase;
+import com.android.systemui.dock.DockManager;
+import com.android.systemui.keyguard.WakefulnessLifecycle;
+import com.android.systemui.statusbar.phone.DozeParameters;
+import com.android.systemui.util.wakelock.WakeLockFake;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 @SmallTest
 @RunWith(AndroidTestingRunner.class)
@@ -59,6 +69,16 @@ public class DozeMachineTest extends SysuiTestCase {
 
     DozeMachine mMachine;
 
+    @Mock
+    private WakefulnessLifecycle mWakefulnessLifecycle;
+    @Mock
+    private DozeLog mDozeLog;
+    @Mock
+    private DockManager mDockManager;
+    @Mock
+    private DozeHost mHost;
+    @Mock
+    private UiModeManager mUiModeManager;
     private DozeServiceFake mServiceFake;
     private WakeLockFake mWakeLockFake;
     private AmbientDisplayConfiguration mConfigMock;
@@ -66,14 +86,17 @@ public class DozeMachineTest extends SysuiTestCase {
 
     @Before
     public void setUp() {
+        MockitoAnnotations.initMocks(this);
         mServiceFake = new DozeServiceFake();
         mWakeLockFake = new WakeLockFake();
         mConfigMock = mock(AmbientDisplayConfiguration.class);
         mPartMock = mock(DozeMachine.Part.class);
+        when(mDockManager.isDocked()).thenReturn(false);
+        when(mDockManager.isHidden()).thenReturn(false);
 
-        mMachine = new DozeMachine(mServiceFake, mConfigMock, mWakeLockFake);
-
-        mMachine.setParts(new DozeMachine.Part[]{mPartMock});
+        mMachine = new DozeMachine(mServiceFake, mConfigMock, mWakeLockFake,
+                mWakefulnessLifecycle, mUiModeManager, mDozeLog, mDockManager,
+                mHost, new DozeMachine.Part[]{mPartMock});
     }
 
     @Test
@@ -104,6 +127,87 @@ public class DozeMachineTest extends SysuiTestCase {
     }
 
     @Test
+    public void testInitialize_afterDocked_goesToDockedAod() {
+        when(mDockManager.isDocked()).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE_AOD_DOCKED);
+        assertEquals(DOZE_AOD_DOCKED, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_afterDockPaused_goesToDoze() {
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+        when(mDockManager.isHidden()).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_alwaysOnSuppressed_alwaysOnDisabled_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(false);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_alwaysOnSuppressed_alwaysOnEnabled_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_alwaysOnSuppressed_afterDocked_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_alwaysOnSuppressed_alwaysOnDisabled_afterDockPaused_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(false);
+        when(mDockManager.isDocked()).thenReturn(true);
+        when(mDockManager.isHidden()).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testInitialize_alwaysOnSuppressed_alwaysOnEnabled_afterDockPaused_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+        when(mDockManager.isHidden()).thenReturn(true);
+
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
     public void testPulseDone_goesToDoze() {
         when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(false);
         mMachine.requestState(INITIALIZED);
@@ -127,6 +231,89 @@ public class DozeMachineTest extends SysuiTestCase {
 
         verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE_AOD);
         assertEquals(DOZE_AOD, mMachine.getState());
+    }
+
+    @Test
+    public void testPulseDone_alwaysOnSuppressed_goesToSuppressed() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestPulse(DozeLog.PULSE_REASON_NOTIFICATION);
+        mMachine.requestState(DOZE_PULSING);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testPulseDone_afterDocked_goesToDockedAoD() {
+        when(mDockManager.isDocked()).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestPulse(DozeLog.PULSE_REASON_NOTIFICATION);
+        mMachine.requestState(DOZE_PULSING);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE_AOD_DOCKED);
+        assertEquals(DOZE_AOD_DOCKED, mMachine.getState());
+    }
+
+    @Test
+    public void testPulseDone_whileDockedAoD_staysDockedAod() {
+        when(mDockManager.isDocked()).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(DOZE_AOD_DOCKED);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock, never()).transitionTo(DOZE_AOD_DOCKED, DOZE_PULSE_DONE);
+    }
+
+    @Test
+    public void testPulseDone_alwaysOnSuppressed_afterDocked_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestPulse(DozeLog.PULSE_REASON_NOTIFICATION);
+        mMachine.requestState(DOZE_PULSING);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testPulseDone_afterDockPaused_goesToDoze() {
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+        when(mDockManager.isHidden()).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestPulse(DozeLog.PULSE_REASON_NOTIFICATION);
+        mMachine.requestState(DOZE_PULSING);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE);
+        assertEquals(DOZE, mMachine.getState());
+    }
+
+    @Test
+    public void testPulseDone_alwaysOnSuppressed_afterDockPaused_goesToDoze() {
+        when(mHost.isAlwaysOnSuppressed()).thenReturn(true);
+        when(mConfigMock.alwaysOnEnabled(anyInt())).thenReturn(true);
+        when(mDockManager.isDocked()).thenReturn(true);
+        when(mDockManager.isHidden()).thenReturn(true);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestPulse(DozeLog.PULSE_REASON_NOTIFICATION);
+        mMachine.requestState(DOZE_PULSING);
+
+        mMachine.requestState(DOZE_PULSE_DONE);
+
+        verify(mPartMock).transitionTo(DOZE_PULSE_DONE, DOZE);
+        assertEquals(DOZE, mMachine.getState());
     }
 
     @Test
@@ -232,9 +419,9 @@ public class DozeMachineTest extends SysuiTestCase {
     public void testPulseReason_getMatchesRequest() {
         mMachine.requestState(INITIALIZED);
         mMachine.requestState(DOZE);
-        mMachine.requestPulse(DozeLog.PULSE_REASON_SENSOR_DOUBLE_TAP);
+        mMachine.requestPulse(DozeLog.REASON_SENSOR_DOUBLE_TAP);
 
-        assertEquals(DozeLog.PULSE_REASON_SENSOR_DOUBLE_TAP, mMachine.getPulseReason());
+        assertEquals(DozeLog.REASON_SENSOR_DOUBLE_TAP, mMachine.getPulseReason());
     }
 
     @Test
@@ -261,8 +448,84 @@ public class DozeMachineTest extends SysuiTestCase {
 
     @Test
     public void testWakeUp_wakesUp() {
-        mMachine.wakeUp();
+        mMachine.wakeUp(DozeLog.REASON_SENSOR_PICKUP);
 
         assertTrue(mServiceFake.requestedWakeup);
+    }
+
+    @Test
+    public void testDozePulsing_displayRequiresBlanking_screenState() {
+        DozeParameters dozeParameters = mock(DozeParameters.class);
+        when(dozeParameters.getDisplayNeedsBlanking()).thenReturn(true);
+
+        assertEquals(Display.STATE_OFF, DOZE_REQUEST_PULSE.screenState(dozeParameters));
+    }
+
+    @Test
+    public void testDozePulsing_displayDoesNotRequireBlanking_screenState() {
+        DozeParameters dozeParameters = mock(DozeParameters.class);
+        when(dozeParameters.getDisplayNeedsBlanking()).thenReturn(false);
+
+        assertEquals(Display.STATE_ON, DOZE_REQUEST_PULSE.screenState(dozeParameters));
+    }
+
+    @Test
+    public void testTransitionToInitialized_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+
+        verify(mPartMock).transitionTo(UNINITIALIZED, INITIALIZED);
+        verify(mPartMock).transitionTo(INITIALIZED, DOZE_SUSPEND_TRIGGERS);
+        assertEquals(DOZE_SUSPEND_TRIGGERS, mMachine.getState());
+    }
+
+    @Test
+    public void testTransitionToFinish_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(FINISH);
+
+        assertEquals(FINISH, mMachine.getState());
+    }
+
+    @Test
+    public void testDozeToDozeSuspendTriggers_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(DOZE);
+
+        assertEquals(DOZE_SUSPEND_TRIGGERS, mMachine.getState());
+    }
+
+    @Test
+    public void testDozeAoDToDozeSuspendTriggers_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(DOZE_AOD);
+
+        assertEquals(DOZE_SUSPEND_TRIGGERS, mMachine.getState());
+    }
+
+    @Test
+    public void testDozePulsingBrightDozeSuspendTriggers_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(DOZE_PULSING_BRIGHT);
+
+        assertEquals(DOZE_SUSPEND_TRIGGERS, mMachine.getState());
+    }
+
+    @Test
+    public void testDozeAodDockedDozeSuspendTriggers_carModeIsEnabled() {
+        when(mUiModeManager.getCurrentModeType()).thenReturn(Configuration.UI_MODE_TYPE_CAR);
+        mMachine.requestState(INITIALIZED);
+        mMachine.requestState(DOZE_AOD_DOCKED);
+
+        assertEquals(DOZE_SUSPEND_TRIGGERS, mMachine.getState());
+    }
+
+    @Test
+    public void testDozeSuppressTriggers_screenState() {
+        assertEquals(Display.STATE_OFF, DOZE_SUSPEND_TRIGGERS.screenState(null));
     }
 }

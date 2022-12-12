@@ -1,6 +1,2 @@
 set noparent
-
-ek@google.com
-jchalard@google.com
-lorenzo@google.com
-satk@google.com
+file:platform/packages/modules/Connectivity:master:/OWNERS_core_networking

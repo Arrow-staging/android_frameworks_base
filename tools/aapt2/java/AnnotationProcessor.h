@@ -19,6 +19,7 @@
 
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #include "androidfw/StringPiece.h"
 
@@ -64,13 +65,13 @@ class AnnotationProcessor {
   void AppendNewLine();
 
   // Writes the comments and annotations to the Printer.
-  void Print(text::Printer* printer) const;
+  void Print(text::Printer* printer, bool strip_api_annotations = false) const;
 
  private:
   std::stringstream comment_;
   std::stringstream mAnnotations;
   bool has_comments_ = false;
-  uint32_t annotation_bit_mask_ = 0;
+  std::unordered_map<uint32_t, std::string> annotation_parameter_map_;
 
   void AppendCommentLine(std::string line);
 };

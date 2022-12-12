@@ -77,11 +77,94 @@ public class HapticFeedbackConstants {
     public static final int TEXT_HANDLE_MOVE = 9;
 
     /**
+     * The user unlocked the device
+     * @hide
+     */
+    public static final int ENTRY_BUMP = 10;
+
+    /**
+     * The user has moved the dragged object within a droppable area.
+     * @hide
+     */
+    public static final int DRAG_CROSSING = 11;
+
+    /**
+     * The user has started a gesture (e.g. on the soft keyboard).
+     */
+    public static final int GESTURE_START = 12;
+
+    /**
+     * The user has finished a gesture (e.g. on the soft keyboard).
+     */
+    public static final int GESTURE_END = 13;
+
+    /**
+     * The user's squeeze crossed the gesture's initiation threshold.
+     * @hide
+     */
+    public static final int EDGE_SQUEEZE = 14;
+
+    /**
+     * The user's squeeze crossed the gesture's release threshold.
+     * @hide
+     */
+    public static final int EDGE_RELEASE = 15;
+
+    /**
+     * A haptic effect to signal the confirmation or successful completion of a user
+     * interaction.
+     */
+    public static final int CONFIRM = 16;
+
+    /**
+     * A haptic effect to signal the rejection or failure of a user interaction.
+     */
+    public static final int REJECT = 17;
+
+    /**
+     * A haptic effect to provide texture while a rotary input device is being scrolled.
+     *
+     * @hide
+     */
+    public static final int ROTARY_SCROLL_TICK = 18;
+
+    /**
+     * A haptic effect to signal that a list element has been focused while scrolling using a rotary
+     * input device.
+     *
+     * @hide
+     */
+    public static final int ROTARY_SCROLL_ITEM_FOCUS = 19;
+
+    /**
+     * A haptic effect to signal reaching the scrolling limits of a list while scrolling using a
+     * rotary input device.
+     *
+     * @hide
+     */
+    public static final int ROTARY_SCROLL_LIMIT = 20;
+
+    /**
      * The phone has booted with safe mode enabled.
      * This is a private constant.  Feel free to renumber as desired.
      * @hide
      */
     public static final int SAFE_MODE_ENABLED = 10001;
+
+    /**
+     * Invocation of the voice assistant via hardware button.
+     * This is a private constant.  Feel free to renumber as desired.
+     * @hide
+     */
+    public static final int ASSISTANT_BUTTON = 10002;
+
+    /**
+     * The user has performed a long press on the power button hardware that is resulting
+     * in an action being performed.
+     * This is a private constant.  Feel free to renumber as desired.
+     * @hide
+     */
+    public static final int LONG_PRESS_POWER_BUTTON = 10003;
 
     /**
      * Flag for {@link View#performHapticFeedback(int, int)
@@ -94,6 +177,10 @@ public class HapticFeedbackConstants {
      * Flag for {@link View#performHapticFeedback(int, int)
      * View.performHapticFeedback(int, int)}: Ignore the global setting
      * for whether to perform haptic feedback, do it always.
+     *
+     * @deprecated Starting from {@link android.os.Build.VERSION_CODES#TIRAMISU} only privileged
+     * apps can ignore user settings for touch feedback.
      */
+    @Deprecated
     public static final int FLAG_IGNORE_GLOBAL_SETTING = 0x0002;
 }

@@ -17,14 +17,14 @@
 package com.android.internal.os;
 
 import android.app.ApplicationLoaders;
+import android.app.LoadedApk;
+import android.content.pm.ApplicationInfo;
 import android.net.LocalSocket;
-import android.os.Build;
-import android.system.ErrnoException;
-import android.system.Os;
 import android.text.TextUtils;
 import android.util.Log;
 import android.webkit.WebViewFactory;
 import android.webkit.WebViewFactoryProvider;
+import android.webkit.WebViewLibraryLoader;
 
 import java.io.DataOutputStream;
 import java.io.File;
@@ -40,8 +40,6 @@ import java.lang.reflect.Method;
  */
 class WebViewZygoteInit {
     public static final String TAG = "WebViewZygoteInit";
-
-    private static ZygoteServer sServer;
 
     private static class WebViewZygoteServer extends ZygoteServer {
         @Override
@@ -69,7 +67,25 @@ class WebViewZygoteInit {
         }
 
         @Override
-        protected void handlePreloadPackage(String packagePath, String libsPath, String cacheKey) {
+        protected boolean canPreloadApp() {
+            return true;
+        }
+
+        @Override
+        protected void handlePreloadApp(ApplicationInfo appInfo) {
+            Log.i(TAG, "Beginning application preload for " + appInfo.packageName);
+            LoadedApk loadedApk = new LoadedApk(null, appInfo, null, null, false, true, false);
+            ClassLoader loader = loadedApk.getClassLoader();
+            doPreload(loader, WebViewFactory.getWebViewLibrary(appInfo));
+
+            Zygote.allowAppFilesAcrossFork(appInfo);
+
+            Log.i(TAG, "Application preload done");
+        }
+
+        @Override
+        protected void handlePreloadPackage(String packagePath, String libsPath, String libFileName,
+                String cacheKey) {
             Log.i(TAG, "Beginning package preload");
             // Ask ApplicationLoaders to create and cache a classloader for the WebView APK so that
             // our children will reuse the same classloader instead of creating their own.
@@ -83,6 +99,16 @@ class WebViewZygoteInit {
             for (String packageEntry : packageList) {
                 Zygote.nativeAllowFileAcrossFork(packageEntry);
             }
+
+            doPreload(loader, libFileName);
+
+            Log.i(TAG, "Package preload done");
+        }
+
+        private void doPreload(ClassLoader loader, String libFileName) {
+            // Load the native library using WebViewLibraryLoader to share the RELRO data with other
+            // processes.
+            WebViewLibraryLoader.loadNativeLibrary(loader, libFileName);
 
             // Once we have the classloader, look up the WebViewFactoryProvider implementation and
             // call preloadInZygote() on it to give it the opportunity to preload the native library
@@ -112,38 +138,12 @@ class WebViewZygoteInit {
             } catch (IOException ioe) {
                 throw new IllegalStateException("Error writing to command socket", ioe);
             }
-
-            Log.i(TAG, "Package preload done");
         }
     }
 
     public static void main(String argv[]) {
-        sServer = new WebViewZygoteServer();
-
-        // Zygote goes into its own process group.
-        try {
-            Os.setpgid(0, 0);
-        } catch (ErrnoException ex) {
-            throw new RuntimeException("Failed to setpgid(0,0)", ex);
-        }
-
-        final Runnable caller;
-        try {
-            sServer.registerServerSocket("webview_zygote");
-            // The select loop returns early in the child process after a fork and
-            // loops forever in the zygote.
-            caller = sServer.runSelectLoop(TextUtils.join(",", Build.SUPPORTED_ABIS));
-        } catch (RuntimeException e) {
-            Log.e(TAG, "Fatal exception:", e);
-            throw e;
-        } finally {
-            sServer.closeServerSocket();
-        }
-
-        // We're in the child process and have exited the select loop. Proceed to execute the
-        // command.
-        if (caller != null) {
-            caller.run();
-        }
+        Log.i(TAG, "Starting WebViewZygoteInit");
+        WebViewZygoteServer server = new WebViewZygoteServer();
+        ChildZygoteInit.runZygoteServer(server, argv);
     }
 }

@@ -24,21 +24,20 @@ import android.util.Pair;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.IndentingPrintWriter;
 
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.IllegalFormatException;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.TimeZone;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.stream.Collectors;
 
 /**
  * A utility class that provides the ability to define Events that a subsystem deems important, and
@@ -53,7 +52,8 @@ public class EventManager {
     public static final String TAG = "Logging.Events";
     @VisibleForTesting
     public static final int DEFAULT_EVENTS_TO_CACHE = 10;  // Arbitrarily chosen.
-    private final DateFormat sDateFormat = new SimpleDateFormat("HH:mm:ss.SSS");
+    public static final DateTimeFormatter DATE_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     public interface Loggable {
         /**
@@ -131,11 +131,17 @@ public class EventManager {
         public String sessionId;
         public long time;
         public Object data;
+        // String storing the date for display. This will be computed at the time/timezone when
+        // the event is recorded.
+        public final String timestampString;
 
         public Event(String eventId, String sessionId, long time, Object data) {
             this.eventId = eventId;
             this.sessionId = sessionId;
             this.time = time;
+            timestampString =
+                    ZonedDateTime.ofInstant(Instant.ofEpochMilli(time), ZoneId.systemDefault())
+                    .format(DATE_TIME_FORMATTER);
             this.data = data;
         }
     }
@@ -174,7 +180,7 @@ public class EventManager {
             }
         }
 
-        private final List<Event> mEvents = new LinkedList<>();
+        private final List<Event> mEvents = Collections.synchronizedList(new LinkedList<>());
         private final Loggable mRecordEntry;
 
         public EventRecord(Loggable recordEntry) {
@@ -191,7 +197,7 @@ public class EventManager {
         }
 
         public List<Event> getEvents() {
-            return mEvents;
+            return new LinkedList<>(mEvents);
         }
 
         public List<EventTiming> extractEventTimings() {
@@ -201,21 +207,24 @@ public class EventManager {
 
             LinkedList<EventTiming> result = new LinkedList<>();
             Map<String, PendingResponse> pendingResponses = new HashMap<>();
-            for (Event event : mEvents) {
-                if (requestResponsePairs.containsKey(event.eventId)) {
-                    // This event expects a response, so add that expected response to the maps
-                    // of pending events.
-                    for (EventManager.TimedEventPair p : requestResponsePairs.get(event.eventId)) {
-                        pendingResponses.put(p.mResponse, new PendingResponse(event.eventId,
-                                event.time, p.mTimeoutMillis, p.mName));
+            synchronized (mEvents) {
+                for (Event event : mEvents) {
+                    if (requestResponsePairs.containsKey(event.eventId)) {
+                        // This event expects a response, so add that expected response to the maps
+                        // of pending events.
+                        for (EventManager.TimedEventPair p : requestResponsePairs.get(
+                                event.eventId)) {
+                            pendingResponses.put(p.mResponse, new PendingResponse(event.eventId,
+                                    event.time, p.mTimeoutMillis, p.mName));
+                        }
                     }
-                }
 
-                PendingResponse pendingResponse = pendingResponses.remove(event.eventId);
-                if (pendingResponse != null) {
-                    long elapsedTime = event.time - pendingResponse.requestEventTimeMillis;
-                    if (elapsedTime < pendingResponse.timeoutMillis) {
-                        result.add(new EventTiming(pendingResponse.name, elapsedTime));
+                    PendingResponse pendingResponse = pendingResponses.remove(event.eventId);
+                    if (pendingResponse != null) {
+                        long elapsedTime = event.time - pendingResponse.requestEventTimeMillis;
+                        if (elapsedTime < pendingResponse.timeoutMillis) {
+                            result.add(new EventTiming(pendingResponse.name, elapsedTime));
+                        }
                     }
                 }
             }
@@ -227,8 +236,9 @@ public class EventManager {
             pw.print(mRecordEntry.getDescription());
 
             pw.increaseIndent();
-            for (Event event : mEvents) {
-                pw.print(sDateFormat.format(new Date(event.time)));
+            // Iterate over copy of events so that this doesn't hold the lock for too long.
+            for (Event event : getEvents()) {
+                pw.print(event.timestampString);
                 pw.print(" - ");
                 pw.print(event.eventId);
                 if (event.data != null) {
@@ -269,7 +279,6 @@ public class EventManager {
 
     public EventManager(@NonNull SessionManager.ISessionIdQueryHandler l) {
         mSessionIdHandler = l;
-        sDateFormat.setTimeZone(TimeZone.getDefault());
     }
 
     public void event(Loggable recordEntry, String event, Object data) {
@@ -329,15 +338,15 @@ public class EventManager {
             }
         }
 
-        // Sort by event time.
-        Comparator<Pair<Loggable, Event>> byEventTime = (e1, e2) -> {
-          return Long.compare(e1.second.time, e2.second.time);
-        };
+        // Sort by event time. This might result in out-of-order seeming events if the timezone
+        // changes somewhere in the middle.
+        Comparator<Pair<Loggable, Event>> byEventTime =
+                Comparator.comparingLong(e -> e.second.time);
         events.sort(byEventTime);
 
         pw.increaseIndent();
         for (Pair<Loggable, Event> event : events) {
-            pw.print(sDateFormat.format(new Date(event.second.time)));
+            pw.print(event.second.timestampString);
             pw.print(",");
             pw.print(event.first.getId());
             pw.print(",");

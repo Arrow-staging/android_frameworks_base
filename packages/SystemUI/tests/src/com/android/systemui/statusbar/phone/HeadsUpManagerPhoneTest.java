@@ -16,25 +16,35 @@
 
 package com.android.systemui.statusbar.phone;
 
-import android.app.ActivityManager;
-import android.app.Instrumentation;
-import android.app.Notification;
-import android.os.UserHandle;
-import android.view.View;
-import android.service.notification.StatusBarNotification;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
+import static junit.framework.Assert.assertFalse;
+import static junit.framework.Assert.assertTrue;
+
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.when;
+
+import android.content.Context;
+import android.os.Handler;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableLooper;
 
-import com.android.systemui.R;
-import com.android.systemui.SysuiTestCase;
-import com.android.systemui.statusbar.ExpandableNotificationRow;
-import com.android.systemui.statusbar.NotificationData;
-import com.android.systemui.statusbar.StatusBarIconView;
-import com.android.systemui.statusbar.notification.VisualStabilityManager;
+import androidx.test.filters.SmallTest;
 
+import com.android.internal.logging.UiEventLogger;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
+import com.android.systemui.statusbar.AlertingNotificationManager;
+import com.android.systemui.statusbar.AlertingNotificationManagerTest;
+import com.android.systemui.statusbar.NotificationShadeWindowController;
+import com.android.systemui.statusbar.notification.collection.NotificationEntry;
+import com.android.systemui.statusbar.notification.collection.NotificationEntryBuilder;
+import com.android.systemui.statusbar.notification.collection.provider.VisualStabilityProvider;
+import com.android.systemui.statusbar.notification.collection.render.GroupMembershipManager;
+import com.android.systemui.statusbar.policy.AccessibilityManagerWrapper;
+import com.android.systemui.statusbar.policy.ConfigurationController;
+import com.android.systemui.statusbar.policy.HeadsUpManagerLogger;
+
+import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -42,175 +52,148 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
-import static junit.framework.Assert.assertNotNull;
-import static junit.framework.Assert.assertNull;
-import static junit.framework.Assert.assertTrue;
-import static junit.framework.Assert.assertFalse;
-
-import static org.junit.Assert.assertEquals;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 @SmallTest
 @RunWith(AndroidTestingRunner.class)
 @TestableLooper.RunWithLooper
-public class HeadsUpManagerPhoneTest extends SysuiTestCase {
+public class HeadsUpManagerPhoneTest extends AlertingNotificationManagerTest {
     @Rule public MockitoRule rule = MockitoJUnit.rule();
-
-    private static final String TEST_PACKAGE_NAME = "test";
-    private static final int TEST_UID = 0;
 
     private HeadsUpManagerPhone mHeadsUpManager;
 
-    private NotificationData.Entry mEntry;
-    private StatusBarNotification mSbn;
+    @Mock private HeadsUpManagerLogger mHeadsUpManagerLogger;
+    @Mock private GroupMembershipManager mGroupManager;
+    @Mock private VisualStabilityProvider mVSProvider;
+    @Mock private StatusBarStateController mStatusBarStateController;
+    @Mock private KeyguardBypassController mBypassController;
+    @Mock private ConfigurationControllerImpl mConfigurationController;
+    @Mock private AccessibilityManagerWrapper mAccessibilityManagerWrapper;
+    @Mock private UiEventLogger mUiEventLogger;
+    private boolean mLivesPastNormalTime;
 
-    @Mock private NotificationGroupManager mGroupManager;
-    @Mock private View mStatusBarWindowView;
-    @Mock private StatusBar mBar;
-    @Mock private ExpandableNotificationRow mRow;
-    @Mock private VisualStabilityManager mVSManager;
+    private static final class TestableHeadsUpManagerPhone extends HeadsUpManagerPhone {
+        TestableHeadsUpManagerPhone(
+                Context context,
+                HeadsUpManagerLogger headsUpManagerLogger,
+                GroupMembershipManager groupManager,
+                VisualStabilityProvider visualStabilityProvider,
+                StatusBarStateController statusBarStateController,
+                KeyguardBypassController keyguardBypassController,
+                ConfigurationController configurationController,
+                Handler handler,
+                AccessibilityManagerWrapper accessibilityManagerWrapper,
+                UiEventLogger uiEventLogger
+        ) {
+            super(
+                    context,
+                    headsUpManagerLogger,
+                    statusBarStateController,
+                    keyguardBypassController,
+                    groupManager,
+                    visualStabilityProvider,
+                    configurationController,
+                    handler,
+                    accessibilityManagerWrapper,
+                    uiEventLogger
+            );
+            mMinimumDisplayTime = TEST_MINIMUM_DISPLAY_TIME;
+            mAutoDismissNotificationDecay = TEST_AUTO_DISMISS_TIME;
+        }
+    }
+
+    protected AlertingNotificationManager createAlertingNotificationManager() {
+        return mHeadsUpManager;
+    }
 
     @Before
     public void setUp() {
-        when(mVSManager.isReorderingAllowed()).thenReturn(true);
+        AccessibilityManagerWrapper accessibilityMgr =
+                mDependency.injectMockDependency(AccessibilityManagerWrapper.class);
+        when(accessibilityMgr.getRecommendedTimeoutMillis(anyInt(), anyInt()))
+                .thenReturn(TEST_AUTO_DISMISS_TIME);
+        when(mVSProvider.isReorderingAllowed()).thenReturn(true);
+        mDependency.injectMockDependency(NotificationShadeWindowController.class);
+        mDependency.injectMockDependency(ConfigurationController.class);
+        super.setUp();
 
-        mHeadsUpManager = new HeadsUpManagerPhone(
-                mContext, mStatusBarWindowView, mGroupManager, mBar, mVSManager);
+        mHeadsUpManager = new TestableHeadsUpManagerPhone(
+                mContext,
+                mHeadsUpManagerLogger,
+                mGroupManager,
+                mVSProvider,
+                mStatusBarStateController,
+                mBypassController,
+                mConfigurationController,
+                mTestHandler,
+                mAccessibilityManagerWrapper,
+                mUiEventLogger
+        );
+    }
 
-        Notification.Builder n = new Notification.Builder(mContext, "")
-                .setSmallIcon(R.drawable.ic_person)
-                .setContentTitle("Title")
-                .setContentText("Text");
-        mSbn = new StatusBarNotification(TEST_PACKAGE_NAME, TEST_PACKAGE_NAME, 0, null, TEST_UID,
-             0, n.build(), new UserHandle(ActivityManager.getCurrentUser()), null, 0);
-
-        mEntry = new NotificationData.Entry(mSbn);
-        mEntry.row = mRow;
-        mEntry.expandedIcon = mock(StatusBarIconView.class);
+    @After
+    public void tearDown() {
+        mTestHandler.removeCallbacksAndMessages(null);
     }
 
     @Test
-    public void testBasicOperations() {
-        // Check the initial state.
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
-
-        // Add a notification.
+    public void testSnooze() {
         mHeadsUpManager.showNotification(mEntry);
 
-        assertEquals(mEntry, mHeadsUpManager.getEntry(mEntry.key));
-        assertEquals(mEntry, mHeadsUpManager.getTopEntry());
-        assertEquals(1, mHeadsUpManager.getAllEntries().count());
-        assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
+        mHeadsUpManager.snooze();
 
-        // Update the notification.
-        mHeadsUpManager.updateNotification(mEntry, false);
-
-        assertEquals(mEntry, mHeadsUpManager.getEntry(mEntry.key));
-        assertEquals(mEntry, mHeadsUpManager.getTopEntry());
-        assertEquals(1, mHeadsUpManager.getAllEntries().count());
-        assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
-
-        // Try to remove but defer, since the notification is currenlt visible on display.
-        mHeadsUpManager.removeNotification(mEntry.key, false /* ignoreEarliestRemovalTime */);
-
-        assertEquals(mEntry, mHeadsUpManager.getEntry(mEntry.key));
-        assertEquals(mEntry, mHeadsUpManager.getTopEntry());
-        assertEquals(1, mHeadsUpManager.getAllEntries().count());
-        assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
-
-        // Remove forcibly with ignoreEarliestRemovalTime = true.
-        mHeadsUpManager.removeNotification(mEntry.key, true /* ignoreEarliestRemovalTime */);
-
-        // Check the initial state.
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
+        assertTrue(mHeadsUpManager.isSnoozed(mEntry.getSbn().getPackageName()));
     }
 
     @Test
-    public void testsTimeoutRemoval() {
-        mHeadsUpManager.removeMinimumDisplayTimeForTesting();
-
-        // Check the initial state.
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
-
-        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
-
-        // Run the code on the main thready, not to run an async operations.
-        instrumentation.runOnMainSync(() -> {
-            // Add a notification.
-            mHeadsUpManager.showNotification(mEntry);
-
-            // Ensure the head up is visible before timeout.
-            assertNotNull(mHeadsUpManager.getEntry(mEntry.key));
-            assertNotNull(mHeadsUpManager.getTopEntry());
-            assertEquals(1, mHeadsUpManager.getAllEntries().count());
-            assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
-        });
-        // Wait for the async operations, which removes the heads up notification.
-        waitForIdleSync();
-
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
-    }
-
-    @Test
-    public void releaseImmediately() {
-        // Check the initial state.
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
-
-        // Add a notification.
+    public void testSwipedOutNotification() {
         mHeadsUpManager.showNotification(mEntry);
+        mHeadsUpManager.addSwipedOutNotification(mEntry.getKey());
 
-        assertEquals(mEntry, mHeadsUpManager.getEntry(mEntry.key));
-        assertEquals(mEntry, mHeadsUpManager.getTopEntry());
-        assertEquals(1, mHeadsUpManager.getAllEntries().count());
-        assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
+        // Remove should succeed because the notification is swiped out
+        mHeadsUpManager.removeNotification(mEntry.getKey(), false /* releaseImmediately */);
 
-        // Remove but defer, since the notification is visible on display.
-        mHeadsUpManager.releaseImmediately(mEntry.key);
-
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
+        assertFalse(mHeadsUpManager.isAlerting(mEntry.getKey()));
     }
 
     @Test
-    public void releaseAllImmediately() {
-        // Check the initial state.
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
-
-        // Add a notification.
+    public void testCanRemoveImmediately_swipedOut() {
         mHeadsUpManager.showNotification(mEntry);
+        mHeadsUpManager.addSwipedOutNotification(mEntry.getKey());
 
-        assertEquals(mEntry, mHeadsUpManager.getEntry(mEntry.key));
-        assertEquals(mEntry, mHeadsUpManager.getTopEntry());
-        assertEquals(1, mHeadsUpManager.getAllEntries().count());
-        assertTrue(mHeadsUpManager.hasHeadsUpNotifications());
+        // Notification is swiped so it can be immediately removed.
+        assertTrue(mHeadsUpManager.canRemoveImmediately(mEntry.getKey()));
+    }
 
-        // Remove but defer, since the notification is visible on display.
-        mHeadsUpManager.releaseAllImmediately();
+    @Ignore("b/141538055")
+    @Test
+    public void testCanRemoveImmediately_notTopEntry() {
+        NotificationEntry laterEntry = new NotificationEntryBuilder()
+                .setSbn(createNewNotification(1))
+                .build();
+        laterEntry.setRow(mRow);
+        mHeadsUpManager.showNotification(mEntry);
+        mHeadsUpManager.showNotification(laterEntry);
 
-        assertNull(mHeadsUpManager.getEntry(mEntry.key));
-        assertNull(mHeadsUpManager.getTopEntry());
-        assertEquals(0, mHeadsUpManager.getAllEntries().count());
-        assertFalse(mHeadsUpManager.hasHeadsUpNotifications());
+        // Notification is "behind" a higher priority notification so we can remove it immediately.
+        assertTrue(mHeadsUpManager.canRemoveImmediately(mEntry.getKey()));
+    }
+
+
+    @Test
+    public void testExtendHeadsUp() {
+        mHeadsUpManager.showNotification(mEntry);
+        Runnable pastNormalTimeRunnable =
+                () -> mLivesPastNormalTime = mHeadsUpManager.isAlerting(mEntry.getKey());
+        mTestHandler.postDelayed(pastNormalTimeRunnable,
+                TEST_AUTO_DISMISS_TIME + mHeadsUpManager.mExtensionTime / 2);
+        mTestHandler.postDelayed(TEST_TIMEOUT_RUNNABLE, TEST_TIMEOUT_TIME);
+
+        mHeadsUpManager.extendHeadsUp();
+
+        // Wait for normal time runnable and extended remove runnable and process them on arrival.
+        TestableLooper.get(this).processMessages(2);
+
+        assertFalse("Test timed out", mTimedOut);
+        assertTrue("Pulse was not extended", mLivesPastNormalTime);
+        assertFalse(mHeadsUpManager.isAlerting(mEntry.getKey()));
     }
 }

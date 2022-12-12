@@ -23,6 +23,8 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.OperationCanceledException;
 import android.os.SystemClock;
+import android.text.TextUtils;
+import android.util.ArraySet;
 import android.util.Log;
 import android.util.PrefixPrinter;
 import android.util.Printer;
@@ -33,6 +35,7 @@ import com.android.internal.annotations.VisibleForTesting;
 import dalvik.system.CloseGuard;
 
 import java.io.Closeable;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -103,7 +106,11 @@ public final class SQLiteConnectionPool implements Closeable {
     @GuardedBy("mLock")
     private IdleConnectionHandler mIdleConnectionHandler;
 
-    private final AtomicLong mTotalExecutionTimeCounter = new AtomicLong(0);
+    // whole execution time for this connection in milliseconds.
+    private final AtomicLong mTotalStatementsTime = new AtomicLong(0);
+
+    // total statements executed by this connection
+    private final AtomicLong mTotalStatementsCount = new AtomicLong(0);
 
     // Describes what should happen to an acquired connection when it is returned to the pool.
     enum AcquiredConnectionStatus {
@@ -211,7 +218,7 @@ public final class SQLiteConnectionPool implements Closeable {
 
         // Mark the pool as being open for business.
         mIsOpen = true;
-        mCloseGuard.open("close");
+        mCloseGuard.open("SQLiteConnectionPool.close");
     }
 
     /**
@@ -283,8 +290,11 @@ public final class SQLiteConnectionPool implements Closeable {
         synchronized (mLock) {
             throwIfClosedLocked();
 
-            boolean walModeChanged = ((configuration.openFlags ^ mConfiguration.openFlags)
-                    & SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING) != 0;
+            boolean isWalCurrentMode = mConfiguration.resolveJournalMode().equalsIgnoreCase(
+                    SQLiteDatabase.JOURNAL_MODE_WAL);
+            boolean isWalNewMode = configuration.resolveJournalMode().equalsIgnoreCase(
+                    SQLiteDatabase.JOURNAL_MODE_WAL);
+            boolean walModeChanged = isWalCurrentMode ^ isWalNewMode;
             if (walModeChanged) {
                 // WAL mode can only be changed if there are no acquired connections
                 // because we need to close all but the primary connection first.
@@ -315,7 +325,12 @@ public final class SQLiteConnectionPool implements Closeable {
                 }
             }
 
-            if (mConfiguration.openFlags != configuration.openFlags) {
+            // We should do in-place switching when transitioning from compatibility WAL
+            // to rollback journal. Otherwise transient connection state will be lost
+            boolean onlyCompatWalChanged = (mConfiguration.openFlags ^ configuration.openFlags)
+                    == SQLiteDatabase.ENABLE_LEGACY_COMPATIBILITY_WAL;
+
+            if (!onlyCompatWalChanged && mConfiguration.openFlags != configuration.openFlags) {
                 // If we are changing open flags and WAL mode at the same time, then
                 // we have no choice but to close the primary connection beforehand
                 // because there can only be one connection open when we change WAL mode.
@@ -528,7 +543,8 @@ public final class SQLiteConnectionPool implements Closeable {
     }
 
     void onStatementExecuted(long executionTimeMs) {
-        mTotalExecutionTimeCounter.addAndGet(executionTimeMs);
+        mTotalStatementsTime.addAndGet(executionTimeMs);
+        mTotalStatementsCount.incrementAndGet();
     }
 
     // Can't throw.
@@ -1029,8 +1045,7 @@ public final class SQLiteConnectionPool implements Closeable {
     }
 
     private void setMaxConnectionPoolSizeLocked() {
-        if (!mConfiguration.isInMemoryDb()
-                && (mConfiguration.openFlags & SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING) != 0) {
+        if (mConfiguration.resolveJournalMode().equalsIgnoreCase(SQLiteDatabase.JOURNAL_MODE_WAL)) {
             mMaxConnectionPoolSize = SQLiteGlobal.getWALConnectionPoolSize();
         } else {
             // We don't actually need to always restrict the connection pool size to 1
@@ -1099,17 +1114,31 @@ public final class SQLiteConnectionPool implements Closeable {
      * @param printer The printer to receive the dump, not null.
      * @param verbose True to dump more verbose information.
      */
-    public void dump(Printer printer, boolean verbose) {
+    public void dump(Printer printer, boolean verbose, ArraySet<String> directories) {
         Printer indentedPrinter = PrefixPrinter.create(printer, "    ");
         synchronized (mLock) {
+            if (directories != null) {
+                directories.add(new File(mConfiguration.path).getParent());
+            }
+            boolean isCompatibilityWalEnabled = mConfiguration.isLegacyCompatibilityWalEnabled();
             printer.println("Connection pool for " + mConfiguration.path + ":");
             printer.println("  Open: " + mIsOpen);
             printer.println("  Max connections: " + mMaxConnectionPoolSize);
-            printer.println("  Total execution time: " + mTotalExecutionTimeCounter);
-            if (SQLiteCompatibilityWalFlags.areFlagsSet()) {
-                printer.println("  Compatibility WAL settings: compatibility_wal_supported="
-                        + SQLiteCompatibilityWalFlags
-                        .isCompatibilityWalSupported() + ", wal_syncmode="
+            printer.println("  Total execution time (ms): " + mTotalStatementsTime);
+            printer.println("  Total statements executed: " + mTotalStatementsCount);
+            if (mTotalStatementsCount.get() > 0) {
+                // Avoid division by 0 by filtering out logs where there are no statements executed.
+                printer.println("  Average time per statement (ms): "
+                        + mTotalStatementsTime.get() / mTotalStatementsCount.get());
+            }
+            printer.println("  Configuration: openFlags=" + mConfiguration.openFlags
+                    + ", isLegacyCompatibilityWalEnabled=" + isCompatibilityWalEnabled
+                    + ", journalMode=" + TextUtils.emptyIfNull(mConfiguration.resolveJournalMode())
+                    + ", syncMode=" + TextUtils.emptyIfNull(mConfiguration.resolveSyncMode()));
+            printer.println("  IsReadOnlyDatabase=" + mConfiguration.isReadOnlyDatabase());
+
+            if (isCompatibilityWalEnabled) {
+                printer.println("  Compatibility WAL enabled: wal_syncmode="
                         + SQLiteCompatibilityWalFlags.getWALSyncMode());
             }
             if (mConfiguration.isLookasideConfigSet()) {
@@ -1167,9 +1196,21 @@ public final class SQLiteConnectionPool implements Closeable {
         }
     }
 
+    public long getTotalStatementsTime() {
+        return mTotalStatementsTime.get();
+    }
+
+    public long getTotalStatementsCount() {
+        return mTotalStatementsCount.get();
+    }
+
     @Override
     public String toString() {
         return "SQLiteConnectionPool: " + mConfiguration.path;
+    }
+
+    public String getPath() {
+        return mConfiguration.path;
     }
 
     private static final class ConnectionWaiter {

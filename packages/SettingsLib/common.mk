@@ -12,59 +12,22 @@
 #
 #   include frameworks/base/packages/SettingsLib/common.mk
 #
+# During the conversion to Soong bluprint files, the equivalent
+# functionality is provided by adding
+#   defaults: ["SettingsLibDefaults"],
+# to the corresponding module.
+# NOTE: keep this file and ./Android.bp in sync.
 
-ifeq ($(LOCAL_USE_AAPT2),true)
 LOCAL_STATIC_JAVA_LIBRARIES += \
-    android-support-annotations \
-    apptoolkit-lifecycle-common
+    androidx.annotation_annotation \
+    androidx.lifecycle_lifecycle-common
 
 LOCAL_STATIC_ANDROID_LIBRARIES += \
-    android-support-v4 \
-    apptoolkit-lifecycle-runtime \
-    android-support-v7-recyclerview \
-    android-support-v7-preference \
-    android-support-v7-appcompat \
-    android-support-v14-preference \
+    androidx.legacy_legacy-support-v4 \
+    androidx.lifecycle_lifecycle-runtime \
+    androidx.recyclerview_recyclerview \
+    androidx.preference_preference \
+    androidx.appcompat_appcompat \
+    androidx.legacy_legacy-preference-v14 \
     SettingsLib
-else
-LOCAL_RESOURCE_DIR += $(call my-dir)/res
 
-
-## Include transitive dependencies below
-
-# Include support-v7-appcompat, if not already included
-ifeq (,$(findstring android-support-v7-appcompat,$(LOCAL_STATIC_JAVA_LIBRARIES)))
-LOCAL_RESOURCE_DIR += frameworks/support/v7/appcompat/res
-LOCAL_AAPT_FLAGS += --extra-packages android.support.v7.appcompat
-LOCAL_STATIC_JAVA_LIBRARIES += android-support-v7-appcompat
-endif
-
-# Include support-v7-recyclerview, if not already included
-ifeq (,$(findstring android-support-v7-recyclerview,$(LOCAL_STATIC_JAVA_LIBRARIES)))
-LOCAL_RESOURCE_DIR += frameworks/support/v7/recyclerview/res
-LOCAL_AAPT_FLAGS += --extra-packages android.support.v7.recyclerview
-LOCAL_STATIC_JAVA_LIBRARIES += android-support-v7-recyclerview
-endif
-
-# Include android-support-v7-preference, if not already included
-ifeq (,$(findstring android-support-v7-preference,$(LOCAL_STATIC_JAVA_LIBRARIES)))
-LOCAL_RESOURCE_DIR += frameworks/support/v7/preference/res
-LOCAL_AAPT_FLAGS += --extra-packages android.support.v7.preference
-LOCAL_STATIC_JAVA_LIBRARIES += android-support-v7-preference
-endif
-
-# Include android-support-v14-preference, if not already included
-ifeq (,$(findstring android-support-v14-preference,$(LOCAL_STATIC_JAVA_LIBRARIES)))
-LOCAL_AAPT_FLAGS += --extra-packages android.support.v14.preference
-LOCAL_STATIC_JAVA_LIBRARIES += android-support-v14-preference
-endif
-
-LOCAL_AAPT_FLAGS += --auto-add-overlay --extra-packages com.android.settingslib
-
-LOCAL_STATIC_JAVA_LIBRARIES += \
-    android-support-annotations \
-    android-support-v4 \
-    android-arch-lifecycle-runtime \
-    android-arch-lifecycle-common \
-    SettingsLib
-endif

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.android.internal.os;
 
 import static android.os.BatteryStats.UID_TIMES_TYPE_ALL;
@@ -25,15 +26,10 @@ import static android.os.BatteryStats.Uid.PROCESS_STATE_TOP;
 import static android.os.BatteryStats.Uid.PROCESS_STATE_TOP_SLEEPING;
 import static android.os.BatteryStats.Uid.UID_PROCESS_TYPES;
 
-import static com.android.internal.os.BatteryStatsImpl.Constants.KEY_TRACK_CPU_TIMES_BY_PROC_STATE;
-
 import static junit.framework.Assert.assertNotNull;
 import static junit.framework.Assert.assertNull;
 import static junit.framework.Assert.assertTrue;
 import static junit.framework.Assert.fail;
-
-import com.android.frameworks.coretests.aidl.ICmdCallback;
-import com.android.frameworks.coretests.aidl.ICmdReceiver;
 
 import android.app.ActivityManager;
 import android.app.KeyguardManager;
@@ -51,13 +47,18 @@ import android.os.PowerManager;
 import android.os.Process;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.LargeTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.support.test.uiautomator.UiDevice;
-import android.text.TextUtils;
+import android.util.ArrayMap;
 import android.util.DebugUtils;
+import android.util.KeyValueListParser;
 import android.util.Log;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.LargeTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import com.android.frameworks.coretests.aidl.ICmdCallback;
+import com.android.frameworks.coretests.aidl.ICmdReceiver;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -101,6 +102,9 @@ public class BstatsCpuTimesValidationTest {
 
     private static final int WORK_DURATION_MS = 2000;
 
+    private static boolean sBatteryStatsConstsUpdated;
+    private static String sOriginalBatteryStatsConsts;
+
     private static Context sContext;
     private static UiDevice sUiDevice;
     private static int sTestPkgUid;
@@ -116,12 +120,48 @@ public class BstatsCpuTimesValidationTest {
         sContext.getPackageManager().setApplicationEnabledSetting(TEST_PKG,
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED, 0);
         sTestPkgUid = sContext.getPackageManager().getPackageUid(TEST_PKG, 0);
+        executeCmd("cmd deviceidle whitelist +" + TEST_PKG);
         checkCpuTimesAvailability();
     }
 
     @AfterClass
     public static void tearDownOnce() throws Exception {
+        executeCmd("cmd deviceidle whitelist -" + TEST_PKG);
+        if (sBatteryStatsConstsUpdated) {
+            Settings.Global.putString(sContext.getContentResolver(),
+                    Settings.Global.BATTERY_STATS_CONSTANTS, sOriginalBatteryStatsConsts);
+        }
         batteryReset();
+    }
+
+    private static void updateBatteryStatsConstants(ArrayMap<String, String> desiredConstants) {
+        sOriginalBatteryStatsConsts = Settings.Global.getString(sContext.getContentResolver(),
+                Settings.Global.BATTERY_STATS_CONSTANTS);
+        final char delimiter = ',';
+        final KeyValueListParser parser = new KeyValueListParser(delimiter);
+        parser.setString(sOriginalBatteryStatsConsts);
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0, size = parser.size(); i < size; ++i) {
+            final String key = parser.keyAt(i);
+            final String value = desiredConstants.getOrDefault(key,
+                    parser.getString(key, null));
+            if (sb.length() > 0) {
+                sb.append(delimiter);
+            }
+            sb.append(key + "=" + value);
+            desiredConstants.remove(key);
+        }
+        desiredConstants.forEach((key, value) -> {
+            if (sb.length() > 0) {
+                sb.append(delimiter);
+            }
+            sb.append(key + '=' + value);
+        });
+        Settings.Global.putString(sContext.getContentResolver(),
+                Settings.Global.BATTERY_STATS_CONSTANTS, sb.toString());
+        Log.d(TAG, "Updated value of '" + Settings.Global.BATTERY_STATS_CONSTANTS + "': "
+                + sb.toString());
+        sBatteryStatsConstsUpdated = true;
     }
 
     // Checks cpu freq times of system uid as an indication of whether /proc/uid_time_in_state
@@ -132,9 +172,11 @@ public class BstatsCpuTimesValidationTest {
         batteryOff();
         final long[] totalCpuTimes = getAllCpuFreqTimes(Process.SYSTEM_UID);
         sCpuFreqTimesAvailable = totalCpuTimes != null;
-        final long[] fgSvcCpuTimes = getAllCpuFreqTimes(Process.SYSTEM_UID,
+        final long[] fgCpuTimes = getAllCpuFreqTimes(Process.SYSTEM_UID,
                 PROCESS_STATE_FOREGROUND);
-        sPerProcStateTimesAvailable = fgSvcCpuTimes != null;
+        final long[] topCpuTimes = getAllCpuFreqTimes(Process.SYSTEM_UID,
+                PROCESS_STATE_TOP);
+        sPerProcStateTimesAvailable = fgCpuTimes != null || topCpuTimes != null;
     }
 
     @Test
@@ -466,124 +508,6 @@ public class BstatsCpuTimesValidationTest {
         batteryOffScreenOn();
     }
 
-    @Test
-    public void testCpuFreqTimes_trackingDisabled() throws Exception {
-        if (!sCpuFreqTimesAvailable || !sPerProcStateTimesAvailable) {
-            Log.w(TAG, "Skipping " + testName.getMethodName()
-                    + "; freqTimesAvailable=" + sCpuFreqTimesAvailable
-                    + ", procStateTimesAvailable=" + sPerProcStateTimesAvailable);
-            return;
-        }
-
-        final String bstatsConstants = Settings.Global.getString(sContext.getContentResolver(),
-                Settings.Global.BATTERY_STATS_CONSTANTS);
-        try {
-            batteryOnScreenOn();
-            forceStop();
-            resetBatteryStats();
-            final long[] initialSnapshot = getAllCpuFreqTimes(sTestPkgUid);
-            assertNull("Initial snapshot should be null, initial="
-                    + Arrays.toString(initialSnapshot), initialSnapshot);
-            assertNull("Initial top state snapshot should be null",
-                    getAllCpuFreqTimes(sTestPkgUid, PROCESS_STATE_TOP));
-
-            doSomeWork(PROCESS_STATE_TOP);
-            forceStop();
-
-            final long[] cpuTimesMs = getAllCpuFreqTimes(sTestPkgUid, PROCESS_STATE_TOP);
-            final String msgCpuTimes = getAllCpuTimesMsg();
-            assertCpuTimesValid(cpuTimesMs);
-            long actualCpuTimeMs = 0;
-            for (int i = 0; i < cpuTimesMs.length / 2; ++i) {
-                actualCpuTimeMs += cpuTimesMs[i];
-            }
-            assertApproximateValue("Incorrect total cpu time, " + msgCpuTimes,
-                    WORK_DURATION_MS, actualCpuTimeMs);
-
-            updateTrackPerProcStateCpuTimesSetting(bstatsConstants, false);
-
-            doSomeWork(PROCESS_STATE_TOP);
-            forceStop();
-
-            final long[] cpuTimesMs2 = getAllCpuFreqTimes(sTestPkgUid, PROCESS_STATE_TOP);
-            assertCpuTimesValid(cpuTimesMs2);
-            assertCpuTimesEqual(cpuTimesMs2, cpuTimesMs, 20,
-                    "Unexpected cpu times with tracking off");
-
-            updateTrackPerProcStateCpuTimesSetting(bstatsConstants, true);
-
-            final long[] cpuTimesMs3 = getAllCpuFreqTimes(sTestPkgUid, PROCESS_STATE_TOP);
-            assertCpuTimesValid(cpuTimesMs3);
-            assertCpuTimesEqual(cpuTimesMs3, cpuTimesMs, 20,
-                    "Unexpected cpu times after turning on tracking");
-
-            doSomeWork(PROCESS_STATE_TOP);
-            forceStop();
-
-            final long[] cpuTimesMs4 = getAllCpuFreqTimes(sTestPkgUid, PROCESS_STATE_TOP);
-            assertCpuTimesValid(cpuTimesMs4);
-            actualCpuTimeMs = 0;
-            for (int i = 0; i < cpuTimesMs.length / 2; ++i) {
-                actualCpuTimeMs += cpuTimesMs[i];
-            }
-            assertApproximateValue("Incorrect total cpu time, " + msgCpuTimes,
-                    2 * WORK_DURATION_MS, actualCpuTimeMs);
-
-            batteryOffScreenOn();
-        } finally {
-            Settings.Global.putString(sContext.getContentResolver(),
-                    Settings.Global.BATTERY_STATS_CONSTANTS, bstatsConstants);
-        }
-    }
-
-    private void assertCpuTimesEqual(long[] actual, long[] expected, long delta, String errMsg) {
-        for (int i = actual.length - 1; i >= 0; --i) {
-            if (actual[i] > expected[i] + delta || actual[i] < expected[i]) {
-                fail(errMsg + ", actual=" + actual + ", expected=" + expected + ", delta=" + delta);
-            }
-        }
-    }
-
-    private void updateTrackPerProcStateCpuTimesSetting(String originalConstants, boolean enabled)
-            throws Exception {
-        final String newConstants;
-        final String setting = KEY_TRACK_CPU_TIMES_BY_PROC_STATE + "=" + enabled;
-        if (originalConstants == null || "null".equals(originalConstants)) {
-            newConstants = setting;
-        } else if (originalConstants.contains(KEY_TRACK_CPU_TIMES_BY_PROC_STATE)) {
-            newConstants = originalConstants.replaceAll(
-                    KEY_TRACK_CPU_TIMES_BY_PROC_STATE + "=(true|false)", setting);
-        } else {
-            newConstants = originalConstants + "," + setting;
-        }
-        Settings.Global.putString(sContext.getContentResolver(),
-                Settings.Global.BATTERY_STATS_CONSTANTS, newConstants);
-        assertTrackPerProcStateCpuTimesSetting(enabled);
-    }
-
-    private void assertTrackPerProcStateCpuTimesSetting(boolean enabled) throws Exception {
-        final String expectedValue = Boolean.toString(enabled);
-        assertDelayedCondition("Unexpected value for " + KEY_TRACK_CPU_TIMES_BY_PROC_STATE, () -> {
-            final String actualValue = getSettingValueFromDump(KEY_TRACK_CPU_TIMES_BY_PROC_STATE);
-            return expectedValue.equals(actualValue)
-                    ? null : "expected=" + expectedValue + ", actual=" + actualValue;
-        }, SETTING_UPDATE_TIMEOUT_MS, SETTING_UPDATE_CHECK_INTERVAL_MS);
-    }
-
-    private String getSettingValueFromDump(String key) throws Exception {
-        final String settingsDump = executeCmdSilent("dumpsys batterystats --settings");
-        final TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter('\n');
-        splitter.setString(settingsDump);
-        String next;
-        while (splitter.hasNext()) {
-            next = splitter.next();
-            if (next.startsWith(key)) {
-                return next.split("=")[1];
-            }
-        }
-        return null;
-    }
-
     private void assertCpuTimesValid(long[] cpuTimes) {
         assertNotNull(cpuTimes);
         for (int i = 0; i < cpuTimes.length; ++i) {
@@ -599,8 +523,14 @@ public class BstatsCpuTimesValidationTest {
         }
     }
 
-    private void assertApproximateValue(String errorPrefix, long expectedValue, long actualValue) {
-        assertValueRange(errorPrefix, actualValue, expectedValue * 0.5, expectedValue * 1.5);
+    private void assertApproximateValue(String errorPrefix, long expectedValueMs,
+            long actualValueMs) {
+        // Allow the actual value to be 1 second smaller than the expected.
+        // Also allow it to be up to 5 seconds larger, to accommodate the arbitrary
+        // latency introduced by BatteryExternalStatsWorker.scheduleReadProcStateCpuTimes
+        assertValueRange(errorPrefix, actualValueMs,
+                expectedValueMs - 1000,
+                expectedValueMs + 5000);
     }
 
     private void assertValueRange(String errorPrefix,

@@ -20,6 +20,8 @@ import android.util.Property;
 import android.view.View;
 import android.view.animation.Interpolator;
 
+import androidx.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,12 +39,19 @@ public class TouchAnimator {
     private final float mStartDelay;
     private final float mEndDelay;
     private final float mSpan;
+    @Nullable
     private final Interpolator mInterpolator;
+    @Nullable
     private final Listener mListener;
     private float mLastT = -1;
 
-    private TouchAnimator(Object[] targets, KeyframeSet[] keyframeSets,
-            float startDelay, float endDelay, Interpolator interpolator, Listener listener) {
+    private TouchAnimator(
+            Object[] targets,
+            KeyframeSet[] keyframeSets,
+            float startDelay,
+            float endDelay,
+            @Nullable Interpolator interpolator,
+            @Nullable Listener listener) {
         mTargets = targets;
         mKeyframeSets = keyframeSets;
         mStartDelay = startDelay;
@@ -53,6 +62,7 @@ public class TouchAnimator {
     }
 
     public void setPosition(float fraction) {
+        if (Float.isNaN(fraction)) return;
         float t = MathUtils.constrain((fraction - mStartDelay) / mSpan, 0, 1);
         if (mInterpolator != null) {
             t = mInterpolator.getInterpolation(t);
@@ -107,7 +117,7 @@ public class TouchAnimator {
         void onAnimationAtStart();
 
         /**
-         * Called when the animator moves into a position of "0". Start and end delays are
+         * Called when the animator moves into a position of "1". Start and end delays are
          * taken into account, so this position may cover a range of fractional inputs.
          */
         void onAnimationAtEnd();
@@ -125,7 +135,9 @@ public class TouchAnimator {
 
         private float mStartDelay;
         private float mEndDelay;
+        @Nullable
         private Interpolator mInterpolator;
+        @Nullable
         private Listener mListener;
 
         public Builder addFloat(Object target, String property, float... values) {
@@ -182,7 +194,8 @@ public class TouchAnimator {
             return this;
         }
 
-        public Builder setInterpolator(Interpolator intepolator) {
+        /** Sets interpolator. */
+        public Builder setInterpolator(@Nullable Interpolator intepolator) {
             mInterpolator = intepolator;
             return this;
         }
@@ -200,7 +213,6 @@ public class TouchAnimator {
     }
 
     private static abstract class KeyframeSet {
-
         private final float mFrameWidth;
         private final int mSize;
 
@@ -210,9 +222,8 @@ public class TouchAnimator {
         }
 
         void setValue(float fraction, Object target) {
-            int i;
-            for (i = 1; i < mSize - 1 && fraction > mFrameWidth; i++);
-            float amount = fraction / mFrameWidth;
+            int i = MathUtils.constrain((int) Math.ceil(fraction / mFrameWidth), 1, mSize - 1);
+            float amount = (fraction - mFrameWidth * (i - 1)) / mFrameWidth;
             interpolate(i, amount, target);
         }
 

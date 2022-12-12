@@ -20,9 +20,9 @@
 #include <android-base/macros.h>
 #include <hwbinder/Binder.h>
 #include <jni.h>
-#include <utils/List.h>
 #include <utils/Mutex.h>
 #include <utils/RefBase.h>
+#include <vector>
 
 namespace android {
 
@@ -33,15 +33,21 @@ namespace android {
 class HwBinderDeathRecipient;
 
 class HwBinderDeathRecipientList : public RefBase {
-    List< sp<HwBinderDeathRecipient> > mList;
+    std::vector<sp<HwBinderDeathRecipient>> mList;
     Mutex mLock;
 
+protected:
+    ~HwBinderDeathRecipientList() override;
+
 public:
-    HwBinderDeathRecipientList();
-    ~HwBinderDeathRecipientList();
+    explicit HwBinderDeathRecipientList();
+
+    DISALLOW_COPY_AND_ASSIGN(HwBinderDeathRecipientList);
 
     void add(const sp<HwBinderDeathRecipient>& recipient);
     void remove(const sp<HwBinderDeathRecipient>& recipient);
+
+    // finds the most recently added matching death recipient
     sp<HwBinderDeathRecipient> find(jobject recipient);
 
     Mutex& lock();  // Use with care; specifically for mutual exclusion during binder death
@@ -64,12 +70,7 @@ struct JHwRemoteBinder : public RefBase {
     void setBinder(const sp<hardware::IBinder> &binder);
     sp<HwBinderDeathRecipientList> getDeathRecipientList() const;
 
-protected:
-    virtual ~JHwRemoteBinder();
-
 private:
-    jobject mObject;
-
     sp<hardware::IBinder> mBinder;
     sp<HwBinderDeathRecipientList> mDeathRecipientList;
     DISALLOW_COPY_AND_ASSIGN(JHwRemoteBinder);

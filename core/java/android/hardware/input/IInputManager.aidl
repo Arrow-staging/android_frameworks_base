@@ -16,18 +16,25 @@
 
 package android.hardware.input;
 
-import android.app.IInputForwarder;
+import android.graphics.Rect;
 import android.hardware.input.InputDeviceIdentifier;
 import android.hardware.input.KeyboardLayout;
 import android.hardware.input.IInputDevicesChangedListener;
 import android.hardware.input.ITabletModeChangedListener;
 import android.hardware.input.TouchCalibration;
+import android.os.CombinedVibration;
+import android.hardware.input.IInputSensorEventListener;
+import android.hardware.input.InputSensorInfo;
+import android.hardware.lights.Light;
+import android.hardware.lights.LightState;
 import android.os.IBinder;
+import android.os.IVibratorStateListener;
+import android.os.VibrationEffect;
 import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.InputMonitor;
 import android.view.PointerIcon;
-import android.view.inputmethod.InputMethodInfo;
-import android.view.inputmethod.InputMethodSubtype;
+import android.view.VerifiedInputEvent;
 
 /** @hide */
 interface IInputManager {
@@ -43,12 +50,24 @@ interface IInputManager {
     // Reports whether the hardware supports the given keys; returns true if successful
     boolean hasKeys(int deviceId, int sourceMask, in int[] keyCodes, out boolean[] keyExists);
 
+    // Returns the keyCode produced when pressing the key at the specified location, given the
+    // active keyboard layout.
+    int getKeyCodeForKeyLocation(int deviceId, in int locationKeyCode);
+
     // Temporarily changes the pointer speed.
     void tryPointerSpeed(int speed);
 
-    // Injects an input event into the system.  To inject into windows owned by other
-    // applications, the caller must have the INJECT_EVENTS permission.
+    // Injects an input event into the system. The caller must have the INJECT_EVENTS permssion.
+    // This method exists only for compatibility purposes and may be removed in a future release.
+    @UnsupportedAppUsage
     boolean injectInputEvent(in InputEvent ev, int mode);
+
+    // Injects an input event into the system. The caller must have the INJECT_EVENTS permission.
+    // The caller can target windows owned by a certain UID by providing a valid UID, or by
+    // providing {@link android.os.Process#INVALID_UID} to target all windows.
+    boolean injectInputEventToTarget(in InputEvent ev, int mode, int targetUid);
+
+    VerifiedInputEvent verifyInputEvent(in InputEvent ev);
 
     // Calibrate input device position
     TouchCalibration getTouchCalibrationForInputDevice(String inputDeviceDescriptor, int rotation);
@@ -67,11 +86,6 @@ interface IInputManager {
             String keyboardLayoutDescriptor);
     void removeKeyboardLayoutForInputDevice(in InputDeviceIdentifier identifier,
             String keyboardLayoutDescriptor);
-    KeyboardLayout getKeyboardLayoutForInputDevice(in InputDeviceIdentifier identifier,
-            in InputMethodInfo imeInfo, in InputMethodSubtype imeSubtype);
-    void setKeyboardLayoutForInputDevice(in InputDeviceIdentifier identifier,
-            in InputMethodInfo imeInfo, in InputMethodSubtype imeSubtype,
-            String keyboardLayoutDescriptor);
 
     // Registers an input devices changed listener.
     void registerInputDevicesChangedListener(IInputDevicesChangedListener listener);
@@ -81,15 +95,64 @@ interface IInputManager {
     // Registers a tablet mode change listener
     void registerTabletModeChangedListener(ITabletModeChangedListener listener);
 
+    // Queries whether the device's microphone is muted by switch
+    int isMicMuted();
+
     // Input device vibrator control.
-    void vibrate(int deviceId, in long[] pattern, int repeat, IBinder token);
+    void vibrate(int deviceId, in VibrationEffect effect, IBinder token);
+    void vibrateCombined(int deviceId, in CombinedVibration vibration, IBinder token);
     void cancelVibrate(int deviceId, IBinder token);
+    int[] getVibratorIds(int deviceId);
+    boolean isVibrating(int deviceId);
+    boolean registerVibratorStateListener(int deviceId, in IVibratorStateListener listener);
+    boolean unregisterVibratorStateListener(int deviceId, in IVibratorStateListener listener);
+
+    // Input device battery query.
+    int getBatteryStatus(int deviceId);
+    int getBatteryCapacity(int deviceId);
 
     void setPointerIconType(int typeId);
     void setCustomPointerIcon(in PointerIcon icon);
 
-    void requestPointerCapture(IBinder windowToken, boolean enabled);
+    oneway void requestPointerCapture(IBinder inputChannelToken, boolean enabled);
 
-    /** Create input forwarder to deliver touch events to owned display. */
-    IInputForwarder createInputForwarder(int displayId);
+    /** Create an input monitor for gestures. */
+    InputMonitor monitorGestureInput(IBinder token, String name, int displayId);
+
+    // Add a runtime association between the input port and the display port. This overrides any
+    // static associations.
+    void addPortAssociation(in String inputPort, int displayPort);
+    // Remove the runtime association between the input port and the display port. Any existing
+    // static association for the cleared input port will be restored.
+    void removePortAssociation(in String inputPort);
+
+    // Add a runtime association between the input device and display.
+    void addUniqueIdAssociation(in String inputPort, in String displayUniqueId);
+    // Remove the runtime association between the input device and display.
+    void removeUniqueIdAssociation(in String inputPort);
+
+    InputSensorInfo[] getSensorList(int deviceId);
+
+    boolean registerSensorListener(IInputSensorEventListener listener);
+
+    void unregisterSensorListener(IInputSensorEventListener listener);
+
+    boolean enableSensor(int deviceId, int sensorType, int samplingPeriodUs,
+                int maxBatchReportLatencyUs);
+
+    void disableSensor(int deviceId, int sensorType);
+
+    boolean flushSensor(int deviceId, int sensorType);
+
+    List<Light> getLights(int deviceId);
+
+    LightState getLightState(int deviceId, int lightId);
+
+    void setLightStates(int deviceId, in int[] lightIds, in LightState[] states, in IBinder token);
+
+    void openLightSession(int deviceId, String opPkg, in IBinder token);
+
+    void closeLightSession(int deviceId, in IBinder token);
+
+    void cancelCurrentTouch();
 }

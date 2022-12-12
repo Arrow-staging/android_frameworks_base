@@ -17,13 +17,18 @@
 package android.renderscript;
 
 /**
- * Base class for all Intrinsic scripts. An intrinsic a script
- * which implements a pre-defined function. Intrinsics are
- * provided to provide effecient implemtations of common
+ * Base class for all Intrinsic scripts. An intrinsic is a script
+ * that implements a pre-defined function. Intrinsics are
+ * provided to provide efficient implementations of common
  * operations.
  *
  * Not intended for direct use.
+ *
+ * @deprecated Renderscript has been deprecated in API level 31. Please refer to the <a
+ * href="https://developer.android.com/guide/topics/renderscript/migration-guide">migration
+ * guide</a> for the proposed alternatives.
  **/
+@Deprecated
 public abstract class ScriptIntrinsic extends Script {
     ScriptIntrinsic(long id, RenderScript rs) {
         super(id, rs);

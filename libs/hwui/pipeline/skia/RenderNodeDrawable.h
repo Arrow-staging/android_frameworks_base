@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "SkiaUtils.h"
+
 #include <SkCanvas.h>
 #include <SkDrawable.h>
 #include <SkMatrix.h>
@@ -47,18 +49,16 @@ public:
      *      layer into the canvas.
      */
     explicit RenderNodeDrawable(RenderNode* node, SkCanvas* canvas, bool composeLayer = true,
-                                bool inReorderingSection = false)
-            : mRenderNode(node)
-            , mRecordedTransform(canvas->getTotalMatrix())
-            , mComposeLayer(composeLayer)
-            , mInReorderingSection(inReorderingSection) {}
+                                bool inReorderingSection = false);
+
+    ~RenderNodeDrawable();
 
     /**
      * Draws into the canvas this render node and its children. If the node is marked as a
      * projection receiver then all projected children (excluding direct children) will be drawn
      * last. Any projected node not matching those requirements will not be drawn by this function.
      */
-    void forceDraw(SkCanvas* canvas);
+    void forceDraw(SkCanvas* canvas) const;
 
     /**
      * Returns readonly render properties for this render node.
@@ -91,7 +91,7 @@ protected:
     virtual SkRect onGetBounds() override {
         // We don't want to enable a record time quick reject because the properties
         // of the RenderNode may be updated on subsequent frames.
-        return SkRect::MakeLargest();
+        return SkRectMakeLargest();
     }
     /**
      * This function draws into a canvas as forceDraw, but does nothing if the render node has a
@@ -113,7 +113,7 @@ private:
      * @param nestLevel should be always 0. Used to track how far we are from the receiver.
      */
     void drawBackwardsProjectedNodes(SkCanvas* canvas, const SkiaDisplayList& displayList,
-                                     int nestLevel = 0);
+                                     int nestLevel = 0) const;
 
     /**
      * Applies the rendering properties of a view onto a SkCanvas.
@@ -150,6 +150,6 @@ private:
     SkiaDisplayList* mProjectedDisplayList = nullptr;
 };
 
-};  // namespace skiapipeline
-};  // namespace uirenderer
-};  // namespace android
+}  // namespace skiapipeline
+}  // namespace uirenderer
+}  // namespace android

@@ -17,19 +17,23 @@
 package com.android.systemui.statusbar;
 
 import android.annotation.ColorInt;
+import android.annotation.StringRes;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.util.AttributeSet;
 import android.view.View;
 import android.widget.TextView;
 
+import androidx.annotation.NonNull;
+
 import com.android.systemui.R;
-import com.android.systemui.statusbar.stack.ExpandableViewState;
-import com.android.systemui.statusbar.stack.StackScrollState;
+import com.android.systemui.statusbar.notification.row.StackScrollerDecorView;
+import com.android.systemui.statusbar.notification.stack.ExpandableViewState;
 
 public class EmptyShadeView extends StackScrollerDecorView {
 
     private TextView mEmptyText;
+    private @StringRes int mText = R.string.empty_shade_text;
 
     public EmptyShadeView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -38,7 +42,7 @@ public class EmptyShadeView extends StackScrollerDecorView {
     @Override
     protected void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        mEmptyText.setText(R.string.empty_shade_text);
+        mEmptyText.setText(mText);
     }
 
     @Override
@@ -46,8 +50,22 @@ public class EmptyShadeView extends StackScrollerDecorView {
         return findViewById(R.id.no_notifications);
     }
 
+    @Override
+    protected View findSecondaryView() {
+        return null;
+    }
+
     public void setTextColor(@ColorInt int color) {
         mEmptyText.setTextColor(color);
+    }
+
+    public void setText(@StringRes int text) {
+        mText = text;
+        mEmptyText.setText(mText);
+    }
+
+    public int getTextResource() {
+        return mText;
     }
 
     @Override
@@ -57,7 +75,8 @@ public class EmptyShadeView extends StackScrollerDecorView {
     }
 
     @Override
-    public ExpandableViewState createNewViewState(StackScrollState stackScrollState) {
+    @NonNull
+    public ExpandableViewState createExpandableViewState() {
         return new EmptyShadeViewState();
     }
 
@@ -68,8 +87,7 @@ public class EmptyShadeView extends StackScrollerDecorView {
             if (view instanceof EmptyShadeView) {
                 EmptyShadeView emptyShadeView = (EmptyShadeView) view;
                 boolean visible = this.clipTopAmount <= mEmptyText.getPaddingTop() * 0.6f;
-                emptyShadeView.performVisibilityAnimation(
-                        visible && !emptyShadeView.willBeGone());
+                emptyShadeView.setContentVisible(visible && emptyShadeView.isVisible());
             }
         }
     }

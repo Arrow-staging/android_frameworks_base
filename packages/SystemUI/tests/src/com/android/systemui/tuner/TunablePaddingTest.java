@@ -20,13 +20,13 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.withSettings;
 
-import android.support.test.filters.SmallTest;
 import android.testing.LeakCheck.Tracker;
 import android.util.DisplayMetrics;
 import android.view.View;
 import android.view.WindowManager;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.systemui.utils.leaks.LeakCheckedTest;
 
@@ -45,9 +45,12 @@ public class TunablePaddingTest extends LeakCheckedTest {
     @Before
     public void setup() {
         injectLeakCheckedDependencies(ALL_SUPPORTED_CLASSES);
-        mView = mock(View.class, withSettings().spiedInstance(new View(mContext)));
+        mView = mock(View.class);
+        when(mView.getContext()).thenReturn(mContext);
 
-        mTunerService = mDependency.injectMockDependency(TunerService.class);
+        mTunerService = mock(TunerService.class);
+        mDependency.injectTestDependency(TunablePadding.TunablePaddingService.class,
+                new TunablePadding.TunablePaddingService(mTunerService));
         Tracker tracker = mLeakCheck.getTracker("tuner");
         doAnswer(invocation -> {
             tracker.getLeakInfo(invocation.getArguments()[0]).addAllocation(new Throwable());

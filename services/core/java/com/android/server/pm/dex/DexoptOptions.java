@@ -18,8 +18,6 @@ package com.android.server.pm.dex;
 
 import static com.android.server.pm.PackageManagerServiceCompilerMapping.getCompilerFilterForReason;
 
-import android.annotation.Nullable;
-
 /**
  * Options used for dexopt invocations.
  */
@@ -63,6 +61,16 @@ public final class DexoptOptions {
     // should get the dex metdata file if present.
     public static final int DEXOPT_INSTALL_WITH_DEX_METADATA_FILE = 1 << 10;
 
+    // When set, indicates that dexopt is being invoked from the install flow during device restore
+    // or device setup and should be scheduled appropriately.
+    public static final int DEXOPT_FOR_RESTORE = 1 << 11; // TODO(b/135202722): remove
+
+    /**
+     * A value indicating that dexopt shouldn't be run.  This string is only used when loading
+     * filters from the `pm.dexopt.install*` properties and is not propagated to dex2oat.
+     */
+    public static final String COMPILER_FILTER_NOOP = "skip";
+
     // The name of package to optimize.
     private final String mPackageName;
 
@@ -77,15 +85,21 @@ public final class DexoptOptions {
     // It only applies for primary apk and it's always null if mOnlySecondaryDex is true.
     private final String mSplitName;
 
+    // The reason for invoking dexopt (see PackageManagerService.REASON_* constants).
+    // A -1 value denotes an unknown reason.
+    private final int mCompilationReason;
+
     public DexoptOptions(String packageName, String compilerFilter, int flags) {
-        this(packageName, compilerFilter, /*splitName*/ null, flags);
+        this(packageName, /*compilationReason*/ -1, compilerFilter, /*splitName*/ null, flags);
     }
 
-    public DexoptOptions(String packageName, int compilerReason, int flags) {
-        this(packageName, getCompilerFilterForReason(compilerReason), flags);
+    public DexoptOptions(String packageName, int compilationReason, int flags) {
+        this(packageName, compilationReason, getCompilerFilterForReason(compilationReason),
+                /*splitName*/ null, flags);
     }
 
-    public DexoptOptions(String packageName, String compilerFilter, String splitName, int flags) {
+    public DexoptOptions(String packageName, int compilationReason, String compilerFilter,
+                String splitName, int flags) {
         int validityMask =
                 DEXOPT_CHECK_FOR_PROFILES_UPDATES |
                 DEXOPT_FORCE |
@@ -95,7 +109,8 @@ public final class DexoptOptions {
                 DEXOPT_DOWNGRADE |
                 DEXOPT_AS_SHARED_LIBRARY |
                 DEXOPT_IDLE_BACKGROUND_JOB |
-                DEXOPT_INSTALL_WITH_DEX_METADATA_FILE;
+                DEXOPT_INSTALL_WITH_DEX_METADATA_FILE |
+                DEXOPT_FOR_RESTORE;
         if ((flags & (~validityMask)) != 0) {
             throw new IllegalArgumentException("Invalid flags : " + Integer.toHexString(flags));
         }
@@ -104,6 +119,7 @@ public final class DexoptOptions {
         mCompilerFilter = compilerFilter;
         mFlags = flags;
         mSplitName = splitName;
+        mCompilationReason = compilationReason;
     }
 
     public String getPackageName() {
@@ -150,11 +166,36 @@ public final class DexoptOptions {
         return (mFlags & DEXOPT_INSTALL_WITH_DEX_METADATA_FILE) != 0;
     }
 
+    public boolean isDexoptInstallForRestore() {
+        return (mFlags & DEXOPT_FOR_RESTORE) != 0;
+    }
+
     public String getSplitName() {
         return mSplitName;
     }
 
     public int getFlags() {
         return mFlags;
+    }
+
+    public int getCompilationReason() {
+        return mCompilationReason;
+    }
+
+    public boolean isCompilationEnabled() {
+        return !mCompilerFilter.equals(COMPILER_FILTER_NOOP);
+    }
+
+    /**
+     * Creates a new set of DexoptOptions which are the same with the exception of the compiler
+     * filter (set to the given value).
+     */
+    public DexoptOptions overrideCompilerFilter(String newCompilerFilter) {
+        return new DexoptOptions(
+                mPackageName,
+                mCompilationReason,
+                newCompilerFilter,
+                mSplitName,
+                mFlags);
     }
 }

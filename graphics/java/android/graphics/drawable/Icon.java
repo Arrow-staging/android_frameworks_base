@@ -16,23 +16,34 @@
 
 package android.graphics.drawable;
 
+import static android.content.Context.CONTEXT_INCLUDE_CODE;
+import static android.content.Context.CONTEXT_RESTRICTED;
+
 import android.annotation.ColorInt;
 import android.annotation.DrawableRes;
-import android.content.res.ColorStateList;
+import android.annotation.IntDef;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BlendMode;
 import android.graphics.PorterDuff;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.Process;
+import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -60,35 +71,69 @@ import java.util.Objects;
 public final class Icon implements Parcelable {
     private static final String TAG = "Icon";
 
-    /** @hide */
+    /**
+     * An icon that was created using {@link Icon#createWithBitmap(Bitmap)}.
+     * @see #getType
+     */
     public static final int TYPE_BITMAP   = 1;
-    /** @hide */
+    /**
+     * An icon that was created using {@link Icon#createWithResource}.
+     * @see #getType
+     */
     public static final int TYPE_RESOURCE = 2;
-    /** @hide */
+    /**
+     * An icon that was created using {@link Icon#createWithData(byte[], int, int)}.
+     * @see #getType
+     */
     public static final int TYPE_DATA     = 3;
-    /** @hide */
+    /**
+     * An icon that was created using {@link Icon#createWithContentUri}
+     * or {@link Icon#createWithFilePath(String)}.
+     * @see #getType
+     */
     public static final int TYPE_URI      = 4;
-    /** @hide */
+    /**
+     * An icon that was created using {@link Icon#createWithAdaptiveBitmap}.
+     * @see #getType
+     */
     public static final int TYPE_ADAPTIVE_BITMAP = 5;
+    /**
+     * An icon that was created using {@link Icon#createWithAdaptiveBitmapContentUri}.
+     * @see #getType
+     */
+    public static final int TYPE_URI_ADAPTIVE_BITMAP = 6;
+
+    /**
+     * @hide
+     */
+    @IntDef({TYPE_BITMAP, TYPE_RESOURCE, TYPE_DATA, TYPE_URI, TYPE_ADAPTIVE_BITMAP,
+            TYPE_URI_ADAPTIVE_BITMAP})
+    public @interface IconType {
+    }
 
     private static final int VERSION_STREAM_SERIALIZER = 1;
 
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private final int mType;
 
     private ColorStateList mTintList;
-    static final PorterDuff.Mode DEFAULT_TINT_MODE = Drawable.DEFAULT_TINT_MODE; // SRC_IN
-    private PorterDuff.Mode mTintMode = DEFAULT_TINT_MODE;
+    static final BlendMode DEFAULT_BLEND_MODE = Drawable.DEFAULT_BLEND_MODE; // SRC_IN
+    private BlendMode mBlendMode = Drawable.DEFAULT_BLEND_MODE;
 
     // To avoid adding unnecessary overhead, we have a few basic objects that get repurposed
     // based on the value of mType.
 
     // TYPE_BITMAP: Bitmap
+    // TYPE_ADAPTIVE_BITMAP: Bitmap
     // TYPE_RESOURCE: Resources
     // TYPE_DATA: DataBytes
     private Object          mObj1;
+    private boolean mCachedAshmem = false;
 
     // TYPE_RESOURCE: package name
     // TYPE_URI: uri string
+    // TYPE_URI_ADAPTIVE_BITMAP: uri string
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private String          mString1;
 
     // TYPE_RESOURCE: resId
@@ -99,22 +144,24 @@ public final class Icon implements Parcelable {
     private int             mInt2;
 
     /**
-     * @return The type of image data held in this Icon. One of
-     * {@link #TYPE_BITMAP},
-     * {@link #TYPE_RESOURCE},
-     * {@link #TYPE_DATA}, or
-     * {@link #TYPE_URI}.
-     * {@link #TYPE_ADAPTIVE_BITMAP}
-     * @hide
+     * Gets the type of the icon provided.
+     * <p>
+     * Note that new types may be added later, so callers should guard against other
+     * types being returned.
      */
+    @IconType
     public int getType() {
         return mType;
     }
 
     /**
-     * @return The {@link android.graphics.Bitmap} held by this {@link #TYPE_BITMAP} Icon.
+     * @return The {@link android.graphics.Bitmap} held by this {@link #TYPE_BITMAP} or
+     * {@link #TYPE_ADAPTIVE_BITMAP} Icon.
+     *
+     * Note that this will always return an immutable Bitmap.
      * @hide
      */
+    @UnsupportedAppUsage
     public Bitmap getBitmap() {
         if (mType != TYPE_BITMAP && mType != TYPE_ADAPTIVE_BITMAP) {
             throw new IllegalStateException("called getBitmap() on " + this);
@@ -122,14 +169,27 @@ public final class Icon implements Parcelable {
         return (Bitmap) mObj1;
     }
 
+    /**
+     * Sets the Icon's contents to a particular Bitmap. Note that this may make a copy of the Bitmap
+     * if the supplied Bitmap is mutable. In that case, the value returned by getBitmap() may not
+     * equal the Bitmap passed to setBitmap().
+     *
+     * @hide
+     */
     private void setBitmap(Bitmap b) {
-        mObj1 = b;
+        if (b.isMutable()) {
+            mObj1 = b.copy(b.getConfig(), false);
+        } else {
+            mObj1 = b;
+        }
+        mCachedAshmem = false;
     }
 
     /**
      * @return The length of the compressed bitmap byte array held by this {@link #TYPE_DATA} Icon.
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int getDataLength() {
         if (mType != TYPE_DATA) {
             throw new IllegalStateException("called getDataLength() on " + this);
@@ -144,6 +204,7 @@ public final class Icon implements Parcelable {
      * valid compressed bitmap data is found.
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     public int getDataOffset() {
         if (mType != TYPE_DATA) {
             throw new IllegalStateException("called getDataOffset() on " + this);
@@ -158,6 +219,7 @@ public final class Icon implements Parcelable {
      * bitmap data.
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     public byte[] getDataBytes() {
         if (mType != TYPE_DATA) {
             throw new IllegalStateException("called getDataBytes() on " + this);
@@ -171,6 +233,7 @@ public final class Icon implements Parcelable {
      * @return The {@link android.content.res.Resources} for this {@link #TYPE_RESOURCE} Icon.
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     public Resources getResources() {
         if (mType != TYPE_RESOURCE) {
             throw new IllegalStateException("called getResources() on " + this);
@@ -179,9 +242,13 @@ public final class Icon implements Parcelable {
     }
 
     /**
-     * @return The package containing resources for this {@link #TYPE_RESOURCE} Icon.
-     * @hide
+     * Gets the package used to create this icon.
+     * <p>
+     * Only valid for icons of type {@link #TYPE_RESOURCE}.
+     * Note: This package may not be available if referenced in the future, and it is
+     * up to the caller to ensure safety if this package is re-used and/or persisted.
      */
+    @NonNull
     public String getResPackage() {
         if (mType != TYPE_RESOURCE) {
             throw new IllegalStateException("called getResPackage() on " + this);
@@ -190,9 +257,13 @@ public final class Icon implements Parcelable {
     }
 
     /**
-     * @return The resource ID for this {@link #TYPE_RESOURCE} Icon.
-     * @hide
+     * Gets the resource used to create this icon.
+     * <p>
+     * Only valid for icons of type {@link #TYPE_RESOURCE}.
+     * Note: This resource may not be available if the application changes at all, and it is
+     * up to the caller to ensure safety if this resource is re-used and/or persisted.
      */
+    @DrawableRes
     public int getResId() {
         if (mType != TYPE_RESOURCE) {
             throw new IllegalStateException("called getResId() on " + this);
@@ -201,20 +272,25 @@ public final class Icon implements Parcelable {
     }
 
     /**
-     * @return The URI (as a String) for this {@link #TYPE_URI} Icon.
+     * @return The URI (as a String) for this {@link #TYPE_URI} or {@link #TYPE_URI_ADAPTIVE_BITMAP}
+     * Icon.
      * @hide
      */
     public String getUriString() {
-        if (mType != TYPE_URI) {
+        if (mType != TYPE_URI && mType != TYPE_URI_ADAPTIVE_BITMAP) {
             throw new IllegalStateException("called getUriString() on " + this);
         }
         return mString1;
     }
 
     /**
-     * @return The {@link android.net.Uri} for this {@link #TYPE_URI} Icon.
-     * @hide
+     * Gets the uri used to create this icon.
+     * <p>
+     * Only valid for icons of type {@link #TYPE_URI} and {@link #TYPE_URI_ADAPTIVE_BITMAP}.
+     * Note: This uri may not be available in the future, and it is
+     * up to the caller to ensure safety if this uri is re-used and/or persisted.
      */
+    @NonNull
     public Uri getUri() {
         return Uri.parse(getUriString());
     }
@@ -226,6 +302,7 @@ public final class Icon implements Parcelable {
             case TYPE_DATA: return "DATA";
             case TYPE_RESOURCE: return "RESOURCE";
             case TYPE_URI: return "URI";
+            case TYPE_URI_ADAPTIVE_BITMAP: return "URI_MASKABLE";
             default: return "UNKNOWN";
         }
     }
@@ -240,7 +317,7 @@ public final class Icon implements Parcelable {
      *                is available. The {@link android.os.Message#obj obj}
      *                property is populated with the Drawable.
      */
-    public void loadDrawableAsync(Context context, Message andThen) {
+    public void loadDrawableAsync(@NonNull Context context, @NonNull Message andThen) {
         if (andThen.getTarget() == null) {
             throw new IllegalArgumentException("callback message must have a target handler");
         }
@@ -258,7 +335,7 @@ public final class Icon implements Parcelable {
      *                 {@link #loadDrawable(Context)} finished
      * @param handler {@link Handler} on which to notify the {@code listener}
      */
-    public void loadDrawableAsync(Context context, final OnDrawableLoadedListener listener,
+    public void loadDrawableAsync(@NonNull Context context, final OnDrawableLoadedListener listener,
             Handler handler) {
         new LoadDrawableTask(context, handler, listener).runAsync();
     }
@@ -273,12 +350,12 @@ public final class Icon implements Parcelable {
      *                to access {@link android.content.res.Resources Resources}, for example.
      * @return A fresh instance of a drawable for this image, yours to keep.
      */
-    public Drawable loadDrawable(Context context) {
+    public @Nullable Drawable loadDrawable(Context context) {
         final Drawable result = loadDrawableInner(context);
-        if (result != null && (mTintList != null || mTintMode != DEFAULT_TINT_MODE)) {
+        if (result != null && hasTint()) {
             result.mutate();
             result.setTintList(mTintList);
-            result.setTintMode(mTintMode);
+            result.setTintBlendMode(mBlendMode);
         }
         return result;
     }
@@ -307,7 +384,9 @@ public final class Icon implements Parcelable {
                         final PackageManager pm = context.getPackageManager();
                         try {
                             ApplicationInfo ai = pm.getApplicationInfo(
-                                    resPackage, PackageManager.MATCH_UNINSTALLED_PACKAGES);
+                                    resPackage,
+                                    PackageManager.MATCH_UNINSTALLED_PACKAGES
+                                    | PackageManager.GET_SHARED_LIBRARY_FILES);
                             if (ai != null) {
                                 mObj1 = pm.getResourcesForApplication(ai);
                             } else {
@@ -334,28 +413,39 @@ public final class Icon implements Parcelable {
                     BitmapFactory.decodeByteArray(getDataBytes(), getDataOffset(), getDataLength())
                 );
             case TYPE_URI:
-                final Uri uri = getUri();
-                final String scheme = uri.getScheme();
-                InputStream is = null;
-                if (ContentResolver.SCHEME_CONTENT.equals(scheme)
-                        || ContentResolver.SCHEME_FILE.equals(scheme)) {
-                    try {
-                        is = context.getContentResolver().openInputStream(uri);
-                    } catch (Exception e) {
-                        Log.w(TAG, "Unable to load image from URI: " + uri, e);
-                    }
-                } else {
-                    try {
-                        is = new FileInputStream(new File(mString1));
-                    } catch (FileNotFoundException e) {
-                        Log.w(TAG, "Unable to load image from path: " + uri, e);
-                    }
-                }
+                InputStream is = getUriInputStream(context);
                 if (is != null) {
                     return new BitmapDrawable(context.getResources(),
                             BitmapFactory.decodeStream(is));
                 }
                 break;
+            case TYPE_URI_ADAPTIVE_BITMAP:
+                is = getUriInputStream(context);
+                if (is != null) {
+                    return new AdaptiveIconDrawable(null, new BitmapDrawable(context.getResources(),
+                            BitmapFactory.decodeStream(is)));
+                }
+                break;
+        }
+        return null;
+    }
+
+    private @Nullable InputStream getUriInputStream(Context context) {
+        final Uri uri = getUri();
+        final String scheme = uri.getScheme();
+        if (ContentResolver.SCHEME_CONTENT.equals(scheme)
+                || ContentResolver.SCHEME_FILE.equals(scheme)) {
+            try {
+                return context.getContentResolver().openInputStream(uri);
+            } catch (Exception e) {
+                Log.w(TAG, "Unable to load image from URI: " + uri, e);
+            }
+        } else {
+            try {
+                return new FileInputStream(new File(mString1));
+            } catch (FileNotFoundException e) {
+                Log.w(TAG, "Unable to load image from path: " + uri, e);
+            }
         }
         return null;
     }
@@ -373,10 +463,22 @@ public final class Icon implements Parcelable {
                 resPackage = context.getPackageName();
             }
             if (getResources() == null && !(getResPackage().equals("android"))) {
-                final PackageManager pm = context.getPackageManager();
+                // TODO(b/173307037): Move CONTEXT_INCLUDE_CODE to ContextImpl.createContextAsUser
+                final Context userContext;
+                if (context.getUserId() == userId) {
+                    userContext = context;
+                } else {
+                    final boolean sameAppWithProcess =
+                            UserHandle.isSameApp(context.getApplicationInfo().uid, Process.myUid());
+                    final int flags = (sameAppWithProcess ? CONTEXT_INCLUDE_CODE : 0)
+                            | CONTEXT_RESTRICTED;
+                    userContext = context.createContextAsUser(UserHandle.of(userId), flags);
+                }
+
+                final PackageManager pm = userContext.getPackageManager();
                 try {
                     // assign getResources() as the correct user
-                    mObj1 = pm.getResourcesForApplicationAsUser(resPackage, userId);
+                    mObj1 = pm.getResourcesForApplication(resPackage);
                 } catch (PackageManager.NameNotFoundException e) {
                     Log.e(TAG, String.format("Unable to find pkg=%s user=%d",
                                     getResPackage(),
@@ -399,8 +501,9 @@ public final class Icon implements Parcelable {
         if ((mType == TYPE_BITMAP || mType == TYPE_ADAPTIVE_BITMAP) &&
             getBitmap().isMutable() &&
             getBitmap().getAllocationByteCount() >= MIN_ASHMEM_ICON_SIZE) {
-            setBitmap(getBitmap().createAshmemBitmap());
+            setBitmap(getBitmap().asShared());
         }
+        mCachedAshmem = true;
     }
 
     /**
@@ -409,7 +512,7 @@ public final class Icon implements Parcelable {
      * @param stream The stream on which to serialize the Icon.
      * @hide
      */
-    public void writeToStream(OutputStream stream) throws IOException {
+    public void writeToStream(@NonNull OutputStream stream) throws IOException {
         DataOutputStream dataStream = new DataOutputStream(stream);
 
         dataStream.writeInt(VERSION_STREAM_SERIALIZER);
@@ -429,6 +532,7 @@ public final class Icon implements Parcelable {
                 dataStream.writeInt(getResId());
                 break;
             case TYPE_URI:
+            case TYPE_URI_ADAPTIVE_BITMAP:
                 dataStream.writeUTF(getUriString());
                 break;
         }
@@ -444,7 +548,7 @@ public final class Icon implements Parcelable {
      * @param stream The input stream from which to reconstruct the Icon.
      * @hide
      */
-    public static Icon createFromStream(InputStream stream) throws IOException {
+    public static @Nullable Icon createFromStream(@NonNull InputStream stream) throws IOException {
         DataInputStream inputStream = new DataInputStream(stream);
 
         final int version = inputStream.readInt();
@@ -467,6 +571,9 @@ public final class Icon implements Parcelable {
                 case TYPE_URI:
                     final String uriOrPath = inputStream.readUTF();
                     return createWithContentUri(uriOrPath);
+                case TYPE_URI_ADAPTIVE_BITMAP:
+                    final String uri = inputStream.readUTF();
+                    return createWithAdaptiveBitmapContentUri(uri);
             }
         }
         return null;
@@ -480,7 +587,7 @@ public final class Icon implements Parcelable {
      * @return whether this icon is the same as the another one
      * @hide
      */
-    public boolean sameAs(Icon otherIcon) {
+    public boolean sameAs(@NonNull Icon otherIcon) {
         if (otherIcon == this) {
             return true;
         }
@@ -499,6 +606,7 @@ public final class Icon implements Parcelable {
                 return getResId() == otherIcon.getResId()
                         && Objects.equals(getResPackage(), otherIcon.getResPackage());
             case TYPE_URI:
+            case TYPE_URI_ADAPTIVE_BITMAP:
                 return Objects.equals(getUriString(), otherIcon.getUriString());
         }
         return false;
@@ -510,7 +618,7 @@ public final class Icon implements Parcelable {
      *                given resource ID.
      * @param resId ID of the drawable resource
      */
-    public static Icon createWithResource(Context context, @DrawableRes int resId) {
+    public static @NonNull Icon createWithResource(Context context, @DrawableRes int resId) {
         if (context == null) {
             throw new IllegalArgumentException("Context must not be null.");
         }
@@ -524,7 +632,8 @@ public final class Icon implements Parcelable {
      * Version of createWithResource that takes Resources. Do not use.
      * @hide
      */
-    public static Icon createWithResource(Resources res, @DrawableRes int resId) {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public static @NonNull Icon createWithResource(Resources res, @DrawableRes int resId) {
         if (res == null) {
             throw new IllegalArgumentException("Resource must not be null.");
         }
@@ -539,7 +648,7 @@ public final class Icon implements Parcelable {
      * @param resPackage Name of the package containing the resource in question
      * @param resId ID of the drawable resource
      */
-    public static Icon createWithResource(String resPackage, @DrawableRes int resId) {
+    public static @NonNull Icon createWithResource(String resPackage, @DrawableRes int resId) {
         if (resPackage == null) {
             throw new IllegalArgumentException("Resource package name must not be null.");
         }
@@ -553,7 +662,7 @@ public final class Icon implements Parcelable {
      * Create an Icon pointing to a bitmap in memory.
      * @param bits A valid {@link android.graphics.Bitmap} object
      */
-    public static Icon createWithBitmap(Bitmap bits) {
+    public static @NonNull Icon createWithBitmap(Bitmap bits) {
         if (bits == null) {
             throw new IllegalArgumentException("Bitmap must not be null.");
         }
@@ -567,7 +676,7 @@ public final class Icon implements Parcelable {
      * by {@link AdaptiveIconDrawable}.
      * @param bits A valid {@link android.graphics.Bitmap} object
      */
-    public static Icon createWithAdaptiveBitmap(Bitmap bits) {
+    public static @NonNull Icon createWithAdaptiveBitmap(Bitmap bits) {
         if (bits == null) {
             throw new IllegalArgumentException("Bitmap must not be null.");
         }
@@ -584,7 +693,7 @@ public final class Icon implements Parcelable {
      * @param offset Offset into <code>data</code> at which the bitmap data starts
      * @param length Length of the bitmap data
      */
-    public static Icon createWithData(byte[] data, int offset, int length) {
+    public static @NonNull Icon createWithData(byte[] data, int offset, int length) {
         if (data == null) {
             throw new IllegalArgumentException("Data must not be null.");
         }
@@ -600,7 +709,7 @@ public final class Icon implements Parcelable {
      *
      * @param uri A uri referring to local content:// or file:// image data.
      */
-    public static Icon createWithContentUri(String uri) {
+    public static @NonNull Icon createWithContentUri(String uri) {
         if (uri == null) {
             throw new IllegalArgumentException("Uri must not be null.");
         }
@@ -614,13 +723,40 @@ public final class Icon implements Parcelable {
      *
      * @param uri A uri referring to local content:// or file:// image data.
      */
-    public static Icon createWithContentUri(Uri uri) {
+    public static @NonNull Icon createWithContentUri(Uri uri) {
         if (uri == null) {
             throw new IllegalArgumentException("Uri must not be null.");
         }
-        final Icon rep = new Icon(TYPE_URI);
-        rep.mString1 = uri.toString();
+        return createWithContentUri(uri.toString());
+    }
+
+    /**
+     * Create an Icon pointing to an image file specified by URI. Image file should follow the icon
+     * design guideline defined by {@link AdaptiveIconDrawable}.
+     *
+     * @param uri A uri referring to local content:// or file:// image data.
+     */
+    public static @NonNull Icon createWithAdaptiveBitmapContentUri(@NonNull String uri) {
+        if (uri == null) {
+            throw new IllegalArgumentException("Uri must not be null.");
+        }
+        final Icon rep = new Icon(TYPE_URI_ADAPTIVE_BITMAP);
+        rep.mString1 = uri;
         return rep;
+    }
+
+    /**
+     * Create an Icon pointing to an image file specified by URI. Image file should follow the icon
+     * design guideline defined by {@link AdaptiveIconDrawable}.
+     *
+     * @param uri A uri referring to local content:// or file:// image data.
+     */
+    @NonNull
+    public static Icon createWithAdaptiveBitmapContentUri(@NonNull Uri uri) {
+        if (uri == null) {
+            throw new IllegalArgumentException("Uri must not be null.");
+        }
+        return createWithAdaptiveBitmapContentUri(uri.toString());
     }
 
     /**
@@ -629,7 +765,7 @@ public final class Icon implements Parcelable {
      * @param tint a color, as in {@link Drawable#setTint(int)}
      * @return this same object, for use in chained construction
      */
-    public Icon setTint(@ColorInt int tint) {
+    public @NonNull Icon setTint(@ColorInt int tint) {
         return setTintList(ColorStateList.valueOf(tint));
     }
 
@@ -639,8 +775,24 @@ public final class Icon implements Parcelable {
      * @param tintList as in {@link Drawable#setTintList(ColorStateList)}, null to remove tint
      * @return this same object, for use in chained construction
      */
-    public Icon setTintList(ColorStateList tintList) {
+    public @NonNull Icon setTintList(ColorStateList tintList) {
         mTintList = tintList;
+        return this;
+    }
+
+    /** @hide */
+    public @Nullable ColorStateList getTintList() {
+        return mTintList;
+    }
+
+    /**
+     * Store a blending mode to use whenever this Icon is drawn.
+     *
+     * @param mode a blending mode, as in {@link Drawable#setTintMode(PorterDuff.Mode)}, may be null
+     * @return this same object, for use in chained construction
+     */
+    public @NonNull Icon setTintMode(@NonNull PorterDuff.Mode mode) {
+        mBlendMode = BlendMode.fromValue(mode.nativeInt);
         return this;
     }
 
@@ -650,14 +802,20 @@ public final class Icon implements Parcelable {
      * @param mode a blending mode, as in {@link Drawable#setTintMode(PorterDuff.Mode)}, may be null
      * @return this same object, for use in chained construction
      */
-    public Icon setTintMode(PorterDuff.Mode mode) {
-        mTintMode = mode;
+    public @NonNull Icon setTintBlendMode(@NonNull BlendMode mode) {
+        mBlendMode = mode;
         return this;
     }
 
     /** @hide */
+    public @NonNull BlendMode getTintBlendMode() {
+        return mBlendMode;
+    }
+
+    /** @hide */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public boolean hasTint() {
-        return (mTintList != null) || (mTintMode != DEFAULT_TINT_MODE);
+        return (mTintList != null) || (mBlendMode != DEFAULT_BLEND_MODE);
     }
 
     /**
@@ -666,7 +824,7 @@ public final class Icon implements Parcelable {
      * @param path A path to a file that contains compressed bitmap data of
      *           a type that {@link android.graphics.BitmapFactory} can decode.
      */
-    public static Icon createWithFilePath(String path) {
+    public static @NonNull Icon createWithFilePath(String path) {
         if (path == null) {
             throw new IllegalArgumentException("Path must not be null.");
         }
@@ -699,6 +857,7 @@ public final class Icon implements Parcelable {
                 }
                 break;
             case TYPE_URI:
+            case TYPE_URI_ADAPTIVE_BITMAP:
                 sb.append(" uri=").append(getUriString());
                 break;
         }
@@ -710,7 +869,7 @@ public final class Icon implements Parcelable {
                 sep = "|";
             }
         }
-        if (mTintMode != DEFAULT_TINT_MODE) sb.append(" mode=").append(mTintMode);
+        if (mBlendMode != DEFAULT_BLEND_MODE) sb.append(" mode=").append(mBlendMode);
         sb.append(")");
         return sb.toString();
     }
@@ -750,6 +909,7 @@ public final class Icon implements Parcelable {
                 mObj1 = a;
                 break;
             case TYPE_URI:
+            case TYPE_URI_ADAPTIVE_BITMAP:
                 final String uri = in.readString();
                 mString1 = uri;
                 break;
@@ -760,7 +920,7 @@ public final class Icon implements Parcelable {
         if (in.readInt() == 1) {
             mTintList = ColorStateList.CREATOR.createFromParcel(in);
         }
-        mTintMode = PorterDuff.intToMode(in.readInt());
+        mBlendMode = BlendMode.fromValue(in.readInt());
     }
 
     @Override
@@ -769,7 +929,10 @@ public final class Icon implements Parcelable {
         switch (mType) {
             case TYPE_BITMAP:
             case TYPE_ADAPTIVE_BITMAP:
-                final Bitmap bits = getBitmap();
+                if (!mCachedAshmem) {
+                    mObj1 = ((Bitmap) mObj1).asShared();
+                    mCachedAshmem = true;
+                }
                 getBitmap().writeToParcel(dest, flags);
                 break;
             case TYPE_RESOURCE:
@@ -781,6 +944,7 @@ public final class Icon implements Parcelable {
                 dest.writeBlob(getDataBytes(), getDataOffset(), getDataLength());
                 break;
             case TYPE_URI:
+            case TYPE_URI_ADAPTIVE_BITMAP:
                 dest.writeString(getUriString());
                 break;
         }
@@ -790,10 +954,10 @@ public final class Icon implements Parcelable {
             dest.writeInt(1);
             mTintList.writeToParcel(dest, flags);
         }
-        dest.writeInt(PorterDuff.modeToInt(mTintMode));
+        dest.writeInt(BlendMode.toValue(mBlendMode));
     }
 
-    public static final Parcelable.Creator<Icon> CREATOR
+    public static final @android.annotation.NonNull Parcelable.Creator<Icon> CREATOR
             = new Parcelable.Creator<Icon>() {
         public Icon createFromParcel(Parcel in) {
             return new Icon(in);

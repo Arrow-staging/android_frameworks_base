@@ -13,6 +13,7 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
+
 package com.android.internal.os;
 
 import static android.os.BatteryStats.STATS_SINCE_CHARGED;
@@ -20,9 +21,10 @@ import static android.os.BatteryStats.STATS_SINCE_CHARGED;
 import android.app.ActivityManager;
 import android.os.BatteryStats;
 import android.os.WorkSource;
-import android.support.test.filters.SmallTest;
 import android.util.ArrayMap;
 import android.view.Display;
+
+import androidx.test.filters.SmallTest;
 
 import junit.framework.TestCase;
 
@@ -36,7 +38,7 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
     /** Test that BatteryStatsImpl.Uid.mOnBatteryBackgroundTimeBase works correctly. */
     @SmallTest
     public void testBgTimeBase() throws Exception {
-        final MockClocks clocks = new MockClocks(); // holds realtime and uptime in ms
+        final MockClock clocks = new MockClock(); // holds realtime and uptime in ms
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         long cur = 0; // realtime in us
 
@@ -104,7 +106,7 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
     /** Test that BatteryStatsImpl.Uid.mOnBatteryScreenOffBackgroundTimeBase works correctly. */
     @SmallTest
     public void testScreenOffBgTimeBase() throws Exception {
-        final MockClocks clocks = new MockClocks(); // holds realtime and uptime in ms
+        final MockClock clocks = new MockClock(); // holds realtime and uptime in ms
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         long cur = 0; // realtime in us
 
@@ -152,7 +154,7 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
 
     @SmallTest
     public void testWifiScan() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         long curr = 0; // realtime in us
 
@@ -205,7 +207,7 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
     }
 
     private void doTestAppBluetoothScanInternal(WorkSource ws) throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         long curr = 0; // realtime in us
 
@@ -273,55 +275,8 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
     }
 
     @SmallTest
-    public void testAppBluetoothScan_workChainAccounting() throws Exception {
-        final MockClocks clocks = new MockClocks();MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
-        long curr = 0; // realtime in us
-
-        // On battery
-        curr = 1000 * (clocks.realtime = clocks.uptime = 100);
-        bi.updateTimeBasesLocked(true, Display.STATE_ON, curr, curr); // on battery
-
-        // App in foreground
-        bi.noteUidProcessStateLocked(UID, ActivityManager.PROCESS_STATE_IMPORTANT_FOREGROUND);
-
-        WorkSource ws = new WorkSource();
-        ws.createWorkChain().addNode(500, "foo");
-        ws.createWorkChain().addNode(500, "bar");
-
-        // Test start / stop and reset with isUnoptimized == false.
-        bi.noteBluetoothScanStartedFromSourceLocked(ws, false);
-        BatteryStatsImpl.Uid stats = (BatteryStatsImpl.Uid) bi.getUidStats().get(500);
-        assertEquals(ws.getWorkChains(), stats.getAllBluetoothWorkChains());
-        assertNull(stats.getUnoptimizedBluetoothWorkChains());
-
-        bi.noteBluetoothScanStoppedFromSourceLocked(ws, false);
-        assertTrue(stats.getAllBluetoothWorkChains().isEmpty());
-        assertNull(stats.getUnoptimizedBluetoothWorkChains());
-
-        bi.noteBluetoothScanStartedFromSourceLocked(ws, false);
-        bi.noteResetBluetoothScanLocked();
-        assertTrue(stats.getAllBluetoothWorkChains().isEmpty());
-        assertNull(stats.getUnoptimizedBluetoothWorkChains());
-
-        // Test start / stop  and reset with isUnoptimized == true.
-        bi.noteBluetoothScanStartedFromSourceLocked(ws, true);
-        stats = (BatteryStatsImpl.Uid) bi.getUidStats().get(500);
-        assertEquals(ws.getWorkChains(), stats.getAllBluetoothWorkChains());
-        assertEquals(ws.getWorkChains(), stats.getUnoptimizedBluetoothWorkChains());
-
-        bi.noteBluetoothScanStoppedFromSourceLocked(ws, true);
-        assertTrue(stats.getAllBluetoothWorkChains().isEmpty());
-        assertTrue(stats.getUnoptimizedBluetoothWorkChains().isEmpty());
-
-        bi.noteBluetoothScanStartedFromSourceLocked(ws, true);
-        bi.noteResetBluetoothScanLocked();
-        assertTrue(stats.getAllBluetoothWorkChains().isEmpty());
-        assertTrue(stats.getUnoptimizedBluetoothWorkChains().isEmpty());
-    }
-
-    @SmallTest
     public void testJob() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         final String jobName = "job_name";
         long curr = 0; // realtime in us
@@ -382,7 +337,7 @@ public class BatteryStatsBackgroundStatsTest extends TestCase {
 
     @SmallTest
     public void testSyncs() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         MockBatteryStatsImpl bi = new MockBatteryStatsImpl(clocks);
         final String syncName = "sync_name";
         long curr = 0; // realtime in us

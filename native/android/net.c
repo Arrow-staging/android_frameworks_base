@@ -22,12 +22,13 @@
 #include <stdlib.h>
 #include <sys/limits.h>
 
+// This value MUST be kept in sync with the corresponding value in
+// the android.net.Network#getNetworkHandle() implementation.
+static const uint32_t kHandleMagic = 0xcafed00d;
+static const uint32_t kHandleMagicSize = 32;
 
 static int getnetidfromhandle(net_handle_t handle, unsigned *netid) {
     static const uint32_t k32BitMask = 0xffffffff;
-    // This value MUST be kept in sync with the corresponding value in
-    // the android.net.Network#getNetworkHandle() implementation.
-    static const uint32_t kHandleMagic = 0xcafed00d;
 
     // Check for minimum acceptable version of the API in the low bits.
     if (handle != NETWORK_UNSPECIFIED &&
@@ -41,6 +42,12 @@ static int getnetidfromhandle(net_handle_t handle, unsigned *netid) {
     return 1;
 }
 
+static net_handle_t gethandlefromnetid(unsigned netid) {
+    if (netid == NETID_UNSET) {
+        return NETWORK_UNSPECIFIED;
+    }
+    return (((net_handle_t) netid) << kHandleMagicSize) | kHandleMagic;
+}
 
 int android_setsocknetwork(net_handle_t network, int fd) {
     unsigned netid;
@@ -72,6 +79,49 @@ int android_setprocnetwork(net_handle_t network) {
     return rval;
 }
 
+int android_getprocnetwork(net_handle_t *network) {
+    if (network == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    unsigned netid = getNetworkForProcess();
+    *network = gethandlefromnetid(netid);
+    return 0;
+}
+
+int android_setprocdns(net_handle_t network) {
+    unsigned netid;
+    if (!getnetidfromhandle(network, &netid)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int rval = setNetworkForResolv(netid);
+    if (rval < 0) {
+        errno = -rval;
+        rval = -1;
+    }
+    return rval;
+}
+
+int android_getprocdns(net_handle_t *network) {
+    if (network == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    unsigned netid;
+    int rval = getNetworkForDns(&netid);
+    if (rval < 0) {
+        errno = -rval;
+        return -1;
+    }
+
+    *network = gethandlefromnetid(netid);
+    return 0;
+}
+
 int android_getaddrinfofornetwork(net_handle_t network,
         const char *node, const char *service,
         const struct addrinfo *hints, struct addrinfo **res) {
@@ -82,4 +132,44 @@ int android_getaddrinfofornetwork(net_handle_t network,
     }
 
     return android_getaddrinfofornet(node, service, hints, netid, 0, res);
+}
+
+int android_res_nquery(net_handle_t network, const char *dname,
+        int ns_class, int ns_type, enum ResNsendFlags flags) {
+    unsigned netid;
+    if (!getnetidfromhandle(network, &netid)) {
+        return -ENONET;
+    }
+
+    return resNetworkQuery(netid, dname, ns_class, ns_type, flags);
+}
+
+int android_res_nresult(int fd, int *rcode, uint8_t *answer, size_t anslen) {
+    return resNetworkResult(fd, rcode, answer, anslen);
+}
+
+int android_res_nsend(net_handle_t network, const uint8_t *msg, size_t msglen,
+        enum ResNsendFlags flags) {
+    unsigned netid;
+    if (!getnetidfromhandle(network, &netid)) {
+        return -ENONET;
+    }
+
+    return resNetworkSend(netid, msg, msglen, flags);
+}
+
+void android_res_cancel(int nsend_fd) {
+    resNetworkCancel(nsend_fd);
+}
+
+int android_tag_socket_with_uid(int sockfd, uint32_t tag, uid_t uid) {
+    return tagSocket(sockfd, tag, uid);
+}
+
+int android_tag_socket(int sockfd, uint32_t tag) {
+    return tagSocket(sockfd, tag, -1);
+}
+
+int android_untag_socket(int sockfd) {
+    return untagSocket(sockfd);
 }

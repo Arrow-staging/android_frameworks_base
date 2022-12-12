@@ -29,25 +29,21 @@ public final class PhoneStatusBarTransitions extends BarTransitions {
     private static final float ICON_ALPHA_WHEN_LIGHTS_OUT_BATTERY_CLOCK = 0.5f;
     private static final float ICON_ALPHA_WHEN_LIGHTS_OUT_NON_BATTERY_CLOCK = 0;
 
-    private final PhoneStatusBarView mView;
     private final float mIconAlphaWhenOpaque;
 
-    private View mLeftSide, mStatusIcons, mSignalCluster, mBattery, mClock;
+    private View mStartSide, mStatusIcons, mBattery;
     private Animator mCurrentAnimation;
 
-    public PhoneStatusBarTransitions(PhoneStatusBarView view) {
-        super(view, R.drawable.status_background);
-        mView = view;
-        final Resources res = mView.getContext().getResources();
+    /**
+     * @param backgroundView view to apply the background drawable
+     */
+    public PhoneStatusBarTransitions(PhoneStatusBarView statusBarView, View backgroundView) {
+        super(backgroundView, R.drawable.status_background);
+        final Resources res = statusBarView.getContext().getResources();
         mIconAlphaWhenOpaque = res.getFraction(R.dimen.status_bar_icon_drawing_alpha, 1, 1);
-    }
-
-    public void init() {
-        mLeftSide = mView.findViewById(R.id.notification_icon_area);
-        mStatusIcons = mView.findViewById(R.id.statusIcons);
-        mSignalCluster = mView.findViewById(R.id.signal_cluster);
-        mBattery = mView.findViewById(R.id.battery);
-        mClock = mView.findViewById(R.id.clock);
+        mStartSide = statusBarView.findViewById(R.id.status_bar_start_side_except_heads_up);
+        mStatusIcons = statusBarView.findViewById(R.id.statusIcons);
+        mBattery = statusBarView.findViewById(R.id.battery);
         applyModeBackground(-1, getMode(), false /*animate*/);
         applyMode(getMode(), false /*animate*/);
     }
@@ -79,7 +75,7 @@ public final class PhoneStatusBarTransitions extends BarTransitions {
     }
 
     private void applyMode(int mode, boolean animate) {
-        if (mLeftSide == null) return; // pre-init
+        if (mStartSide == null) return; // pre-init
         float newAlpha = getNonBatteryClockAlphaFor(mode);
         float newAlphaBC = getBatteryClockAlpha(mode);
         if (mCurrentAnimation != null) {
@@ -88,11 +84,9 @@ public final class PhoneStatusBarTransitions extends BarTransitions {
         if (animate) {
             AnimatorSet anims = new AnimatorSet();
             anims.playTogether(
-                    animateTransitionTo(mLeftSide, newAlpha),
+                    animateTransitionTo(mStartSide, newAlpha),
                     animateTransitionTo(mStatusIcons, newAlpha),
-                    animateTransitionTo(mSignalCluster, newAlpha),
-                    animateTransitionTo(mBattery, newAlphaBC),
-                    animateTransitionTo(mClock, newAlphaBC)
+                    animateTransitionTo(mBattery, newAlphaBC)
                     );
             if (isLightsOut(mode)) {
                 anims.setDuration(LIGHTS_OUT_DURATION);
@@ -100,11 +94,9 @@ public final class PhoneStatusBarTransitions extends BarTransitions {
             anims.start();
             mCurrentAnimation = anims;
         } else {
-            mLeftSide.setAlpha(newAlpha);
+            mStartSide.setAlpha(newAlpha);
             mStatusIcons.setAlpha(newAlpha);
-            mSignalCluster.setAlpha(newAlpha);
             mBattery.setAlpha(newAlphaBC);
-            mClock.setAlpha(newAlphaBC);
         }
     }
 }

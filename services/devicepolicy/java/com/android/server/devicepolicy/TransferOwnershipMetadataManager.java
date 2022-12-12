@@ -24,21 +24,21 @@ import android.os.Environment;
 import android.text.TextUtils;
 import android.util.AtomicFile;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.Preconditions;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 
 /**
  * Handles reading and writing of the owner transfer metadata file.
@@ -54,10 +54,14 @@ import java.nio.charset.StandardCharsets;
 class TransferOwnershipMetadataManager {
     final static String ADMIN_TYPE_DEVICE_OWNER = "device-owner";
     final static String ADMIN_TYPE_PROFILE_OWNER = "profile-owner";
-    private final static String TAG_USER_ID = "user-id";
-    private final static String TAG_SOURCE_COMPONENT = "source-component";
-    private final static String TAG_TARGET_COMPONENT = "target-component";
-    private final static String TAG_ADMIN_TYPE = "admin-type";
+    @VisibleForTesting
+    final static String TAG_USER_ID = "user-id";
+    @VisibleForTesting
+    final static String TAG_SOURCE_COMPONENT = "source-component";
+    @VisibleForTesting
+    final static String TAG_TARGET_COMPONENT = "target-component";
+    @VisibleForTesting
+    final static String TAG_ADMIN_TYPE = "admin-type";
     private final static String TAG = TransferOwnershipMetadataManager.class.getName();
     public static final String OWNER_TRANSFER_METADATA_XML = "owner-transfer-metadata.xml";
 
@@ -79,8 +83,7 @@ class TransferOwnershipMetadataManager {
         FileOutputStream stream = null;
         try {
             stream = atomicFile.startWrite();
-            final XmlSerializer serializer = new FastXmlSerializer();
-            serializer.setOutput(stream, StandardCharsets.UTF_8.name());
+            final TypedXmlSerializer serializer = Xml.resolveSerializer(stream);
             serializer.startDocument(null, true);
             insertSimpleTag(serializer, TAG_USER_ID, Integer.toString(params.userId));
             insertSimpleTag(serializer,
@@ -100,7 +103,7 @@ class TransferOwnershipMetadataManager {
         return false;
     }
 
-    private void insertSimpleTag(XmlSerializer serializer, String tagName, String value)
+    private void insertSimpleTag(TypedXmlSerializer serializer, String tagName, String value)
             throws IOException {
         serializer.startTag(null, tagName);
         serializer.text(value);
@@ -117,8 +120,7 @@ class TransferOwnershipMetadataManager {
         Slog.d(TAG, "Loading TransferOwnershipMetadataManager from "
                 + transferOwnershipMetadataFile);
         try (FileInputStream stream = new FileInputStream(transferOwnershipMetadataFile)) {
-            final XmlPullParser parser = Xml.newPullParser();
-            parser.setInput(stream, null);
+            final TypedXmlPullParser parser = Xml.resolvePullParser(stream);
             return parseMetadataFile(parser);
         } catch (IOException | XmlPullParserException | IllegalArgumentException e) {
             Slog.e(TAG, "Caught exception while trying to load the "
@@ -127,7 +129,7 @@ class TransferOwnershipMetadataManager {
         return null;
     }
 
-    private Metadata parseMetadataFile(XmlPullParser parser)
+    private Metadata parseMetadataFile(TypedXmlPullParser parser)
             throws XmlPullParserException, IOException {
         int type;
         final int outerDepth = parser.getDepth();
@@ -177,21 +179,26 @@ class TransferOwnershipMetadataManager {
         final ComponentName targetComponent;
         final String adminType;
 
-        Metadata(@NonNull String sourceComponent, @NonNull String targetComponent,
+        Metadata(@NonNull ComponentName sourceComponent, @NonNull ComponentName targetComponent,
                 @NonNull int userId, @NonNull String adminType) {
-            this.sourceComponent = ComponentName.unflattenFromString(sourceComponent);
-            this.targetComponent = ComponentName.unflattenFromString(targetComponent);
-            Preconditions.checkNotNull(sourceComponent);
-            Preconditions.checkNotNull(targetComponent);
+            this.sourceComponent = sourceComponent;
+            this.targetComponent = targetComponent;
+            Objects.requireNonNull(sourceComponent);
+            Objects.requireNonNull(targetComponent);
             Preconditions.checkStringNotEmpty(adminType);
             this.userId = userId;
             this.adminType = adminType;
         }
 
-        Metadata(@NonNull ComponentName sourceComponent, @NonNull ComponentName targetComponent,
+        Metadata(@NonNull String flatSourceComponent, @NonNull String flatTargetComponent,
                 @NonNull int userId, @NonNull String adminType) {
-            this(sourceComponent.flattenToString(), targetComponent.flattenToString(),
-                    userId, adminType);
+            this(unflattenComponentUnchecked(flatSourceComponent),
+                    unflattenComponentUnchecked(flatTargetComponent), userId, adminType);
+        }
+
+        private static ComponentName unflattenComponentUnchecked(String flatComponent) {
+            Objects.requireNonNull(flatComponent);
+            return ComponentName.unflattenFromString(flatComponent);
         }
 
         @Override

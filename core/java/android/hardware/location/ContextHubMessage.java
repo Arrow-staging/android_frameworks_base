@@ -16,9 +16,12 @@
 
 package android.hardware.location;
 
+import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
+
+import libcore.util.HexEncoding;
 
 import java.util.Arrays;
 
@@ -33,7 +36,7 @@ import java.util.Arrays;
  */
 @SystemApi
 @Deprecated
-public class ContextHubMessage {
+public class ContextHubMessage implements Parcelable {
     private static final int DEBUG_LOG_NUM_BYTES = 16;
     private int mType;
     private int mVersion;
@@ -125,7 +128,7 @@ public class ContextHubMessage {
         out.writeByteArray(mData);
     }
 
-    public static final Parcelable.Creator<ContextHubMessage> CREATOR
+    public static final @NonNull Parcelable.Creator<ContextHubMessage> CREATOR
             = new Parcelable.Creator<ContextHubMessage>() {
         public ContextHubMessage createFromParcel(Parcel in) {
             return new ContextHubMessage(in);
@@ -136,6 +139,7 @@ public class ContextHubMessage {
         }
     };
 
+    @NonNull
     @Override
     public String toString() {
         int length = mData.length;
@@ -146,7 +150,7 @@ public class ContextHubMessage {
             ret += "data = 0x";
         }
         for (int i = 0; i < Math.min(length, DEBUG_LOG_NUM_BYTES); i++) {
-            ret += Byte.toHexString(mData[i], true /* upperCase */);
+            ret += HexEncoding.encodeToString(mData[i], true /* upperCase */);
 
             if ((i + 1) % 4 == 0) {
                 ret += " ";

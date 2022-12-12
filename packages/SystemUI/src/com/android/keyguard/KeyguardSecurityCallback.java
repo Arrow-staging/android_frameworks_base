@@ -15,14 +15,28 @@
  */
 package com.android.keyguard;
 
+import com.android.keyguard.KeyguardSecurityModel.SecurityMode;
+
 public interface KeyguardSecurityCallback {
 
     /**
      * Dismiss the given security screen.
      * @param securityVerified true if the user correctly entered credentials for the given screen.
      * @param targetUserId a user that needs to be the foreground user at the dismissal completion.
+     * @param expectedSecurityMode The security mode that is invoking this dismiss.
      */
-    void dismiss(boolean securityVerified, int targetUserId);
+    void dismiss(boolean securityVerified, int targetUserId, SecurityMode expectedSecurityMode);
+
+    /**
+     * Dismiss the given security screen.
+     * @param securityVerified true if the user correctly entered credentials for the given screen.
+     * @param targetUserId a user that needs to be the foreground user at the dismissal completion.
+     * @param bypassSecondaryLockScreen true if the user can bypass the secondary lock screen,
+     *                                  if any, during this dismissal.
+     * @param expectedSecurityMode The security mode that is invoking this dismiss.
+     */
+    void dismiss(boolean securityVerified, int targetUserId, boolean bypassSecondaryLockScreen,
+            SecurityMode expectedSecurityMode);
 
     /**
      * Manually report user activity to keep the device awake.
@@ -48,4 +62,16 @@ public interface KeyguardSecurityCallback {
      * Resets the keyguard view.
      */
     void reset();
+
+    /**
+     * Call when cancel button is pressed in bouncer.
+     */
+    default void onCancelClicked() {
+        // No-op
+    }
+
+    /**
+     * Invoked whenever users are typing their password or drawing a pattern.
+     */
+    void onUserInput();
 }

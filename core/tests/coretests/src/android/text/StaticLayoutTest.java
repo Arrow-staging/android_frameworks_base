@@ -22,15 +22,17 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Paint.FontMetricsInt;
 import android.os.LocaleList;
 import android.platform.test.annotations.Presubmit;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.text.Layout.Alignment;
 import android.text.method.EditorState;
 import android.text.style.LocaleSpan;
 import android.util.Log;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -798,11 +800,13 @@ public class StaticLayoutTest {
     @Test
     public void testLayoutDoesntModifyPaint() {
         final TextPaint paint = new TextPaint();
-        paint.setHyphenEdit(31);
+        paint.setStartHyphenEdit(Paint.START_HYPHEN_EDIT_INSERT_HYPHEN);
+        paint.setEndHyphenEdit(Paint.END_HYPHEN_EDIT_INSERT_HYPHEN);
         final StaticLayout layout = StaticLayout.Builder.obtain("", 0, 0, paint, 100).build();
         final Canvas canvas = new Canvas();
         layout.drawText(canvas, 0, 0);
-        assertEquals(31, paint.getHyphenEdit());
+        assertEquals(Paint.START_HYPHEN_EDIT_INSERT_HYPHEN, paint.getStartHyphenEdit());
+        assertEquals(Paint.END_HYPHEN_EDIT_INSERT_HYPHEN, paint.getEndHyphenEdit());
     }
 
     @Test
@@ -822,6 +826,9 @@ public class StaticLayoutTest {
                 + "  <family>"
                 + "    <font weight='400' style='normal'>ascent3em-descent4em.ttf</font>"
                 + "  </family>"
+                + "  <family>"
+                + "    <font weight='400' style='normal'>ascent10em-descent10em.ttf</font>"
+                + "  </family>"
                 + "</familyset>";
 
         try (FontFallbackSetup setup =
@@ -833,7 +840,7 @@ public class StaticLayoutTest {
             assertEquals(2 * textSize, paint.descent(), 0.0f);
 
             final int paraWidth = 5 * textSize;
-            final String text = "aaaaa aabaa aaaaa"; // This should result in three lines.
+            final String text = "aaaaa\naabaa\naaaaa\n"; // This should result in three lines.
 
             // Old line spacing. All lines should get their ascent and descents from the first font.
             StaticLayout layout = StaticLayout.Builder
@@ -841,13 +848,17 @@ public class StaticLayoutTest {
                     .setIncludePad(false)
                     .setUseLineSpacingFromFallbacks(false)
                     .build();
-            assertEquals(3, layout.getLineCount());
+            assertEquals(4, layout.getLineCount());
             assertEquals(-textSize, layout.getLineAscent(0));
             assertEquals(2 * textSize, layout.getLineDescent(0));
             assertEquals(-textSize, layout.getLineAscent(1));
             assertEquals(2 * textSize, layout.getLineDescent(1));
             assertEquals(-textSize, layout.getLineAscent(2));
             assertEquals(2 * textSize, layout.getLineDescent(2));
+            // The last empty line spacing should be the default line spacing.
+            // Maybe good to be a previous line spacing?
+            assertEquals(-textSize, layout.getLineAscent(3));
+            assertEquals(2 * textSize, layout.getLineDescent(3));
 
             // New line spacing. The second line has a 'b', so it needs more ascent and descent.
             layout = StaticLayout.Builder
@@ -855,26 +866,52 @@ public class StaticLayoutTest {
                     .setIncludePad(false)
                     .setUseLineSpacingFromFallbacks(true)
                     .build();
-            assertEquals(3, layout.getLineCount());
+            assertEquals(4, layout.getLineCount());
             assertEquals(-textSize, layout.getLineAscent(0));
             assertEquals(2 * textSize, layout.getLineDescent(0));
             assertEquals(-3 * textSize, layout.getLineAscent(1));
             assertEquals(4 * textSize, layout.getLineDescent(1));
             assertEquals(-textSize, layout.getLineAscent(2));
             assertEquals(2 * textSize, layout.getLineDescent(2));
+            assertEquals(-textSize, layout.getLineAscent(3));
+            assertEquals(2 * textSize, layout.getLineDescent(3));
 
             // The default is the old line spacing, for backward compatibility.
             layout = StaticLayout.Builder
                     .obtain(text, 0, text.length(), paint, paraWidth)
                     .setIncludePad(false)
                     .build();
-            assertEquals(3, layout.getLineCount());
+            assertEquals(4, layout.getLineCount());
             assertEquals(-textSize, layout.getLineAscent(0));
             assertEquals(2 * textSize, layout.getLineDescent(0));
             assertEquals(-textSize, layout.getLineAscent(1));
             assertEquals(2 * textSize, layout.getLineDescent(1));
             assertEquals(-textSize, layout.getLineAscent(2));
             assertEquals(2 * textSize, layout.getLineDescent(2));
+            assertEquals(-textSize, layout.getLineAscent(3));
+            assertEquals(2 * textSize, layout.getLineDescent(3));
+
+            layout = StaticLayout.Builder
+                    .obtain("\n", 0, 1, paint, textSize)
+                    .setIncludePad(false)
+                    .setUseLineSpacingFromFallbacks(false)
+                    .build();
+            assertEquals(2, layout.getLineCount());
+            assertEquals(-textSize, layout.getLineAscent(0));
+            assertEquals(2 * textSize, layout.getLineDescent(0));
+            assertEquals(-textSize, layout.getLineAscent(1));
+            assertEquals(2 * textSize, layout.getLineDescent(1));
+
+            layout = StaticLayout.Builder
+                    .obtain("\n", 0, 1, paint, textSize)
+                    .setIncludePad(false)
+                    .setUseLineSpacingFromFallbacks(true)
+                    .build();
+            assertEquals(2, layout.getLineCount());
+            assertEquals(-textSize, layout.getLineAscent(0));
+            assertEquals(2 * textSize, layout.getLineDescent(0));
+            assertEquals(-textSize, layout.getLineAscent(1));
+            assertEquals(2 * textSize, layout.getLineDescent(1));
         }
     }
 

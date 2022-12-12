@@ -19,6 +19,7 @@ package com.android.server.print;
 import static android.content.pm.PackageManager.GET_META_DATA;
 import static android.content.pm.PackageManager.GET_SERVICES;
 import static android.content.pm.PackageManager.MATCH_DEBUG_TRIAGED_MISSING;
+import static android.content.pm.PackageManager.MATCH_INSTANT;
 
 import static com.android.internal.print.DumpUtils.writePrintJobInfo;
 import static com.android.internal.print.DumpUtils.writePrinterId;
@@ -29,6 +30,7 @@ import static com.android.internal.util.function.pooled.PooledLambda.obtainMessa
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
@@ -38,7 +40,6 @@ import android.content.pm.ParceledListSlice;
 import android.content.pm.ResolveInfo;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
-import android.os.AsyncTask;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -46,7 +47,6 @@ import android.os.IBinder;
 import android.os.IBinder.DeathRecipient;
 import android.os.IInterface;
 import android.os.Looper;
-import android.os.Message;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
 import android.os.UserHandle;
@@ -63,7 +63,6 @@ import android.print.PrinterInfo;
 import android.printservice.PrintServiceInfo;
 import android.printservice.recommendation.IRecommendationsChangeListener;
 import android.printservice.recommendation.RecommendationInfo;
-import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.service.print.CachedPrintJobProto;
 import android.service.print.InstalledPrintServiceProto;
@@ -82,6 +81,7 @@ import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.dump.DualDumpOutputStream;
+import com.android.internal.util.function.pooled.PooledLambda;
 import com.android.server.print.RemotePrintService.PrintServiceCallbacks;
 import com.android.server.print.RemotePrintServiceRecommendationService
         .RemotePrintServiceRecommendationServiceCallbacks;
@@ -94,6 +94,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntSupplier;
 
 /**
  * Represents the print state for a user.
@@ -131,11 +132,9 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
 
     private final Context mContext;
 
-    private final int mUserId;
+    private final @UserIdInt int mUserId;
 
     private final RemotePrintSpooler mSpooler;
-
-    private final Handler mHandler;
 
     private PrinterDiscoverySessionMediator mPrinterDiscoverySession;
 
@@ -157,12 +156,16 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
      */
     private RemotePrintServiceRecommendationService mPrintServiceRecommendationsService;
 
+    /**
+     * Can services from instant apps be bound? (usually disabled, only used by testing)
+     */
+    private boolean mIsInstantServiceAllowed;
+
     public UserState(Context context, int userId, Object lock, boolean lowPriority) {
         mContext = context;
         mUserId = userId;
         mLock = lock;
         mSpooler = new RemotePrintSpooler(context, userId, lowPriority, this);
-        mHandler = new UserStateHandler(context.getMainLooper());
 
         synchronized (mLock) {
             readInstalledPrintServicesLocked();
@@ -173,9 +176,7 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
         // Some print services might have gotten installed before the User State came up
         prunePrintServices();
 
-        synchronized (mLock) {
-            onConfigurationChangedLocked();
-        }
+        onConfigurationChanged();
     }
 
     public void increasePriority() {
@@ -236,22 +237,13 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
             return null;
         }
 
-        // Spin the spooler to add the job and show the config UI.
-        new AsyncTask<Void, Void, Void>() {
-            @Override
-            protected Void doInBackground(Void... params) {
-                mSpooler.createPrintJob(printJob);
-                return null;
-            }
-        }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, (Void[]) null);
-
         final long identity = Binder.clearCallingIdentity();
         try {
             Intent intent = new Intent(PrintManager.ACTION_PRINT_DIALOG);
             intent.setData(Uri.fromParts("printjob", printJob.getId().flattenToString(), null));
             intent.putExtra(PrintManager.EXTRA_PRINT_DOCUMENT_ADAPTER, adapter.asBinder());
             intent.putExtra(PrintManager.EXTRA_PRINT_JOB, printJob);
-            intent.putExtra(DocumentsContract.EXTRA_PACKAGE_NAME, packageName);
+            intent.putExtra(Intent.EXTRA_PACKAGE_NAME, packageName);
 
             IntentSender intentSender = PendingIntent.getActivityAsUser(
                     mContext, 0, intent, PendingIntent.FLAG_ONE_SHOT
@@ -442,6 +434,15 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
 
                 onConfigurationChangedLocked();
             }
+        }
+    }
+
+    public boolean isPrintServiceEnabled(@NonNull ComponentName serviceName) {
+        synchronized (mLock) {
+            if (mDisabledServices.contains(serviceName)) {
+                return false;
+            }
+            return true;
         }
     }
 
@@ -658,7 +659,7 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
 
                 mPrintServiceRecommendationsService =
                         new RemotePrintServiceRecommendationService(mContext,
-                                UserHandle.getUserHandleForUid(mUserId), this);
+                                UserHandle.of(mUserId), this);
             }
             mPrintServiceRecommendationsChangeListenerRecords.add(
                     new ListenerRecord<IRecommendationsChangeListener>(listener) {
@@ -705,18 +706,22 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
     @Override
     public void onPrintJobStateChanged(PrintJobInfo printJob) {
         mPrintJobForAppCache.onPrintJobStateChanged(printJob);
-        mHandler.obtainMessage(UserStateHandler.MSG_DISPATCH_PRINT_JOB_STATE_CHANGED,
-                printJob.getAppId(), 0, printJob.getId()).sendToTarget();
+        Handler.getMain().sendMessage(obtainMessage(
+                UserState::handleDispatchPrintJobStateChanged,
+                this, printJob.getId(),
+                PooledLambda.obtainSupplier(printJob.getAppId()).recycleOnUse()));
     }
 
     public void onPrintServicesChanged() {
-        mHandler.obtainMessage(UserStateHandler.MSG_DISPATCH_PRINT_SERVICES_CHANGED).sendToTarget();
+        Handler.getMain().sendMessage(obtainMessage(
+                UserState::handleDispatchPrintServicesChanged, this));
     }
 
     @Override
     public void onPrintServiceRecommendationsUpdated(List<RecommendationInfo> recommendations) {
-        mHandler.obtainMessage(UserStateHandler.MSG_DISPATCH_PRINT_SERVICES_RECOMMENDATIONS_UPDATED,
-                0, 0, recommendations).sendToTarget();
+        Handler.getMain().sendMessage(obtainMessage(
+                UserState::handleDispatchPrintServiceRecommendationsUpdated,
+                this, recommendations));
     }
 
     @Override
@@ -781,8 +786,8 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
             mActiveServices.remove(service.getComponentName());
 
             // The service might need to be restarted if it died because of an update
-            mHandler.sendMessageDelayed(
-                    mHandler.obtainMessage(UserStateHandler.MSG_CHECK_CONFIG_CHANGED),
+            Handler.getMain().sendMessageDelayed(obtainMessage(
+                    UserState::onConfigurationChanged, this),
                     SERVICE_RESTART_DELAY_MILLIS);
 
             // No session - nothing to do.
@@ -882,9 +887,14 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
     private void readInstalledPrintServicesLocked() {
         Set<PrintServiceInfo> tempPrintServices = new HashSet<PrintServiceInfo>();
 
+        int queryIntentFlags = GET_SERVICES | GET_META_DATA | MATCH_DEBUG_TRIAGED_MISSING;
+
+        if (mIsInstantServiceAllowed) {
+            queryIntentFlags |= MATCH_INSTANT;
+        }
+
         List<ResolveInfo> installedServices = mContext.getPackageManager()
-                .queryIntentServicesAsUser(mQueryIntent,
-                        GET_SERVICES | GET_META_DATA | MATCH_DEBUG_TRIAGED_MISSING, mUserId);
+                .queryIntentServicesAsUser(mQueryIntent, queryIntentFlags, mUserId);
 
         final int installedCount = installedServices.size();
         for (int i = 0, count = installedCount; i < count; i++) {
@@ -1122,24 +1132,26 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
         }
     }
 
-    private void handleDispatchPrintJobStateChanged(PrintJobId printJobId, int appId) {
+    private void handleDispatchPrintJobStateChanged(
+            PrintJobId printJobId, IntSupplier appIdSupplier) {
+        int appId = appIdSupplier.getAsInt();
         final List<PrintJobStateChangeListenerRecord> records;
         synchronized (mLock) {
             if (mPrintJobStateChangeListenerRecords == null) {
                 return;
             }
-            records = new ArrayList<PrintJobStateChangeListenerRecord>(
-                    mPrintJobStateChangeListenerRecords);
+            records = new ArrayList<>(mPrintJobStateChangeListenerRecords);
         }
         final int recordCount = records.size();
         for (int i = 0; i < recordCount; i++) {
             PrintJobStateChangeListenerRecord record = records.get(i);
             if (record.appId == PrintManager.APP_ID_ANY
-                    || record.appId == appId)
-            try {
-                record.listener.onPrintJobStateChanged(printJobId);
-            } catch (RemoteException re) {
-                Log.e(LOG_TAG, "Error notifying for print job state change", re);
+                    || record.appId == appId) {
+                try {
+                    record.listener.onPrintJobStateChanged(printJobId);
+                } catch (RemoteException re) {
+                    Log.e(LOG_TAG, "Error notifying for print job state change", re);
+                }
             }
         }
     }
@@ -1187,38 +1199,21 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
         }
     }
 
-    private final class UserStateHandler extends Handler {
-        public static final int MSG_DISPATCH_PRINT_JOB_STATE_CHANGED = 1;
-        public static final int MSG_DISPATCH_PRINT_SERVICES_CHANGED = 2;
-        public static final int MSG_DISPATCH_PRINT_SERVICES_RECOMMENDATIONS_UPDATED = 3;
-        public static final int MSG_CHECK_CONFIG_CHANGED = 4;
-
-        public UserStateHandler(Looper looper) {
-            super(looper, null, false);
+    private void onConfigurationChanged() {
+        synchronized (mLock) {
+            onConfigurationChangedLocked();
         }
+    }
 
-        @Override
-        public void handleMessage(Message message) {
-            switch (message.what) {
-                case MSG_DISPATCH_PRINT_JOB_STATE_CHANGED:
-                    PrintJobId printJobId = (PrintJobId) message.obj;
-                    final int appId = message.arg1;
-                    handleDispatchPrintJobStateChanged(printJobId, appId);
-                    break;
-                case MSG_DISPATCH_PRINT_SERVICES_CHANGED:
-                    handleDispatchPrintServicesChanged();
-                    break;
-                case MSG_DISPATCH_PRINT_SERVICES_RECOMMENDATIONS_UPDATED:
-                    handleDispatchPrintServiceRecommendationsUpdated(
-                            (List<RecommendationInfo>) message.obj);
-                    break;
-                case MSG_CHECK_CONFIG_CHANGED:
-                    synchronized (mLock) {
-                        onConfigurationChangedLocked();
-                    }
-                default:
-                    // not reached
-            }
+    public boolean getBindInstantServiceAllowed() {
+        return mIsInstantServiceAllowed;
+    }
+
+    public void setBindInstantServiceAllowed(boolean allowed) {
+        synchronized (mLock) {
+            mIsInstantServiceAllowed = allowed;
+
+            updateIfNeededLocked();
         }
     }
 

@@ -19,7 +19,8 @@ package android.graphics;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.test.AndroidTestCase;
-import android.test.suitebuilder.annotation.SmallTest;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.frameworks.coretests.R;
 
@@ -65,5 +66,11 @@ public class ColorStateListTest extends AndroidTestCase {
     public void testGetColorWhenListHasNoDefault() throws Exception {
         int defaultColor = mResources.getColor(R.color.color_no_default);
         assertEquals(mResources.getColor(R.color.testcolor1), defaultColor);
+    }
+
+    @SmallTest
+    public void testLstar() throws Exception {
+        int defaultColor = mResources.getColor(R.color.color_with_lstar);
+        assertEquals(mResources.getColor(R.color.testcolor3), defaultColor);
     }
 }

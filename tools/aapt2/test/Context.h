@@ -81,18 +81,27 @@ class Context : public IAaptContext {
     return min_sdk_version_;
   }
 
+  void SetMinSdkVersion(int min_sdk_version) {
+    min_sdk_version_ = min_sdk_version;
+  }
+
+ const std::set<std::string>& GetSplitNameDependencies() override {
+    return split_name_dependencies_;
+  }
+
  private:
   DISALLOW_COPY_AND_ASSIGN(Context);
 
   friend class ContextBuilder;
 
   PackageType package_type_ = PackageType::kApp;
-  Maybe<std::string> compilation_package_;
-  Maybe<uint8_t> package_id_;
+  std::optional<std::string> compilation_package_;
+  std::optional<uint8_t> package_id_;
   StdErrDiagnostics diagnostics_;
   NameMangler name_mangler_;
   SymbolTable symbols_;
   int min_sdk_version_;
+  std::set<std::string> split_name_dependencies_;
 };
 
 class ContextBuilder {
@@ -124,6 +133,11 @@ class ContextBuilder {
 
   ContextBuilder& SetMinSdkVersion(int min_sdk) {
     context_->min_sdk_version_ = min_sdk;
+    return *this;
+  }
+
+  ContextBuilder& SetSplitNameDependencies(const std::set<std::string>& split_name_dependencies) {
+    context_->split_name_dependencies_ = split_name_dependencies;
     return *this;
   }
 
@@ -186,10 +200,11 @@ class StaticSymbolSourceBuilder {
 
    private:
     std::unique_ptr<SymbolTable::Symbol> CloneSymbol(SymbolTable::Symbol* sym) {
+      CloningValueTransformer cloner(nullptr);
       std::unique_ptr<SymbolTable::Symbol> clone = util::make_unique<SymbolTable::Symbol>();
       clone->id = sym->id;
       if (sym->attribute) {
-        clone->attribute = std::unique_ptr<Attribute>(sym->attribute->Clone(nullptr));
+        clone->attribute = std::unique_ptr<Attribute>(sym->attribute->Transform(cloner));
       }
       clone->is_public = sym->is_public;
       return clone;

@@ -16,6 +16,7 @@
 
 package com.android.server.notification;
 
+import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.media.AudioManager;
 import android.net.Uri;
@@ -26,6 +27,7 @@ import android.service.notification.Condition;
 import android.service.notification.IConditionProvider;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.ZenModeConfig;
+import android.util.Log;
 import android.util.Slog;
 
 import java.io.PrintWriter;
@@ -35,9 +37,10 @@ import java.util.List;
 
 public class ZenLog {
     private static final String TAG = "ZenLog";
-    private static final boolean DEBUG = Build.IS_DEBUGGABLE;
+    // the ZenLog is *very* verbose, so be careful about setting this to true
+    private static final boolean DEBUG = false;
 
-    private static final int SIZE = Build.IS_DEBUGGABLE ? 100 : 20;
+    private static final int SIZE = Build.IS_DEBUGGABLE ? 200 : 100;
 
     private static final long[] TIMES = new long[SIZE];
     private static final int[] TYPES = new int[SIZE];
@@ -60,6 +63,11 @@ public class ZenLog {
     private static final int TYPE_DISABLE_EFFECTS = 13;
     private static final int TYPE_SUPPRESSOR_CHANGED = 14;
     private static final int TYPE_LISTENER_HINTS_CHANGED = 15;
+    private static final int TYPE_SET_NOTIFICATION_POLICY = 16;
+    private static final int TYPE_SET_CONSOLIDATED_ZEN_POLICY = 17;
+    private static final int TYPE_MATCHES_CALL_FILTER = 18;
+    private static final int TYPE_RECORD_CALLER = 19;
+    private static final int TYPE_CHECK_REPEAT_CALLER = 20;
 
     private static int sNext;
     private static int sSize;
@@ -100,12 +108,29 @@ public class ZenLog {
         append(TYPE_SET_ZEN_MODE, zenModeToString(zenMode) + "," + reason);
     }
 
+    /**
+     * trace setting the consolidated zen policy
+     */
+    public static void traceSetConsolidatedZenPolicy(NotificationManager.Policy policy,
+            String reason) {
+        append(TYPE_SET_CONSOLIDATED_ZEN_POLICY, policy.toString() + "," + reason);
+    }
+
     public static void traceUpdateZenMode(int fromMode, int toMode) {
         append(TYPE_UPDATE_ZEN_MODE, zenModeToString(fromMode) + " -> " + zenModeToString(toMode));
     }
 
     public static void traceExitCondition(Condition c, ComponentName component, String reason) {
         append(TYPE_EXIT_CONDITION, c + "," + componentToString(component) + "," + reason);
+    }
+
+    public static void traceSetNotificationPolicy(String pkg, int targetSdk,
+            NotificationManager.Policy policy) {
+        String policyLog = "pkg=" + pkg + " targetSdk=" + targetSdk
+                + " NotificationPolicy=" + policy.toString();
+        append(TYPE_SET_NOTIFICATION_POLICY, policyLog);
+        // TODO(b/180205791): remove when we can better surface apps that are changing policy
+        Log.d(TAG, "Zen Policy Changed: " + policyLog);
     }
 
     public static void traceSubscribe(Uri uri, IConditionProvider provider, RemoteException e) {
@@ -118,9 +143,14 @@ public class ZenLog {
 
     public static void traceConfig(String reason, ZenModeConfig oldConfig,
             ZenModeConfig newConfig) {
-        append(TYPE_CONFIG, reason
-                + "," + (newConfig != null ? newConfig.toString() : null)
-                + "," + ZenModeConfig.diff(oldConfig, newConfig));
+        ZenModeConfig.Diff diff = ZenModeConfig.diff(oldConfig, newConfig);
+        if (diff.isEmpty()) {
+            append(TYPE_CONFIG, reason + " no changes");
+        } else {
+            append(TYPE_CONFIG, reason
+                    + ",\n" + (newConfig != null ? newConfig.toString() : null)
+                    + ",\n" + ZenModeConfig.diff(oldConfig, newConfig));
+        }
     }
 
     public static void traceDisableEffects(NotificationRecord record, String reason) {
@@ -137,6 +167,30 @@ public class ZenLog {
     public static void traceListenerHintsChanged(int oldHints, int newHints, int listenerCount) {
         append(TYPE_LISTENER_HINTS_CHANGED, hintsToString(oldHints) + "->"
             + hintsToString(newHints) + ",listeners=" + listenerCount);
+    }
+
+    /**
+     * Trace calls to matchesCallFilter with the result of the call and the reason for the result.
+     */
+    public static void traceMatchesCallFilter(boolean result, String reason, int callingUid) {
+        append(TYPE_MATCHES_CALL_FILTER, "result=" + result + ", reason=" + reason
+                + ", calling uid=" + callingUid);
+    }
+
+    /**
+     * Trace what information is available about an incoming call when it's recorded
+     */
+    public static void traceRecordCaller(boolean hasPhone, boolean hasUri) {
+        append(TYPE_RECORD_CALLER, "has phone number=" + hasPhone + ", has uri=" + hasUri);
+    }
+
+    /**
+     * Trace what information was provided about a caller when checking whether it is from a repeat
+     * caller
+     */
+    public static void traceCheckRepeatCaller(boolean found, boolean hasPhone, boolean hasUri) {
+        append(TYPE_CHECK_REPEAT_CALLER, "res=" + found + ", given phone number=" + hasPhone
+                + ", given uri=" + hasUri);
     }
 
     private static String subscribeResult(IConditionProvider provider, RemoteException e) {
@@ -160,6 +214,11 @@ public class ZenLog {
             case TYPE_DISABLE_EFFECTS: return "disable_effects";
             case TYPE_SUPPRESSOR_CHANGED: return "suppressor_changed";
             case TYPE_LISTENER_HINTS_CHANGED: return "listener_hints_changed";
+            case TYPE_SET_NOTIFICATION_POLICY: return "set_notification_policy";
+            case TYPE_SET_CONSOLIDATED_ZEN_POLICY: return "set_consolidated_policy";
+            case TYPE_MATCHES_CALL_FILTER: return "matches_call_filter";
+            case TYPE_RECORD_CALLER: return "record_caller";
+            case TYPE_CHECK_REPEAT_CALLER: return "check_repeat_caller";
             default: return "unknown";
         }
     }

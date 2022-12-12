@@ -16,9 +16,11 @@
 
 #pragma once
 
+#include "Properties.h"
 #include "utils/Macros.h"
 
 #include <utils/Timers.h>
+#include "SkSize.h"
 
 #include <string>
 
@@ -38,8 +40,7 @@ class ErrorHandler {
 public:
     virtual void onError(const std::string& message) = 0;
 
-protected:
-    ~ErrorHandler() {}
+    virtual ~ErrorHandler() = default;
 };
 
 class TreeObserver {
@@ -51,7 +52,7 @@ public:
     virtual void onMaybeRemovedFromTree(RenderNode* node) = 0;
 
 protected:
-    virtual ~TreeObserver() {}
+    virtual ~TreeObserver() = default;
 };
 
 // This would be a struct, but we want to PREVENT_COPY_AND_ASSIGN
@@ -70,8 +71,7 @@ public:
         MODE_RT_ONLY,
     };
 
-    TreeInfo(TraversalMode mode, renderthread::CanvasContext& canvasContext)
-            : mode(mode), prepareTextures(mode == MODE_FULL), canvasContext(canvasContext) {}
+    TreeInfo(TraversalMode mode, renderthread::CanvasContext& canvasContext);
 
     TraversalMode mode;
     // TODO: Remove this? Currently this is used to signal to stop preparing
@@ -87,11 +87,20 @@ public:
 
     // Must not be null during actual usage
     DamageAccumulator* damageAccumulator = nullptr;
+    int64_t damageGenerationId = 0;
 
     LayerUpdateQueue* layerUpdateQueue = nullptr;
     ErrorHandler* errorHandler = nullptr;
 
     bool updateWindowPositions = false;
+
+    int disableForceDark;
+
+    const SkISize screenSize;
+
+    int stretchEffectCount = 0;
+
+    bool forceDrawFrame = false;
 
     struct Out {
         bool hasFunctors = false;
@@ -108,6 +117,12 @@ public:
         // *OR* will post itself for the next vsync automatically, use this
         // only to avoid calling draw()
         bool canDrawThisFrame = true;
+        // Sentinel for animatedImageDelay meaning there is no need to post such
+        // a message.
+        static constexpr nsecs_t kNoAnimatedImageDelay = -1;
+        // This is used to post a message to redraw when it is time to draw the
+        // next frame of an AnimatedImageDrawable.
+        nsecs_t animatedImageDelay = kNoAnimatedImageDelay;
     } out;
 
     // This flag helps to disable projection for receiver nodes that do not have any backward

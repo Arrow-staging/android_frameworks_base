@@ -19,18 +19,29 @@ package com.android.server.display;
 import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.app.ActivityManager;
+import android.app.ActivityTaskManager;
+import android.app.ActivityTaskManager.RootTaskInfo;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ParceledListSlice;
+import android.database.ContentObserver;
+import android.graphics.PixelFormat;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.display.AmbientBrightnessDayStats;
 import android.hardware.display.BrightnessChangeEvent;
+import android.hardware.display.BrightnessConfiguration;
+import android.hardware.display.ColorDisplayManager;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.DisplayManagerInternal;
+import android.hardware.display.DisplayedContentSample;
+import android.hardware.display.DisplayedContentSamplingAttributes;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Environment;
 import android.os.Handler;
@@ -44,19 +55,21 @@ import android.os.UserManager;
 import android.provider.Settings;
 import android.util.AtomicFile;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
+import android.view.Display;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.os.BackgroundThread;
-import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.RingBuffer;
+import com.android.server.LocalServices;
 
 import libcore.io.IoUtils;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -65,11 +78,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
-import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-
+import java.util.Date;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -95,18 +110,34 @@ public class BrightnessTracker {
     private static final String ATTR_TIMESTAMP = "timestamp";
     private static final String ATTR_PACKAGE_NAME = "packageName";
     private static final String ATTR_USER = "user";
+    private static final String ATTR_UNIQUE_DISPLAY_ID = "uniqueDisplayId";
     private static final String ATTR_LUX = "lux";
     private static final String ATTR_LUX_TIMESTAMPS = "luxTimestamps";
     private static final String ATTR_BATTERY_LEVEL = "batteryLevel";
     private static final String ATTR_NIGHT_MODE = "nightMode";
     private static final String ATTR_COLOR_TEMPERATURE = "colorTemperature";
+    private static final String ATTR_REDUCE_BRIGHT_COLORS = "reduceBrightColors";
+    private static final String ATTR_REDUCE_BRIGHT_COLORS_STRENGTH = "reduceBrightColorsStrength";
+    private static final String ATTR_REDUCE_BRIGHT_COLORS_OFFSET = "reduceBrightColorsOffset";
     private static final String ATTR_LAST_NITS = "lastNits";
     private static final String ATTR_DEFAULT_CONFIG = "defaultConfig";
     private static final String ATTR_POWER_SAVE = "powerSaveFactor";
     private static final String ATTR_USER_POINT = "userPoint";
+    private static final String ATTR_COLOR_SAMPLE_DURATION = "colorSampleDuration";
+    private static final String ATTR_COLOR_VALUE_BUCKETS = "colorValueBuckets";
 
     private static final int MSG_BACKGROUND_START = 0;
     private static final int MSG_BRIGHTNESS_CHANGED = 1;
+    private static final int MSG_STOP_SENSOR_LISTENER = 2;
+    private static final int MSG_START_SENSOR_LISTENER = 3;
+    private static final int MSG_BRIGHTNESS_CONFIG_CHANGED = 4;
+    private static final int MSG_SENSOR_CHANGED = 5;
+
+    private static final SimpleDateFormat FORMAT = new SimpleDateFormat("MM-dd HH:mm:ss.SSS");
+
+    private static final long COLOR_SAMPLE_DURATION = TimeUnit.SECONDS.toSeconds(10);
+    // Sample chanel 2 of HSV which is the Value component.
+    private static final int COLOR_SAMPLE_COMPONENT_MASK = 0x1 << 2;
 
     // Lock held while accessing mEvents, is held while writing events to flash.
     private final Object mEventsLock = new Object();
@@ -120,13 +151,24 @@ public class BrightnessTracker {
 
     private AmbientBrightnessStatsTracker mAmbientBrightnessStatsTracker;
 
-    private UserManager mUserManager;
+    private final UserManager mUserManager;
     private final Context mContext;
     private final ContentResolver mContentResolver;
-    private Handler mBgHandler;
-    // mBroadcastReceiver and mSensorListener should only be used on the mBgHandler thread.
+    private final Handler mBgHandler;
+
+    // These members should only be accessed on the mBgHandler thread.
     private BroadcastReceiver mBroadcastReceiver;
     private SensorListener mSensorListener;
+    private Sensor mLightSensor;
+    private SettingsObserver mSettingsObserver;
+    private DisplayListener mDisplayListener;
+    private boolean mSensorRegistered;
+    private boolean mColorSamplingEnabled;
+    private int mNoFramesToSample;
+    private float mFrameRate;
+    private BrightnessConfiguration mBrightnessConfiguration;
+    // End of block of members that should only be accessed on the mBgHandler thread.
+
     private @UserIdInt int mCurrentUserId = UserHandle.USER_NULL;
 
     // Lock held while collecting data related to brightness changes.
@@ -152,6 +194,8 @@ public class BrightnessTracker {
         } else {
             mInjector = new Injector();
         }
+        mBgHandler = new TrackerHandler(mInjector.getBackgroundHandler().getLooper());
+        mUserManager = mContext.getSystemService(UserManager.class);
     }
 
     /**
@@ -163,22 +207,30 @@ public class BrightnessTracker {
         if (DEBUG) {
             Slog.d(TAG, "Start");
         }
-        mBgHandler = new TrackerHandler(mInjector.getBackgroundHandler().getLooper());
-        mUserManager = mContext.getSystemService(UserManager.class);
         mCurrentUserId = ActivityManager.getCurrentUser();
         mBgHandler.obtainMessage(MSG_BACKGROUND_START, (Float) initialBrightness).sendToTarget();
     }
 
+    /**
+     * Update tracker with new brightness configuration.
+     */
+    public void setBrightnessConfiguration(BrightnessConfiguration brightnessConfiguration) {
+        mBgHandler.obtainMessage(MSG_BRIGHTNESS_CONFIG_CHANGED,
+                brightnessConfiguration).sendToTarget();
+    }
+
     private void backgroundStart(float initialBrightness) {
+        if (DEBUG) {
+            Slog.d(TAG, "Background start");
+        }
         readEvents();
         readAmbientBrightnessStats();
 
         mSensorListener = new SensorListener();
 
-
-        if (mInjector.isInteractive(mContext)) {
-            mInjector.registerSensorListener(mContext, mSensorListener, mBgHandler);
-        }
+        mSettingsObserver = new SettingsObserver(mBgHandler);
+        mInjector.registerBrightnessModeObserver(mContentResolver, mSettingsObserver);
+        startSensorListener();
 
         final IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Intent.ACTION_SHUTDOWN);
@@ -193,23 +245,25 @@ public class BrightnessTracker {
             mLastBrightness = initialBrightness;
             mStarted = true;
         }
+        enableColorSampling();
     }
 
     /** Stop listening for events */
-    @VisibleForTesting
     void stop() {
         if (DEBUG) {
             Slog.d(TAG, "Stop");
         }
         mBgHandler.removeMessages(MSG_BACKGROUND_START);
+        stopSensorListener();
         mInjector.unregisterSensorListener(mContext, mSensorListener);
+        mInjector.unregisterBrightnessModeObserver(mContext, mSettingsObserver);
         mInjector.unregisterReceiver(mContext, mBroadcastReceiver);
         mInjector.cancelIdleJob(mContext);
-        mAmbientBrightnessStatsTracker.stop();
 
         synchronized (mDataCollectionLock) {
             mStarted = false;
         }
+        disableColorSampling();
     }
 
     public void onSwitchUser(@UserIdInt int newUserId) {
@@ -225,15 +279,24 @@ public class BrightnessTracker {
      * @return List of recent {@link BrightnessChangeEvent}s
      */
     public ParceledListSlice<BrightnessChangeEvent> getEvents(int userId, boolean includePackage) {
-        // TODO include apps from any managed profiles in the brightness information.
         BrightnessChangeEvent[] events;
         synchronized (mEventsLock) {
             events = mEvents.toArray();
         }
+        int[] profiles = mInjector.getProfileIds(mUserManager, userId);
+        Map<Integer, Boolean> toRedact = new HashMap<>();
+        for (int i = 0; i < profiles.length; ++i) {
+            int profileId = profiles[i];
+            // Include slider interactions when a managed profile app is in the
+            // foreground but always redact the package name.
+            boolean redact = (!includePackage) || profileId != userId;
+            toRedact.put(profiles[i], redact);
+        }
         ArrayList<BrightnessChangeEvent> out = new ArrayList<>(events.length);
         for (int i = 0; i < events.length; ++i) {
-            if (events[i].userId == userId) {
-                if (includePackage) {
+            Boolean redact = toRedact.get(events[i].userId);
+            if (redact != null) {
+                if (!redact) {
                     out.add(events[i]);
                 } else {
                     BrightnessChangeEvent event = new BrightnessChangeEvent((events[i]),
@@ -254,20 +317,29 @@ public class BrightnessTracker {
      */
     public void notifyBrightnessChanged(float brightness, boolean userInitiated,
             float powerBrightnessFactor, boolean isUserSetBrightness,
-            boolean isDefaultBrightnessConfig) {
+            boolean isDefaultBrightnessConfig, String uniqueDisplayId) {
         if (DEBUG) {
             Slog.d(TAG, String.format("notifyBrightnessChanged(brightness=%f, userInitiated=%b)",
                         brightness, userInitiated));
         }
         Message m = mBgHandler.obtainMessage(MSG_BRIGHTNESS_CHANGED,
                 userInitiated ? 1 : 0, 0 /*unused*/, new BrightnessChangeValues(brightness,
-                        powerBrightnessFactor, isUserSetBrightness, isDefaultBrightnessConfig));
+                        powerBrightnessFactor, isUserSetBrightness, isDefaultBrightnessConfig,
+                        mInjector.currentTimeMillis(), uniqueDisplayId));
         m.sendToTarget();
+    }
+
+    /**
+     * Updates the light sensor to use.
+     */
+    public void setLightSensor(Sensor lightSensor) {
+        mBgHandler.obtainMessage(MSG_SENSOR_CHANGED, 0 /*unused*/, 0/*unused*/, lightSensor)
+                .sendToTarget();
     }
 
     private void handleBrightnessChanged(float brightness, boolean userInitiated,
             float powerBrightnessFactor, boolean isUserSetBrightness,
-            boolean isDefaultBrightnessConfig) {
+            boolean isDefaultBrightnessConfig, long timestamp, String uniqueDisplayId) {
         BrightnessChangeEvent.Builder builder;
 
         synchronized (mDataCollectionLock) {
@@ -288,10 +360,11 @@ public class BrightnessTracker {
 
             builder = new BrightnessChangeEvent.Builder();
             builder.setBrightness(brightness);
-            builder.setTimeStamp(mInjector.currentTimeMillis());
+            builder.setTimeStamp(timestamp);
             builder.setPowerBrightnessFactor(powerBrightnessFactor);
             builder.setUserBrightnessPoint(isUserSetBrightness);
             builder.setIsDefaultBrightnessConfig(isDefaultBrightnessConfig);
+            builder.setUniqueDisplayId(uniqueDisplayId);
 
             final int readingCount = mLastSensorReadings.size();
             if (readingCount == 0) {
@@ -321,20 +394,39 @@ public class BrightnessTracker {
         }
 
         try {
-            final ActivityManager.StackInfo focusedStack = mInjector.getFocusedStack();
-            builder.setUserId(focusedStack.userId);
-            builder.setPackageName(focusedStack.topActivity.getPackageName());
+            final RootTaskInfo focusedTask = mInjector.getFocusedStack();
+            if (focusedTask != null && focusedTask.topActivity != null) {
+                builder.setUserId(focusedTask.userId);
+                builder.setPackageName(focusedTask.topActivity.getPackageName());
+            } else {
+                // Ignore the event because we can't determine user / package.
+                if (DEBUG) {
+                    Slog.d(TAG, "Ignoring event due to null focusedTask.");
+                }
+                return;
+            }
         } catch (RemoteException e) {
             // Really shouldn't be possible.
             return;
         }
 
-        builder.setNightMode(mInjector.getSecureIntForUser(mContentResolver,
-                Settings.Secure.NIGHT_DISPLAY_ACTIVATED, 0, UserHandle.USER_CURRENT)
-                == 1);
-        builder.setColorTemperature(mInjector.getSecureIntForUser(mContentResolver,
-                Settings.Secure.NIGHT_DISPLAY_COLOR_TEMPERATURE,
-                0, UserHandle.USER_CURRENT));
+        builder.setNightMode(mInjector.isNightDisplayActivated(mContext));
+        builder.setColorTemperature(mInjector.getNightDisplayColorTemperature(mContext));
+        builder.setReduceBrightColors(mInjector.isReduceBrightColorsActivated(mContext));
+        builder.setReduceBrightColorsStrength(mInjector.getReduceBrightColorsStrength(mContext));
+        builder.setReduceBrightColorsOffset(mInjector.getReduceBrightColorsOffsetFactor(mContext)
+                * brightness);
+
+        if (mColorSamplingEnabled) {
+            DisplayedContentSample sample = mInjector.sampleColor(mNoFramesToSample);
+            if (sample != null && sample.getSampleComponent(
+                    DisplayedContentSample.ColorComponent.CHANNEL2) != null) {
+                float numMillis = (sample.getNumFrames() / mFrameRate) * 1000.0f;
+                builder.setColorValues(
+                        sample.getSampleComponent(DisplayedContentSample.ColorComponent.CHANNEL2),
+                        Math.round(numMillis));
+            }
+        }
 
         BrightnessChangeEvent event = builder.build();
         if (DEBUG) {
@@ -343,6 +435,40 @@ public class BrightnessTracker {
         synchronized (mEventsLock) {
             mEventsDirty = true;
             mEvents.append(event);
+        }
+    }
+
+    private void handleSensorChanged(Sensor lightSensor) {
+        if (mLightSensor != lightSensor) {
+            mLightSensor = lightSensor;
+            stopSensorListener();
+            synchronized (mDataCollectionLock) {
+                mLastSensorReadings.clear();
+            }
+            // Attempt to restart the sensor listener. It will check to see if it should be running
+            // so there is no need to also check here.
+            startSensorListener();
+        }
+    }
+
+    private void startSensorListener() {
+        if (!mSensorRegistered
+                && mLightSensor != null
+                && mAmbientBrightnessStatsTracker != null
+                && mInjector.isInteractive(mContext)
+                && mInjector.isBrightnessModeAutomatic(mContentResolver)) {
+            mAmbientBrightnessStatsTracker.start();
+            mSensorRegistered = true;
+            mInjector.registerSensorListener(mContext, mSensorListener, mLightSensor,
+                    mInjector.getBackgroundHandler());
+        }
+    }
+
+    private void stopSensorListener() {
+        if (mSensorRegistered) {
+            mAmbientBrightnessStatsTracker.stop();
+            mInjector.unregisterSensorListener(mContext, mSensorListener);
+            mSensorRegistered = false;
         }
     }
 
@@ -445,8 +571,7 @@ public class BrightnessTracker {
     @VisibleForTesting
     @GuardedBy("mEventsLock")
     void writeEventsLocked(OutputStream stream) throws IOException {
-        XmlSerializer out = new FastXmlSerializer();
-        out.setOutput(stream, StandardCharsets.UTF_8.name());
+        TypedXmlSerializer out = Xml.resolveSerializer(stream);
         out.startDocument(null, true);
         out.setFeature("http://xmlpull.org/v1/doc/features.html#indent-output", true);
 
@@ -463,22 +588,33 @@ public class BrightnessTracker {
             if (userSerialNo != -1 && toWrite[i].timeStamp > timeCutOff) {
                 mEvents.append(toWrite[i]);
                 out.startTag(null, TAG_EVENT);
-                out.attribute(null, ATTR_NITS, Float.toString(toWrite[i].brightness));
-                out.attribute(null, ATTR_TIMESTAMP, Long.toString(toWrite[i].timeStamp));
+                out.attributeFloat(null, ATTR_NITS, toWrite[i].brightness);
+                out.attributeLong(null, ATTR_TIMESTAMP, toWrite[i].timeStamp);
                 out.attribute(null, ATTR_PACKAGE_NAME, toWrite[i].packageName);
-                out.attribute(null, ATTR_USER, Integer.toString(userSerialNo));
-                out.attribute(null, ATTR_BATTERY_LEVEL, Float.toString(toWrite[i].batteryLevel));
-                out.attribute(null, ATTR_NIGHT_MODE, Boolean.toString(toWrite[i].nightMode));
-                out.attribute(null, ATTR_COLOR_TEMPERATURE, Integer.toString(
-                        toWrite[i].colorTemperature));
-                out.attribute(null, ATTR_LAST_NITS,
-                        Float.toString(toWrite[i].lastBrightness));
-                out.attribute(null, ATTR_DEFAULT_CONFIG,
-                        Boolean.toString(toWrite[i].isDefaultBrightnessConfig));
-                out.attribute(null, ATTR_POWER_SAVE,
-                        Float.toString(toWrite[i].powerBrightnessFactor));
-                out.attribute(null, ATTR_USER_POINT,
-                        Boolean.toString(toWrite[i].isUserSetBrightness));
+                out.attributeInt(null, ATTR_USER, userSerialNo);
+                String uniqueDisplayId = toWrite[i].uniqueDisplayId;
+                if (uniqueDisplayId == null) {
+                    uniqueDisplayId = "";
+                }
+                out.attribute(null, ATTR_UNIQUE_DISPLAY_ID, uniqueDisplayId);
+                out.attributeFloat(null, ATTR_BATTERY_LEVEL, toWrite[i].batteryLevel);
+                out.attributeBoolean(null, ATTR_NIGHT_MODE, toWrite[i].nightMode);
+                out.attributeInt(null, ATTR_COLOR_TEMPERATURE,
+                        toWrite[i].colorTemperature);
+                out.attributeBoolean(null, ATTR_REDUCE_BRIGHT_COLORS,
+                        toWrite[i].reduceBrightColors);
+                out.attributeInt(null, ATTR_REDUCE_BRIGHT_COLORS_STRENGTH,
+                        toWrite[i].reduceBrightColorsStrength);
+                out.attributeFloat(null, ATTR_REDUCE_BRIGHT_COLORS_OFFSET,
+                        toWrite[i].reduceBrightColorsOffset);
+                out.attributeFloat(null, ATTR_LAST_NITS,
+                        toWrite[i].lastBrightness);
+                out.attributeBoolean(null, ATTR_DEFAULT_CONFIG,
+                        toWrite[i].isDefaultBrightnessConfig);
+                out.attributeFloat(null, ATTR_POWER_SAVE,
+                        toWrite[i].powerBrightnessFactor);
+                out.attributeBoolean(null, ATTR_USER_POINT,
+                        toWrite[i].isUserSetBrightness);
                 StringBuilder luxValues = new StringBuilder();
                 StringBuilder luxTimestamps = new StringBuilder();
                 for (int j = 0; j < toWrite[i].luxValues.length; ++j) {
@@ -491,6 +627,19 @@ public class BrightnessTracker {
                 }
                 out.attribute(null, ATTR_LUX, luxValues.toString());
                 out.attribute(null, ATTR_LUX_TIMESTAMPS, luxTimestamps.toString());
+                if (toWrite[i].colorValueBuckets != null
+                        && toWrite[i].colorValueBuckets.length > 0) {
+                    out.attributeLong(null, ATTR_COLOR_SAMPLE_DURATION,
+                            toWrite[i].colorSampleDuration);
+                    StringBuilder buckets = new StringBuilder();
+                    for (int j = 0; j < toWrite[i].colorValueBuckets.length; ++j) {
+                        if (j > 0) {
+                            buckets.append(',');
+                        }
+                        buckets.append(Long.toString(toWrite[i].colorValueBuckets[j]));
+                    }
+                    out.attribute(null, ATTR_COLOR_VALUE_BUCKETS, buckets.toString());
+                }
                 out.endTag(null, TAG_EVENT);
             }
         }
@@ -503,8 +652,7 @@ public class BrightnessTracker {
     @GuardedBy("mEventsLock")
     void readEventsLocked(InputStream stream) throws IOException {
         try {
-            XmlPullParser parser = Xml.newPullParser();
-            parser.setInput(stream, StandardCharsets.UTF_8.name());
+            TypedXmlPullParser parser = Xml.resolvePullParser(stream);
 
             int type;
             while ((type = parser.next()) != XmlPullParser.END_DOCUMENT
@@ -518,7 +666,6 @@ public class BrightnessTracker {
 
             final long timeCutOff = mInjector.currentTimeMillis() - MAX_EVENT_AGE;
 
-            parser.next();
             int outerDepth = parser.getDepth();
             while ((type = parser.next()) != XmlPullParser.END_DOCUMENT
                     && (type != XmlPullParser.END_TAG || parser.getDepth() > outerDepth)) {
@@ -529,22 +676,27 @@ public class BrightnessTracker {
                 if (TAG_EVENT.equals(tag)) {
                     BrightnessChangeEvent.Builder builder = new BrightnessChangeEvent.Builder();
 
-                    String brightness = parser.getAttributeValue(null, ATTR_NITS);
-                    builder.setBrightness(Float.parseFloat(brightness));
-                    String timestamp = parser.getAttributeValue(null, ATTR_TIMESTAMP);
-                    builder.setTimeStamp(Long.parseLong(timestamp));
+                    builder.setBrightness(parser.getAttributeFloat(null, ATTR_NITS));
+                    builder.setTimeStamp(parser.getAttributeLong(null, ATTR_TIMESTAMP));
                     builder.setPackageName(parser.getAttributeValue(null, ATTR_PACKAGE_NAME));
-                    String user = parser.getAttributeValue(null, ATTR_USER);
-                    builder.setUserId(mInjector.getUserId(mUserManager, Integer.parseInt(user)));
-                    String batteryLevel = parser.getAttributeValue(null, ATTR_BATTERY_LEVEL);
-                    builder.setBatteryLevel(Float.parseFloat(batteryLevel));
-                    String nightMode = parser.getAttributeValue(null, ATTR_NIGHT_MODE);
-                    builder.setNightMode(Boolean.parseBoolean(nightMode));
-                    String colorTemperature =
-                            parser.getAttributeValue(null, ATTR_COLOR_TEMPERATURE);
-                    builder.setColorTemperature(Integer.parseInt(colorTemperature));
-                    String lastBrightness = parser.getAttributeValue(null, ATTR_LAST_NITS);
-                    builder.setLastBrightness(Float.parseFloat(lastBrightness));
+                    builder.setUserId(mInjector.getUserId(mUserManager,
+                            parser.getAttributeInt(null, ATTR_USER)));
+                    String uniqueDisplayId = parser.getAttributeValue(null, ATTR_UNIQUE_DISPLAY_ID);
+                    if (uniqueDisplayId == null) {
+                        uniqueDisplayId = "";
+                    }
+                    builder.setUniqueDisplayId(uniqueDisplayId);
+                    builder.setBatteryLevel(parser.getAttributeFloat(null, ATTR_BATTERY_LEVEL));
+                    builder.setNightMode(parser.getAttributeBoolean(null, ATTR_NIGHT_MODE));
+                    builder.setColorTemperature(
+                            parser.getAttributeInt(null, ATTR_COLOR_TEMPERATURE));
+                    builder.setReduceBrightColors(
+                            parser.getAttributeBoolean(null, ATTR_REDUCE_BRIGHT_COLORS));
+                    builder.setReduceBrightColorsStrength(
+                            parser.getAttributeInt(null, ATTR_REDUCE_BRIGHT_COLORS_STRENGTH));
+                    builder.setReduceBrightColorsOffset(
+                            parser.getAttributeFloat(null, ATTR_REDUCE_BRIGHT_COLORS_OFFSET));
+                    builder.setLastBrightness(parser.getAttributeFloat(null, ATTR_LAST_NITS));
 
                     String luxValue = parser.getAttributeValue(null, ATTR_LUX);
                     String luxTimestamp = parser.getAttributeValue(null, ATTR_LUX_TIMESTAMPS);
@@ -563,19 +715,24 @@ public class BrightnessTracker {
                     builder.setLuxValues(luxValues);
                     builder.setLuxTimestamps(luxTimestamps);
 
-                    String defaultConfig = parser.getAttributeValue(null, ATTR_DEFAULT_CONFIG);
-                    if (defaultConfig != null) {
-                        builder.setIsDefaultBrightnessConfig(Boolean.parseBoolean(defaultConfig));
-                    }
-                    String powerSave = parser.getAttributeValue(null, ATTR_POWER_SAVE);
-                    if (powerSave != null) {
-                        builder.setPowerBrightnessFactor(Float.parseFloat(powerSave));
-                    } else {
-                        builder.setPowerBrightnessFactor(1.0f);
-                    }
-                    String userPoint = parser.getAttributeValue(null, ATTR_USER_POINT);
-                    if (userPoint != null) {
-                        builder.setUserBrightnessPoint(Boolean.parseBoolean(userPoint));
+                    builder.setIsDefaultBrightnessConfig(
+                            parser.getAttributeBoolean(null, ATTR_DEFAULT_CONFIG, false));
+                    builder.setPowerBrightnessFactor(
+                            parser.getAttributeFloat(null, ATTR_POWER_SAVE, 1.0f));
+                    builder.setUserBrightnessPoint(
+                            parser.getAttributeBoolean(null, ATTR_USER_POINT, false));
+
+                    long colorSampleDuration =
+                            parser.getAttributeLong(null, ATTR_COLOR_SAMPLE_DURATION, -1);
+                    String colorValueBucketsString =
+                            parser.getAttributeValue(null, ATTR_COLOR_VALUE_BUCKETS);
+                    if (colorSampleDuration != -1 && colorValueBucketsString != null) {
+                        String[] buckets = colorValueBucketsString.split(",");
+                        long[] bucketValues = new long[buckets.length];
+                        for (int i = 0; i < bucketValues.length; ++i) {
+                            bucketValues[i] = Long.parseLong(buckets[i]);
+                        }
+                        builder.setColorValues(bucketValues, colorSampleDuration);
                     }
 
                     BrightnessChangeEvent event = builder.build();
@@ -600,10 +757,13 @@ public class BrightnessTracker {
         }
     }
 
-    public void dump(PrintWriter pw) {
+    public void dump(final PrintWriter pw) {
         pw.println("BrightnessTracker state:");
         synchronized (mDataCollectionLock) {
             pw.println("  mStarted=" + mStarted);
+            pw.println("  mLightSensor=" + mLightSensor);
+            pw.println("  mLastBatteryLevel=" + mLastBatteryLevel);
+            pw.println("  mLastBrightness=" + mLastBrightness);
             pw.println("  mLastSensorReadings.size=" + mLastSensorReadings.size());
             if (!mLastSensorReadings.isEmpty()) {
                 pw.println("  mLastSensorReadings time span "
@@ -616,7 +776,8 @@ public class BrightnessTracker {
             pw.println("  mEvents.size=" + mEvents.size());
             BrightnessChangeEvent[] events = mEvents.toArray();
             for (int i = 0; i < events.length; ++i) {
-                pw.print("    " + events[i].timeStamp + ", " + events[i].userId);
+                pw.print("    " + FORMAT.format(new Date(events[i].timeStamp)));
+                pw.print(", userId=" + events[i].userId);
                 pw.print(", " + events[i].lastBrightness + "->" + events[i].brightness);
                 pw.print(", isUserSetBrightness=" + events[i].isUserSetBrightness);
                 pw.print(", powerBrightnessFactor=" + events[i].powerBrightnessFactor);
@@ -631,14 +792,97 @@ public class BrightnessTracker {
                 pw.println("}");
             }
         }
+        pw.println("  mWriteBrightnessTrackerStateScheduled="
+                + mWriteBrightnessTrackerStateScheduled);
+        mBgHandler.runWithScissors(() -> dumpLocal(pw), 1000);
         if (mAmbientBrightnessStatsTracker != null) {
             pw.println();
             mAmbientBrightnessStatsTracker.dump(pw);
         }
     }
 
+    private void dumpLocal(PrintWriter pw) {
+        pw.println("  mSensorRegistered=" + mSensorRegistered);
+        pw.println("  mColorSamplingEnabled=" + mColorSamplingEnabled);
+        pw.println("  mNoFramesToSample=" + mNoFramesToSample);
+        pw.println("  mFrameRate=" + mFrameRate);
+    }
+
+    private void enableColorSampling() {
+        if (!mInjector.isBrightnessModeAutomatic(mContentResolver)
+                || !mInjector.isInteractive(mContext)
+                || mColorSamplingEnabled
+                || mBrightnessConfiguration == null
+                || !mBrightnessConfiguration.shouldCollectColorSamples()) {
+            return;
+        }
+
+        mFrameRate = mInjector.getFrameRate(mContext);
+        if (mFrameRate <= 0) {
+            Slog.wtf(TAG, "Default display has a zero or negative framerate.");
+            return;
+        }
+        mNoFramesToSample = (int) (mFrameRate * COLOR_SAMPLE_DURATION);
+
+        DisplayedContentSamplingAttributes attributes = mInjector.getSamplingAttributes();
+        if (DEBUG && attributes != null) {
+            Slog.d(TAG, "Color sampling"
+                    + " mask=0x" + Integer.toHexString(attributes.getComponentMask())
+                    + " dataSpace=0x" + Integer.toHexString(attributes.getDataspace())
+                    + " pixelFormat=0x" + Integer.toHexString(attributes.getPixelFormat()));
+        }
+        // Do we support sampling the Value component of HSV
+        if (attributes != null && attributes.getPixelFormat() == PixelFormat.HSV_888
+                && (attributes.getComponentMask() & COLOR_SAMPLE_COMPONENT_MASK) != 0) {
+
+            mColorSamplingEnabled = mInjector.enableColorSampling(/* enable= */true,
+                    mNoFramesToSample);
+            if (DEBUG) {
+                Slog.i(TAG, "turning on color sampling for "
+                        + mNoFramesToSample + " frames, success=" + mColorSamplingEnabled);
+            }
+        }
+        if (mColorSamplingEnabled && mDisplayListener == null) {
+            mDisplayListener = new DisplayListener();
+            mInjector.registerDisplayListener(mContext, mDisplayListener, mBgHandler);
+        }
+    }
+
+    private void disableColorSampling() {
+        if (!mColorSamplingEnabled) {
+            return;
+        }
+        mInjector.enableColorSampling(/* enable= */ false, /* noFrames= */ 0);
+        mColorSamplingEnabled = false;
+        if (mDisplayListener != null) {
+            mInjector.unRegisterDisplayListener(mContext, mDisplayListener);
+            mDisplayListener = null;
+        }
+        if (DEBUG) {
+            Slog.i(TAG, "turning off color sampling");
+        }
+    }
+
+    private void updateColorSampling() {
+        if (!mColorSamplingEnabled) {
+            return;
+        }
+        float frameRate = mInjector.getFrameRate(mContext);
+        if (frameRate != mFrameRate) {
+            disableColorSampling();
+            enableColorSampling();
+        }
+    }
+
     public ParceledListSlice<AmbientBrightnessDayStats> getAmbientBrightnessStats(int userId) {
-        return new ParceledListSlice<>(mAmbientBrightnessStatsTracker.getUserStats(userId));
+        if (mAmbientBrightnessStatsTracker != null) {
+            ArrayList<AmbientBrightnessDayStats> stats =
+                    mAmbientBrightnessStatsTracker.getUserStats(userId);
+            if (stats != null) {
+                return new ParceledListSlice<>(stats);
+            }
+        }
+        return ParceledListSlice.emptyList();
     }
 
     // Not allowed to keep the SensorEvent so used to copy the data we care about.
@@ -701,6 +945,44 @@ public class BrightnessTracker {
         }
     }
 
+    private final class DisplayListener implements DisplayManager.DisplayListener {
+
+        @Override
+        public void onDisplayAdded(int displayId) {
+            // Ignore
+        }
+
+        @Override
+        public void onDisplayRemoved(int displayId) {
+            // Ignore
+        }
+
+        @Override
+        public void onDisplayChanged(int displayId) {
+            if (displayId == Display.DEFAULT_DISPLAY) {
+                updateColorSampling();
+            }
+        }
+    }
+
+    private final class SettingsObserver extends ContentObserver {
+        public SettingsObserver(Handler handler) {
+            super(handler);
+        }
+
+        @Override
+        public void onChange(boolean selfChange, Uri uri) {
+            if (DEBUG) {
+                Slog.v(TAG, "settings change " + uri);
+            }
+            if (mInjector.isBrightnessModeAutomatic(mContentResolver)) {
+                mBgHandler.obtainMessage(MSG_START_SENSOR_LISTENER).sendToTarget();
+            } else {
+                mBgHandler.obtainMessage(MSG_STOP_SENSOR_LISTENER).sendToTarget();
+            }
+        }
+    }
+
     private final class Receiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -718,12 +1000,9 @@ public class BrightnessTracker {
                     batteryLevelChanged(level, scale);
                 }
             } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
-                mAmbientBrightnessStatsTracker.stop();
-                mInjector.unregisterSensorListener(mContext, mSensorListener);
+                mBgHandler.obtainMessage(MSG_STOP_SENSOR_LISTENER).sendToTarget();
             } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
-                mAmbientBrightnessStatsTracker.start();
-                mInjector.registerSensorListener(mContext, mSensorListener,
-                        mInjector.getBackgroundHandler());
+                mBgHandler.obtainMessage(MSG_START_SENSOR_LISTENER).sendToTarget();
             }
         }
     }
@@ -742,33 +1021,61 @@ public class BrightnessTracker {
                     boolean userInitiatedChange = (msg.arg1 == 1);
                     handleBrightnessChanged(values.brightness, userInitiatedChange,
                             values.powerBrightnessFactor, values.isUserSetBrightness,
-                            values.isDefaultBrightnessConfig);
+                            values.isDefaultBrightnessConfig, values.timestamp,
+                            values.uniqueDisplayId);
                     break;
+                case MSG_START_SENSOR_LISTENER:
+                    startSensorListener();
+                    enableColorSampling();
+                    break;
+                case MSG_STOP_SENSOR_LISTENER:
+                    stopSensorListener();
+                    disableColorSampling();
+                    break;
+                case MSG_BRIGHTNESS_CONFIG_CHANGED:
+                    mBrightnessConfiguration = (BrightnessConfiguration) msg.obj;
+                    boolean shouldCollectColorSamples =
+                            mBrightnessConfiguration != null
+                                    && mBrightnessConfiguration.shouldCollectColorSamples();
+                    if (shouldCollectColorSamples && !mColorSamplingEnabled) {
+                        enableColorSampling();
+                    } else if (!shouldCollectColorSamples && mColorSamplingEnabled) {
+                        disableColorSampling();
+                    }
+                    break;
+                case MSG_SENSOR_CHANGED:
+                    handleSensorChanged((Sensor) msg.obj);
+                    break;
+
             }
         }
     }
 
     private static class BrightnessChangeValues {
-        final float brightness;
-        final float powerBrightnessFactor;
-        final boolean isUserSetBrightness;
-        final boolean isDefaultBrightnessConfig;
+        public final float brightness;
+        public final float powerBrightnessFactor;
+        public final boolean isUserSetBrightness;
+        public final boolean isDefaultBrightnessConfig;
+        public final long timestamp;
+        public final String uniqueDisplayId;
 
         BrightnessChangeValues(float brightness, float powerBrightnessFactor,
-                boolean isUserSetBrightness, boolean isDefaultBrightnessConfig) {
+                boolean isUserSetBrightness, boolean isDefaultBrightnessConfig,
+                long timestamp, String uniqueDisplayId) {
             this.brightness = brightness;
             this.powerBrightnessFactor = powerBrightnessFactor;
             this.isUserSetBrightness = isUserSetBrightness;
             this.isDefaultBrightnessConfig = isDefaultBrightnessConfig;
+            this.timestamp = timestamp;
+            this.uniqueDisplayId = uniqueDisplayId;
         }
     }
 
     @VisibleForTesting
     static class Injector {
         public void registerSensorListener(Context context,
-                SensorEventListener sensorListener, Handler handler) {
+                SensorEventListener sensorListener, Sensor lightSensor, Handler handler) {
             SensorManager sensorManager = context.getSystemService(SensorManager.class);
-            Sensor lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
             sensorManager.registerListener(sensorListener,
                     lightSensor, SensorManager.SENSOR_DELAY_NORMAL, handler);
         }
@@ -776,6 +1083,18 @@ public class BrightnessTracker {
         public void unregisterSensorListener(Context context, SensorEventListener sensorListener) {
             SensorManager sensorManager = context.getSystemService(SensorManager.class);
             sensorManager.unregisterListener(sensorListener);
+        }
+
+        public void registerBrightnessModeObserver(ContentResolver resolver,
+                ContentObserver settingsObserver) {
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.SCREEN_BRIGHTNESS_MODE),
+                    false, settingsObserver, UserHandle.USER_ALL);
+        }
+
+        public void unregisterBrightnessModeObserver(Context context,
+                ContentObserver settingsObserver) {
+            context.getContentResolver().unregisterContentObserver(settingsObserver);
         }
 
         public void registerReceiver(Context context,
@@ -790,6 +1109,12 @@ public class BrightnessTracker {
 
         public Handler getBackgroundHandler() {
             return BackgroundThread.getHandler();
+        }
+
+        public boolean isBrightnessModeAutomatic(ContentResolver resolver) {
+            return Settings.System.getIntForUser(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL, UserHandle.USER_CURRENT)
+                    == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC;
         }
 
         public int getSecureIntForUser(ContentResolver resolver, String setting, int defaultValue,
@@ -817,8 +1142,16 @@ public class BrightnessTracker {
             return userManager.getUserHandle(userSerialNumber);
         }
 
-        public ActivityManager.StackInfo getFocusedStack() throws RemoteException {
-            return ActivityManager.getService().getFocusedStackInfo();
+        public int[] getProfileIds(UserManager userManager, int userId) {
+            if (userManager != null) {
+                return userManager.getProfileIds(userId, false);
+            } else {
+                return new int[]{userId};
+            }
+        }
+
+        public RootTaskInfo getFocusedStack() throws RemoteException {
+            return ActivityTaskManager.getService().getFocusedRootTaskInfo();
         }
 
         public void scheduleIdleJob(Context context) {
@@ -831,6 +1164,69 @@ public class BrightnessTracker {
 
         public boolean isInteractive(Context context) {
             return context.getSystemService(PowerManager.class).isInteractive();
+        }
+
+        public int getNightDisplayColorTemperature(Context context) {
+            return context.getSystemService(ColorDisplayManager.class)
+                    .getNightDisplayColorTemperature();
+        }
+
+        public boolean isNightDisplayActivated(Context context) {
+            return context.getSystemService(ColorDisplayManager.class).isNightDisplayActivated();
+        }
+
+        public int getReduceBrightColorsStrength(Context context) {
+            return context.getSystemService(ColorDisplayManager.class)
+                    .getReduceBrightColorsStrength();
+        }
+
+        public float getReduceBrightColorsOffsetFactor(Context context) {
+            return context.getSystemService(ColorDisplayManager.class)
+                    .getReduceBrightColorsOffsetFactor();
+        }
+
+        public boolean isReduceBrightColorsActivated(Context context) {
+            return context.getSystemService(ColorDisplayManager.class)
+                    .isReduceBrightColorsActivated();
+        }
+
+        public DisplayedContentSample sampleColor(int noFramesToSample) {
+            final DisplayManagerInternal displayManagerInternal =
+                    LocalServices.getService(DisplayManagerInternal.class);
+            return displayManagerInternal.getDisplayedContentSample(
+                   Display.DEFAULT_DISPLAY, noFramesToSample, 0);
+        }
+
+        public float getFrameRate(Context context) {
+            final DisplayManager displayManager = context.getSystemService(DisplayManager.class);
+            Display display = displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+            return display.getRefreshRate();
+        }
+
+        public DisplayedContentSamplingAttributes getSamplingAttributes() {
+            final DisplayManagerInternal displayManagerInternal =
+                    LocalServices.getService(DisplayManagerInternal.class);
+            return displayManagerInternal.getDisplayedContentSamplingAttributes(
+                    Display.DEFAULT_DISPLAY);
+        }
+
+        public boolean enableColorSampling(boolean enable, int noFrames) {
+            final DisplayManagerInternal displayManagerInternal =
+                    LocalServices.getService(DisplayManagerInternal.class);
+            return displayManagerInternal.setDisplayedContentSamplingEnabled(
+                    Display.DEFAULT_DISPLAY, enable, COLOR_SAMPLE_COMPONENT_MASK, noFrames);
+        }
+
+        public void registerDisplayListener(Context context,
+                DisplayManager.DisplayListener listener, Handler handler) {
+            final DisplayManager displayManager = context.getSystemService(DisplayManager.class);
+            displayManager.registerDisplayListener(listener, handler);
+        }
+
+        public void unRegisterDisplayListener(Context context,
+                DisplayManager.DisplayListener listener) {
+            final DisplayManager displayManager = context.getSystemService(DisplayManager.class);
+            displayManager.unregisterDisplayListener(listener);
         }
     }
 }

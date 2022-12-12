@@ -22,41 +22,50 @@ namespace android {
 namespace uirenderer {
 namespace test {
 
-static const int IDENT_DISPLAYEVENT = 1;
-
-static android::DisplayInfo DUMMY_DISPLAY{
-        1080,   // w
-        1920,   // h
-        320.0,  // xdpi
-        320.0,  // ydpi
-        60.0,   // fps
-        2.0,    // density
-        0,      // orientation
-        false,  // secure?
-        0,      // appVsyncOffset
-        0,      // presentationDeadline
-};
-
-DisplayInfo getBuiltInDisplay() {
-#if !HWUI_NULL_GPU
-    DisplayInfo display;
-    sp<IBinder> dtoken(SurfaceComposerClient::getBuiltInDisplay(ISurfaceComposer::eDisplayIdMain));
-    status_t status = SurfaceComposerClient::getDisplayInfo(dtoken, &display);
-    LOG_ALWAYS_FATAL_IF(status, "Failed to get display info\n");
-    return display;
+const ui::StaticDisplayInfo& getDisplayInfo() {
+    static ui::StaticDisplayInfo info = [] {
+        ui::StaticDisplayInfo info;
+#if HWUI_NULL_GPU
+        info.density = 2.f;
 #else
-    return DUMMY_DISPLAY;
+        const sp<IBinder> token = SurfaceComposerClient::getInternalDisplayToken();
+        LOG_ALWAYS_FATAL_IF(!token, "%s: No internal display", __FUNCTION__);
+
+        const status_t status = SurfaceComposerClient::getStaticDisplayInfo(token, &info);
+        LOG_ALWAYS_FATAL_IF(status, "%s: Failed to get display info", __FUNCTION__);
 #endif
+        return info;
+    }();
+
+    return info;
 }
 
-// Initialize to a dummy default
-android::DisplayInfo gDisplay = DUMMY_DISPLAY;
+const ui::DisplayMode& getActiveDisplayMode() {
+    static ui::DisplayMode config = [] {
+        ui::DisplayMode config;
+#if HWUI_NULL_GPU
+        config.resolution = ui::Size(1080, 1920);
+        config.xDpi = config.yDpi = 320.f;
+        config.refreshRate = 60.f;
+#else
+        const sp<IBinder> token = SurfaceComposerClient::getInternalDisplayToken();
+        LOG_ALWAYS_FATAL_IF(!token, "%s: No internal display", __FUNCTION__);
+
+        const status_t status = SurfaceComposerClient::getActiveDisplayMode(token, &config);
+        LOG_ALWAYS_FATAL_IF(status, "%s: Failed to get active display config", __FUNCTION__);
+#endif
+        return config;
+    }();
+
+    return config;
+}
 
 TestContext::TestContext() {
     mLooper = new Looper(true);
     mSurfaceComposerClient = new SurfaceComposerClient();
-    mLooper->addFd(mDisplayEventReceiver.getFd(), IDENT_DISPLAYEVENT, Looper::EVENT_INPUT, nullptr,
-                   nullptr);
+
+    constexpr int EVENT_ID = 1;
+    mLooper->addFd(mDisplayEventReceiver.getFd(), EVENT_ID, Looper::EVENT_INPUT, nullptr, nullptr);
 }
 
 TestContext::~TestContext() {}
@@ -77,8 +86,10 @@ void TestContext::createSurface() {
 }
 
 void TestContext::createWindowSurface() {
-    mSurfaceControl = mSurfaceComposerClient->createSurface(String8("HwuiTest"), gDisplay.w,
-                                                            gDisplay.h, PIXEL_FORMAT_RGBX_8888);
+    const ui::Size& resolution = getActiveDisplayResolution();
+    mSurfaceControl =
+            mSurfaceComposerClient->createSurface(String8("HwuiTest"), resolution.getWidth(),
+                                                  resolution.getHeight(), PIXEL_FORMAT_RGBX_8888);
 
     SurfaceComposerClient::Transaction t;
     t.setLayer(mSurfaceControl, 0x7FFFFFF).show(mSurfaceControl).apply();
@@ -92,7 +103,8 @@ void TestContext::createOffscreenSurface() {
     producer->setMaxDequeuedBufferCount(3);
     producer->setAsyncMode(true);
     mConsumer = new BufferItemConsumer(consumer, GRALLOC_USAGE_HW_COMPOSER, 4);
-    mConsumer->setDefaultBufferSize(gDisplay.w, gDisplay.h);
+    const ui::Size& resolution = getActiveDisplayResolution();
+    mConsumer->setDefaultBufferSize(resolution.getWidth(), resolution.getHeight());
     mSurface = new Surface(producer);
 }
 

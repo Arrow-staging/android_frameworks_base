@@ -18,13 +18,20 @@ package android.telephony.ims.aidl;
 
 import android.os.Bundle;
 
+import android.telephony.ims.ImsCallProfile;
+import android.telephony.ims.ImsReasonInfo;
+
 import com.android.ims.internal.IImsCallSession;
 
 /**
  * See MmTelFeature#Listener for more information.
  * {@hide}
  */
-oneway interface IImsMmTelListener {
+ // This interface is not considered oneway because we need to ensure that these operations are
+ // processed by telephony before the control flow returns to the ImsService to perform
+ // operations on the IImsCallSession.
+interface IImsMmTelListener {
     void onIncomingCall(IImsCallSession c, in Bundle extras);
-    void onVoiceMessageCountUpdate(int count);
+    void onRejectedCall(in ImsCallProfile callProfile, in ImsReasonInfo reason);
+    oneway void onVoiceMessageCountUpdate(int count);
 }

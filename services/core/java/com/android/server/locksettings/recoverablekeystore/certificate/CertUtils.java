@@ -16,12 +16,16 @@
 
 package com.android.server.locksettings.recoverablekeystore.certificate;
 
-import static javax.xml.xpath.XPathConstants.NODESET;
-
 import android.annotation.IntDef;
 import android.annotation.Nullable;
 
 import com.android.internal.annotations.VisibleForTesting;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -57,15 +61,6 @@ import java.util.Set;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.xpath.XPath;
-import javax.xml.xpath.XPathExpressionException;
-import javax.xml.xpath.XPathFactory;
-
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.SAXException;
 
 /** Utility functions related to parsing and validating public-key certificates. */
 public final class CertUtils {
@@ -166,48 +161,61 @@ public final class CertUtils {
     static List<String> getXmlNodeContents(@MustExist int mustExist, Element rootNode,
             String... nodeTags)
             throws CertParsingException {
-        String expression = String.join("/", nodeTags);
-
-        XPath xPath = XPathFactory.newInstance().newXPath();
-        NodeList nodeList;
-        try {
-            nodeList = (NodeList) xPath.compile(expression).evaluate(rootNode, NODESET);
-        } catch (XPathExpressionException e) {
-            throw new CertParsingException(e);
+        if (nodeTags.length == 0) {
+            throw new CertParsingException("The tag list must not be empty");
         }
 
-        switch (mustExist) {
-            case MUST_EXIST_UNENFORCED:
-                break;
-
-            case MUST_EXIST_EXACTLY_ONE:
-                if (nodeList.getLength() != 1) {
-                    throw new CertParsingException(
-                            "The XML file must contain exactly one node with the path "
-                                    + expression);
-                }
-                break;
-
-            case MUST_EXIST_AT_LEAST_ONE:
-                if (nodeList.getLength() == 0) {
-                    throw new CertParsingException(
-                            "The XML file must contain at least one node with the path "
-                                    + expression);
-                }
-                break;
-
-            default:
-                throw new UnsupportedOperationException(
-                        "This value of MustExist is not supported: " + mustExist);
+        // Go down through all the intermediate node tags (except the last tag for the leaf nodes).
+        // Note that this implementation requires that at most one path exists for the given
+        // intermediate node tags.
+        Element parent = rootNode;
+        for (int i = 0; i < nodeTags.length - 1; i++) {
+            String tag = nodeTags[i];
+            List<Element> children = getXmlDirectChildren(parent, tag);
+            if ((children.size() == 0 && mustExist != MUST_EXIST_UNENFORCED)
+                    || children.size() > 1) {
+                throw new CertParsingException(
+                        "The XML file must contain exactly one path with the tag " + tag);
+            }
+            if (children.size() == 0) {
+                return new ArrayList<>();
+            }
+            parent = children.get(0);
         }
 
+        // Then collect the contents of the leaf nodes.
+        List<Element> leafs = getXmlDirectChildren(parent, nodeTags[nodeTags.length - 1]);
+        if (mustExist == MUST_EXIST_EXACTLY_ONE && leafs.size() != 1) {
+            throw new CertParsingException(
+                    "The XML file must contain exactly one node with the path "
+                            + String.join("/", nodeTags));
+        }
+        if (mustExist == MUST_EXIST_AT_LEAST_ONE && leafs.size() == 0) {
+            throw new CertParsingException(
+                    "The XML file must contain at least one node with the path "
+                            + String.join("/", nodeTags));
+        }
         List<String> result = new ArrayList<>();
-        for (int i = 0; i < nodeList.getLength(); i++) {
-            Node node = nodeList.item(i);
+        for (Element leaf : leafs) {
             // Remove whitespaces and newlines.
-            result.add(node.getTextContent().replaceAll("\\s", ""));
+            result.add(leaf.getTextContent().replaceAll("\\s", ""));
         }
         return result;
+    }
+
+    /** Get the direct child nodes with a given tag. */
+    private static List<Element> getXmlDirectChildren(Element parent, String tag) {
+        // Cannot use Element.getElementsByTagName because it will return all descendant elements
+        // with the tag name, i.e. not only the direct child nodes.
+        List<Element> children = new ArrayList<>();
+        NodeList childNodes = parent.getChildNodes();
+        for (int i = 0; i < childNodes.getLength(); i++) {
+            Node node = childNodes.item(i);
+            if (node.getNodeType() == Node.ELEMENT_NODE && node.getNodeName().equals(tag)) {
+                children.add((Element) node);
+            }
+        }
+        return children;
     }
 
     /**
@@ -290,6 +298,42 @@ public final class CertUtils {
             throw new CertValidationException(e);
         }
         return certPath;
+    }
+
+    /**
+     * Validates a given {@code CertPath} against the trusted root certificate.
+     *
+     * @param trustedRoot the trusted root certificate
+     * @param certPath the certificate path to be validated
+     * @throws CertValidationException if the given certificate path is invalid, e.g., is expired,
+     *                                 or does not have a valid signature
+     */
+    public static void validateCertPath(X509Certificate trustedRoot, CertPath certPath)
+            throws CertValidationException {
+        validateCertPath(/*validationDate=*/ null, trustedRoot, certPath);
+    }
+
+    /**
+     * Validates a given {@code CertPath} against a given {@code validationDate}. If the given
+     * validation date is null, the current date will be used.
+     */
+    @VisibleForTesting
+    static void validateCertPath(@Nullable Date validationDate, X509Certificate trustedRoot,
+            CertPath certPath) throws CertValidationException {
+        if (certPath.getCertificates().isEmpty()) {
+            throw new CertValidationException("The given certificate path is empty");
+        }
+        if (!(certPath.getCertificates().get(0) instanceof X509Certificate)) {
+            throw new CertValidationException(
+                    "The given certificate path does not contain X509 certificates");
+        }
+
+        List<X509Certificate> certificates = (List<X509Certificate>) certPath.getCertificates();
+        X509Certificate leafCert = certificates.get(0);
+        List<X509Certificate> intermediateCerts =
+                certificates.subList(/*fromIndex=*/ 1, certificates.size());
+
+        validateCert(validationDate, trustedRoot, intermediateCerts, leafCert);
     }
 
     @VisibleForTesting

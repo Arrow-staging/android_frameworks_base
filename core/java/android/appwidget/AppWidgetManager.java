@@ -19,21 +19,26 @@ package android.appwidget;
 import android.annotation.BroadcastBehavior;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresFeature;
 import android.annotation.SdkConstant;
 import android.annotation.SdkConstant.SdkConstantType;
 import android.annotation.SystemService;
+import android.annotation.TestApi;
+import android.annotation.UserIdInt;
 import android.app.IServiceConnection;
 import android.app.PendingIntent;
+import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ShortcutInfo;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Process;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.DisplayMetrics;
@@ -55,6 +60,7 @@ import java.util.List;
  * </div>
  */
 @SystemService(Context.APPWIDGET_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_APP_WIDGETS)
 public class AppWidgetManager {
 
     /**
@@ -171,7 +177,7 @@ public class AppWidgetManager {
     public static final String ACTION_APPWIDGET_CONFIGURE = "android.appwidget.action.APPWIDGET_CONFIGURE";
 
     /**
-     * An intent extra that contains one appWidgetId.
+     * An intent extra (int) that contains one appWidgetId.
      * <p>
      * The value will be an int that can be retrieved like this:
      * {@sample frameworks/base/tests/appwidgets/AppWidgetHostTest/src/com/android/tests/appwidgethost/AppWidgetHostActivity.java getExtra_EXTRA_APPWIDGET_ID}
@@ -179,24 +185,44 @@ public class AppWidgetManager {
     public static final String EXTRA_APPWIDGET_ID = "appWidgetId";
 
     /**
-     * A bundle extra that contains the lower bound on the current width, in dips, of a widget instance.
+     * A bundle extra (boolean) that contains whether or not an app has finished restoring a widget.
+     * <p> After restore, the app should set OPTION_APPWIDGET_RESTORE_COMPLETED to true on its
+     * widgets followed by calling {@link #updateAppWidget} to update the views.
+     *
+     * @see #updateAppWidgetOptions(int, Bundle)
+     */
+    public static final String OPTION_APPWIDGET_RESTORE_COMPLETED = "appWidgetRestoreCompleted";
+
+
+    /**
+     * A bundle extra (int) that contains the lower bound on the current width, in dips, of a
+     * widget instance.
      */
     public static final String OPTION_APPWIDGET_MIN_WIDTH = "appWidgetMinWidth";
 
     /**
-     * A bundle extra that contains the lower bound on the current height, in dips, of a widget instance.
+     * A bundle extra (int) that contains the lower bound on the current height, in dips, of a
+     * widget instance.
      */
     public static final String OPTION_APPWIDGET_MIN_HEIGHT = "appWidgetMinHeight";
 
     /**
-     * A bundle extra that contains the upper bound on the current width, in dips, of a widget instance.
+     * A bundle extra (int) that contains the upper bound on the current width, in dips, of a
+     * widget instance.
      */
     public static final String OPTION_APPWIDGET_MAX_WIDTH = "appWidgetMaxWidth";
 
     /**
-     * A bundle extra that contains the upper bound on the current width, in dips, of a widget instance.
+     * A bundle extra (int) that contains the upper bound on the current width, in dips, of a
+     * widget instance.
      */
     public static final String OPTION_APPWIDGET_MAX_HEIGHT = "appWidgetMaxHeight";
+
+    /**
+     * A bundle extra ({@code List<SizeF>}) that contains the list of possible sizes, in dips, a
+     * widget instance can take.
+     */
+    public static final String OPTION_APPWIDGET_SIZES = "appWidgetSizes";
 
     /**
      * A bundle extra that hints to the AppWidgetProvider the category of host that owns this
@@ -461,6 +487,7 @@ public class AppWidgetManager {
 
     private final Context mContext;
     private final String mPackageName;
+    @UnsupportedAppUsage
     private final IAppWidgetService mService;
     private final DisplayMetrics mDisplayMetrics;
 
@@ -677,11 +704,13 @@ public class AppWidgetManager {
     }
 
     /**
-     * Updates the info for the supplied AppWidget provider.
+     * Updates the info for the supplied AppWidget provider. Apps can use this to change the default
+     * behavior of the widget based on the state of the app (for e.g., if the user is logged in
+     * or not). Calling this API completely replaces the previous definition.
      *
      * <p>
      * The manifest entry of the provider should contain an additional meta-data tag similar to
-     * {@link #META_DATA_APPWIDGET_PROVIDER} which should point to any additional definitions for
+     * {@link #META_DATA_APPWIDGET_PROVIDER} which should point to any alternative definitions for
      * the provider.
      *
      * <p>
@@ -812,6 +841,7 @@ public class AppWidgetManager {
      *
      * @hide
      */
+    @UnsupportedAppUsage
     public List<AppWidgetProviderInfo> getInstalledProviders(int categoryFilter) {
         if (mService == null) {
             return Collections.emptyList();
@@ -838,6 +868,7 @@ public class AppWidgetManager {
      *
      * @hide
      */
+    @UnsupportedAppUsage
     public List<AppWidgetProviderInfo> getInstalledProvidersForProfile(int categoryFilter,
             @Nullable UserHandle profile, @Nullable String packageName) {
         if (mService == null) {
@@ -898,6 +929,7 @@ public class AppWidgetManager {
      *                      provider for this AppWidget.
      * @hide
      */
+    @UnsupportedAppUsage
     public void bindAppWidgetId(int appWidgetId, ComponentName provider) {
         if (mService == null) {
             return;
@@ -920,6 +952,7 @@ public class AppWidgetManager {
      *
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void bindAppWidgetId(int appWidgetId, ComponentName provider, Bundle options) {
         if (mService == null) {
             return;
@@ -929,6 +962,9 @@ public class AppWidgetManager {
 
     /**
      * Set the component for a given appWidgetId.
+     *
+     * If successful, the app widget provider will receive a {@link #ACTION_APPWIDGET_UPDATE}
+     * broadcast.
      *
      * <p class="note">You need the BIND_APPWIDGET permission or the user must have enabled binding
      *         widgets always for your component. Should be used by apps that host widgets; if this
@@ -949,6 +985,9 @@ public class AppWidgetManager {
 
     /**
      * Set the component for a given appWidgetId.
+     *
+     * If successful, the app widget provider will receive a {@link #ACTION_APPWIDGET_UPDATE}
+     * broadcast.
      *
      * <p class="note">You need the BIND_APPWIDGET permission or the user must have enabled binding
      *         widgets always for your component. Should be used by apps that host widgets; if this
@@ -973,6 +1012,10 @@ public class AppWidgetManager {
 
     /**
      * Set the provider for a given appWidgetId if the caller has a permission.
+     *
+     * If successful, the app widget provider will receive a {@link #ACTION_APPWIDGET_UPDATE}
+     * broadcast.
+     *
      * <p>
      * <strong>Note:</strong> You need the {@link android.Manifest.permission#BIND_APPWIDGET}
      * permission or the user must have enabled binding widgets always for your component.
@@ -1064,7 +1107,9 @@ public class AppWidgetManager {
      *
      * @hide
      */
-    public void setBindAppWidgetPermission(String packageName, int userId, boolean permission) {
+    @TestApi
+    public void setBindAppWidgetPermission(
+            @NonNull String packageName, @UserIdInt int userId, boolean permission) {
         if (mService == null) {
             return;
         }
@@ -1085,11 +1130,14 @@ public class AppWidgetManager {
      * @param intent        The intent of the service which will be providing the data to the
      *                      RemoteViewsAdapter.
      * @param connection    The callback interface to be notified when a connection is made or lost.
-     * @param flags         Flags used for binding to the service
+     * @param flags         Flags used for binding to the service. Currently only
+     *                     {@link Context#BIND_AUTO_CREATE} and
+     *                     {@link Context#BIND_FOREGROUND_SERVICE_WHILE_AWAKE} are supported.
      *
      * @see Context#getServiceDispatcher(ServiceConnection, Handler, int)
      * @hide
      */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public boolean bindRemoteViewsService(Context context, int appWidgetId, Intent intent,
             IServiceConnection connection, @Context.BindServiceFlags int flags) {
         if (mService == null) {
@@ -1135,6 +1183,7 @@ public class AppWidgetManager {
         }
     }
 
+    @UnsupportedAppUsage
     private boolean bindAppWidgetIdIfAllowed(int appWidgetId, int profileId,
             ComponentName provider, Bundle options) {
         if (mService == null) {
@@ -1183,6 +1232,11 @@ public class AppWidgetManager {
      * calls this API multiple times in a row.  It may ignore the previous requests,
      * for example.
      *
+     * <p>Launcher will not show the configuration activity associated with the provider in this
+     * case. The app could either show the configuration activity as a response to the callback,
+     * or show if before calling the API (various configurations can be encapsulated in
+     * {@code successCallback} to avoid persisting them before the widgetId is known).
+     *
      * @param provider The {@link ComponentName} for the {@link
      *    android.content.BroadcastReceiver BroadcastReceiver} provider for your AppWidget.
      * @param extras In not null, this is passed to the launcher app. For eg {@link
@@ -1205,6 +1259,20 @@ public class AppWidgetManager {
         try {
             return mService.requestPinAppWidget(mPackageName, provider, extras,
                     successCallback == null ? null : successCallback.getIntentSender());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Note an app widget is tapped on.
+     *
+     * @param appWidgetId App widget id.
+     * @hide
+     */
+    public void noteAppWidgetTapped(int appWidgetId) {
+        try {
+            mService.noteAppWidgetTapped(mPackageName, appWidgetId);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }

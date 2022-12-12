@@ -18,6 +18,7 @@ package android.provider;
 
 import android.annotation.SdkConstant;
 import android.annotation.SdkConstant.SdkConstantType;
+import android.annotation.TestApi;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -49,7 +50,8 @@ import java.util.List;
  * </ul>
  *
  * <P> The minimum permission needed to access this content provider is
- * {@link android.Manifest.permission#ADD_VOICEMAIL}
+ * {@link android.Manifest.permission#ADD_VOICEMAIL} or carrier privileges (see
+ * {@link android.telephony.TelephonyManager#hasCarrierPrivileges}).
  *
  * <P>Voicemails are inserted by what is called as a "voicemail source"
  * application, which is responsible for syncing voicemail data between a remote
@@ -288,6 +290,7 @@ public class VoicemailContract {
          * Path to the media content file. Internal only field.
          * @hide
          */
+        @TestApi
         public static final String _DATA = "_data";
 
         // Note: PHONE_ACCOUNT_* constant values are "subscription_*" due to a historic naming

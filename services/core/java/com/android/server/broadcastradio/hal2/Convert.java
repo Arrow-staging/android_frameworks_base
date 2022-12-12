@@ -23,10 +23,11 @@ import android.hardware.broadcastradio.V2_0.AmFmRegionConfig;
 import android.hardware.broadcastradio.V2_0.Announcement;
 import android.hardware.broadcastradio.V2_0.DabTableEntry;
 import android.hardware.broadcastradio.V2_0.IdentifierType;
+import android.hardware.broadcastradio.V2_0.Metadata;
+import android.hardware.broadcastradio.V2_0.MetadataKey;
 import android.hardware.broadcastradio.V2_0.ProgramFilter;
 import android.hardware.broadcastradio.V2_0.ProgramIdentifier;
 import android.hardware.broadcastradio.V2_0.ProgramInfo;
-import android.hardware.broadcastradio.V2_0.ProgramInfoFlags;
 import android.hardware.broadcastradio.V2_0.ProgramListChunk;
 import android.hardware.broadcastradio.V2_0.Properties;
 import android.hardware.broadcastradio.V2_0.Result;
@@ -34,6 +35,7 @@ import android.hardware.broadcastradio.V2_0.VendorKeyValue;
 import android.hardware.radio.ProgramList;
 import android.hardware.radio.ProgramSelector;
 import android.hardware.radio.RadioManager;
+import android.hardware.radio.RadioMetadata;
 import android.os.ParcelableException;
 import android.util.Slog;
 
@@ -168,7 +170,7 @@ class Convert {
         int len = config.ranges.size();
         List<RadioManager.BandDescriptor> bands = new ArrayList<>(len);
 
-        // Just a dummy value.
+        // Just a placeholder value.
         int region = RadioManager.REGION_ITU_1;
 
         for (AmFmBandRange range : config.ranges) {
@@ -229,6 +231,7 @@ class Convert {
                  * HAL implementation instance. */
                 1,      // numTuners
                 1,      // numAudioSources
+                false,  // isInitializationRequired
                 false,  // isCaptureSupported
 
                 amfmConfigToBands(amfmConfig),
@@ -271,8 +274,18 @@ class Convert {
         return hwSel;
     }
 
-    static @NonNull ProgramSelector programSelectorFromHal(
+    private static boolean isEmpty(
             @NonNull android.hardware.broadcastradio.V2_0.ProgramSelector sel) {
+        if (sel.primaryId.type != 0) return false;
+        if (sel.primaryId.value != 0) return false;
+        if (sel.secondaryIds.size() != 0) return false;
+        return true;
+    }
+
+    static @Nullable ProgramSelector programSelectorFromHal(
+            @NonNull android.hardware.broadcastradio.V2_0.ProgramSelector sel) {
+        if (isEmpty(sel)) return null;
+
         ProgramSelector.Identifier[] secondaryIds = sel.secondaryIds.stream().
                 map(Convert::programIdentifierFromHal).map(Objects::requireNonNull).
                 toArray(ProgramSelector.Identifier[]::new);
@@ -283,24 +296,97 @@ class Convert {
                 secondaryIds, null);
     }
 
+    private enum MetadataType {
+        INT, STRING
+    }
+
+    private static class MetadataDef {
+        private MetadataType type;
+        private String key;
+        private MetadataDef(MetadataType type, String key) {
+            this.type = type;
+            this.key = key;
+        }
+    }
+
+    private static final Map<Integer, MetadataDef> metadataKeys;
+    static {
+        metadataKeys = new HashMap<>();
+        metadataKeys.put(MetadataKey.RDS_PS, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_RDS_PS));
+        metadataKeys.put(MetadataKey.RDS_PTY, new MetadataDef(
+                MetadataType.INT, RadioMetadata.METADATA_KEY_RDS_PTY));
+        metadataKeys.put(MetadataKey.RBDS_PTY, new MetadataDef(
+                MetadataType.INT, RadioMetadata.METADATA_KEY_RBDS_PTY));
+        metadataKeys.put(MetadataKey.RDS_RT, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_RDS_RT));
+        metadataKeys.put(MetadataKey.SONG_TITLE, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_TITLE));
+        metadataKeys.put(MetadataKey.SONG_ARTIST, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_ARTIST));
+        metadataKeys.put(MetadataKey.SONG_ALBUM, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_ALBUM));
+        metadataKeys.put(MetadataKey.STATION_ICON, new MetadataDef(
+                MetadataType.INT, RadioMetadata.METADATA_KEY_ICON));
+        metadataKeys.put(MetadataKey.ALBUM_ART, new MetadataDef(
+                MetadataType.INT, RadioMetadata.METADATA_KEY_ART));
+        metadataKeys.put(MetadataKey.PROGRAM_NAME, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_PROGRAM_NAME));
+        metadataKeys.put(MetadataKey.DAB_ENSEMBLE_NAME, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_ENSEMBLE_NAME));
+        metadataKeys.put(MetadataKey.DAB_ENSEMBLE_NAME_SHORT, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_ENSEMBLE_NAME_SHORT));
+        metadataKeys.put(MetadataKey.DAB_SERVICE_NAME, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_SERVICE_NAME));
+        metadataKeys.put(MetadataKey.DAB_SERVICE_NAME_SHORT, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_SERVICE_NAME_SHORT));
+        metadataKeys.put(MetadataKey.DAB_COMPONENT_NAME, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_COMPONENT_NAME));
+        metadataKeys.put(MetadataKey.DAB_COMPONENT_NAME_SHORT, new MetadataDef(
+                MetadataType.STRING, RadioMetadata.METADATA_KEY_DAB_COMPONENT_NAME_SHORT));
+    }
+
+    private static @NonNull RadioMetadata metadataFromHal(@NonNull ArrayList<Metadata> meta) {
+        RadioMetadata.Builder builder = new RadioMetadata.Builder();
+
+        for (Metadata entry : meta) {
+            MetadataDef keyDef = metadataKeys.get(entry.key);
+            if (keyDef == null) {
+                Slog.i(TAG, "Ignored unknown metadata entry: " + MetadataKey.toString(entry.key));
+                continue;
+            }
+            if (keyDef.type == MetadataType.STRING) {
+                builder.putString(keyDef.key, entry.stringValue);
+            } else {  // MetadataType.INT
+                /* Current java API use 32-bit values for int metadata,
+                 * but we might change it in the future */
+                builder.putInt(keyDef.key, (int)entry.intValue);
+            }
+        }
+
+        return builder.build();
+    }
+
     static @NonNull RadioManager.ProgramInfo programInfoFromHal(@NonNull ProgramInfo info) {
         Collection<ProgramSelector.Identifier> relatedContent = info.relatedContent.stream().
                 map(id -> Objects.requireNonNull(programIdentifierFromHal(id))).
                 collect(Collectors.toList());
 
         return new RadioManager.ProgramInfo(
-                programSelectorFromHal(info.selector),
+                Objects.requireNonNull(programSelectorFromHal(info.selector)),
                 programIdentifierFromHal(info.logicallyTunedTo),
                 programIdentifierFromHal(info.physicallyTunedTo),
                 relatedContent,
                 info.infoFlags,
                 info.signalQuality,
-                null,  // TODO(b/69860743): metadata
+                metadataFromHal(info.metadata),
                 vendorInfoFromHal(info.vendorInfo)
         );
     }
 
-    static @NonNull ProgramFilter programFilterToHal(@NonNull ProgramList.Filter filter) {
+    static @NonNull ProgramFilter programFilterToHal(@Nullable ProgramList.Filter filter) {
+        if (filter == null) filter = new ProgramList.Filter();
+
         ProgramFilter hwFilter = new ProgramFilter();
 
         filter.getIdentifierTypes().stream().forEachOrdered(hwFilter.identifierTypes::add);
@@ -325,7 +411,7 @@ class Convert {
     public static @NonNull android.hardware.radio.Announcement announcementFromHal(
             @NonNull Announcement hwAnnouncement) {
         return new android.hardware.radio.Announcement(
-            programSelectorFromHal(hwAnnouncement.selector),
+            Objects.requireNonNull(programSelectorFromHal(hwAnnouncement.selector)),
             hwAnnouncement.type,
             vendorInfoFromHal(hwAnnouncement.vendorInfo)
         );

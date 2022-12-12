@@ -20,6 +20,8 @@ import android.os.Environment;
 import android.util.AtomicFile;
 import android.util.Log;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -86,10 +88,13 @@ class WatchlistSettings {
         }
     }
 
-    public void reloadSettings() {
+    private void reloadSettings() {
+        if (!mXmlFile.exists()) {
+            // No settings config
+            return;
+        }
         try (FileInputStream stream = mXmlFile.openRead()){
-            XmlPullParser parser = Xml.newPullParser();
-            parser.setInput(stream, StandardCharsets.UTF_8.name());
+            TypedXmlPullParser parser = Xml.resolvePullParser(stream);
             XmlUtils.beginDocument(parser, "network-watchlist-settings");
             final int outerDepth = parser.getDepth();
             while (XmlUtils.nextElementWithin(parser, outerDepth)) {
@@ -97,7 +102,7 @@ class WatchlistSettings {
                     mPrivacySecretKey = parseSecretKey(parser);
                 }
             }
-            Log.i(TAG, "Reload watchlist settings done");
+            Slog.i(TAG, "Reload watchlist settings done");
         } catch (IllegalStateException | NullPointerException | NumberFormatException |
                 XmlPullParserException | IOException | IndexOutOfBoundsException e) {
             Slog.e(TAG, "Failed parsing xml", e);
@@ -141,8 +146,7 @@ class WatchlistSettings {
             return;
         }
         try {
-            XmlSerializer out = new FastXmlSerializer();
-            out.setOutput(stream, StandardCharsets.UTF_8.name());
+            TypedXmlSerializer out = Xml.resolveSerializer(stream);
             out.startDocument(null, true);
             out.startTag(null, "network-watchlist-settings");
             out.startTag(null, "secret-key");

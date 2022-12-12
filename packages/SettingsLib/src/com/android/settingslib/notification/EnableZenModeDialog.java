@@ -16,10 +16,10 @@
 
 package com.android.settingslib.notification;
 
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.AlertDialog;
-import android.app.Dialog;
 import android.app.NotificationManager;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -33,6 +33,7 @@ import android.util.Log;
 import android.util.Slog;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.CompoundButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -42,8 +43,6 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.logging.MetricsLogger;
-import com.android.internal.logging.nano.MetricsProto;
 import com.android.internal.policy.PhoneWindow;
 import com.android.settingslib.R;
 
@@ -72,16 +71,23 @@ public class EnableZenModeDialog {
     private static final int SECONDS_MS = 1000;
     private static final int MINUTES_MS = 60 * SECONDS_MS;
 
+    @Nullable
+    private final ZenModeDialogMetricsLogger mMetricsLogger;
+
     @VisibleForTesting
     protected Uri mForeverId;
     private int mBucketIndex = -1;
 
+    @VisibleForTesting
+    protected NotificationManager mNotificationManager;
     private AlarmManager mAlarmManager;
     private int mUserId;
     private boolean mAttached;
 
     @VisibleForTesting
     protected Context mContext;
+    private final int mThemeResId;
+    private final boolean mCancelIsNeutral;
     @VisibleForTesting
     protected TextView mZenAlarmWarning;
     @VisibleForTesting
@@ -94,20 +100,32 @@ public class EnableZenModeDialog {
     protected LayoutInflater mLayoutInflater;
 
     public EnableZenModeDialog(Context context) {
-        mContext = context;
+        this(context, 0);
     }
 
-    public Dialog createDialog() {
-        NotificationManager noMan = (NotificationManager) mContext.
+    public EnableZenModeDialog(Context context, int themeResId) {
+        this(context, themeResId, false /* cancelIsNeutral */,
+                new ZenModeDialogMetricsLogger(context));
+    }
+
+    public EnableZenModeDialog(Context context, int themeResId, boolean cancelIsNeutral,
+            ZenModeDialogMetricsLogger metricsLogger) {
+        mContext = context;
+        mThemeResId = themeResId;
+        mCancelIsNeutral = cancelIsNeutral;
+        mMetricsLogger = metricsLogger;
+    }
+
+    public AlertDialog createDialog() {
+        mNotificationManager = (NotificationManager) mContext.
                 getSystemService(Context.NOTIFICATION_SERVICE);
         mForeverId =  Condition.newId(mContext).appendPath("forever").build();
         mAlarmManager = (AlarmManager) mContext.getSystemService(Context.ALARM_SERVICE);
         mUserId = mContext.getUserId();
         mAttached = false;
 
-        final AlertDialog.Builder builder = new AlertDialog.Builder(mContext)
+        final AlertDialog.Builder builder = new AlertDialog.Builder(mContext, mThemeResId)
                 .setTitle(R.string.zen_mode_settings_turn_on_dialog_title)
-                .setNegativeButton(R.string.cancel, null)
                 .setPositiveButton(R.string.zen_mode_enable_dialog_turn_on,
                         new DialogInterface.OnClickListener() {
                             @Override
@@ -116,25 +134,26 @@ public class EnableZenModeDialog {
                                 ConditionTag tag = getConditionTagAt(checkedId);
 
                                 if (isForever(tag.condition)) {
-                                    MetricsLogger.action(mContext,
-                                            MetricsProto.MetricsEvent.
-                                                    NOTIFICATION_ZEN_MODE_TOGGLE_ON_FOREVER);
+                                    mMetricsLogger.logOnEnableZenModeForever();
                                 } else if (isAlarm(tag.condition)) {
-                                    MetricsLogger.action(mContext,
-                                            MetricsProto.MetricsEvent.
-                                                    NOTIFICATION_ZEN_MODE_TOGGLE_ON_ALARM);
+                                    mMetricsLogger.logOnEnableZenModeUntilAlarm();
                                 } else if (isCountdown(tag.condition)) {
-                                    MetricsLogger.action(mContext,
-                                            MetricsProto.MetricsEvent.
-                                                    NOTIFICATION_ZEN_MODE_TOGGLE_ON_COUNTDOWN);
+                                    mMetricsLogger.logOnEnableZenModeUntilCountdown();
                                 } else {
                                     Slog.d(TAG, "Invalid manual condition: " + tag.condition);
                                 }
                                 // always triggers priority-only dnd with chosen condition
-                                noMan.setZenMode(Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS,
+                                mNotificationManager.setZenMode(
+                                        Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS,
                                         getRealConditionId(tag.condition), TAG);
                             }
                         });
+
+        if (mCancelIsNeutral) {
+            builder.setNeutralButton(R.string.cancel, null);
+        } else {
+            builder.setNegativeButton(R.string.cancel, null);
+        }
 
         View contentView = getContentView();
         bindConditions(forever());
@@ -182,6 +201,7 @@ public class EnableZenModeDialog {
     @VisibleForTesting
     protected void bind(final Condition condition, final View row, final int rowId) {
         if (condition == null) throw new IllegalArgumentException("condition must not be null");
+
         final boolean enabled = condition.state == Condition.STATE_TRUE;
         final ConditionTag tag = row.getTag() != null ? (ConditionTag) row.getTag() :
                 new ConditionTag();
@@ -201,10 +221,8 @@ public class EnableZenModeDialog {
                 if (isChecked) {
                     tag.rb.setChecked(true);
                     if (DEBUG) Log.d(TAG, "onCheckedChanged " + conditionId);
-                    MetricsLogger.action(mContext,
-                            MetricsProto.MetricsEvent.QS_DND_CONDITION_SELECT);
+                    mMetricsLogger.logOnConditionSelected();
                     updateAlarmWarningText(tag.condition);
-                    announceConditionSelection(tag);
                 }
             }
         });
@@ -354,44 +372,46 @@ public class EnableZenModeDialog {
             }
         });
 
-        // minus button
-        final ImageView button1 = (ImageView) row.findViewById(android.R.id.button1);
-        button1.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                onClickTimeButton(row, tag, false /*down*/, rowId);
-            }
-        });
-
-        // plus button
-        final ImageView button2 = (ImageView) row.findViewById(android.R.id.button2);
-        button2.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                onClickTimeButton(row, tag, true /*up*/, rowId);
-            }
-        });
-
         final long time = ZenModeConfig.tryParseCountdownConditionId(conditionId);
+        final ImageView minusButton = (ImageView) row.findViewById(android.R.id.button1);
+        final ImageView plusButton = (ImageView) row.findViewById(android.R.id.button2);
         if (rowId == COUNTDOWN_CONDITION_INDEX && time > 0) {
-            button1.setVisibility(View.VISIBLE);
-            button2.setVisibility(View.VISIBLE);
+            minusButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    onClickTimeButton(row, tag, false /*down*/, rowId);
+                    tag.lines.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+                }
+            });
+
+            plusButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    onClickTimeButton(row, tag, true /*up*/, rowId);
+                    tag.lines.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+                }
+            });
             if (mBucketIndex > -1) {
-                button1.setEnabled(mBucketIndex > 0);
-                button2.setEnabled(mBucketIndex < MINUTE_BUCKETS.length - 1);
+                minusButton.setEnabled(mBucketIndex > 0);
+                plusButton.setEnabled(mBucketIndex < MINUTE_BUCKETS.length - 1);
             } else {
                 final long span = time - System.currentTimeMillis();
-                button1.setEnabled(span > MIN_BUCKET_MINUTES * MINUTES_MS);
+                minusButton.setEnabled(span > MIN_BUCKET_MINUTES * MINUTES_MS);
                 final Condition maxCondition = ZenModeConfig.toTimeCondition(mContext,
                         MAX_BUCKET_MINUTES, ActivityManager.getCurrentUser());
-                button2.setEnabled(!Objects.equals(condition.summary, maxCondition.summary));
+                plusButton.setEnabled(!Objects.equals(condition.summary, maxCondition.summary));
             }
 
-            button1.setAlpha(button1.isEnabled() ? 1f : .5f);
-            button2.setAlpha(button2.isEnabled() ? 1f : .5f);
+            minusButton.setAlpha(minusButton.isEnabled() ? 1f : .5f);
+            plusButton.setAlpha(plusButton.isEnabled() ? 1f : .5f);
         } else {
-            button1.setVisibility(View.GONE);
-            button2.setVisibility(View.GONE);
+            if (minusButton != null) {
+                ((ViewGroup) row).removeView(minusButton);
+            }
+
+            if (plusButton != null) {
+                ((ViewGroup) row).removeView(plusButton);
+            }
         }
     }
 
@@ -413,7 +433,7 @@ public class EnableZenModeDialog {
     }
 
     private void onClickTimeButton(View row, ConditionTag tag, boolean up, int rowId) {
-        MetricsLogger.action(mContext, MetricsProto.MetricsEvent.QS_DND_TIME, up);
+        mMetricsLogger.logOnClickTimeButton(up);
         Condition newCondition = null;
         final int N = MINUTE_BUCKETS.length;
         if (mBucketIndex == -1) {
@@ -447,16 +467,6 @@ public class EnableZenModeDialog {
         bind(newCondition, row, rowId);
         updateAlarmWarningText(tag.condition);
         tag.rb.setChecked(true);
-        announceConditionSelection(tag);
-    }
-
-    private void announceConditionSelection(ConditionTag tag) {
-        // condition will always be priority-only
-        String modeText = mContext.getString(R.string.zen_interruption_level_priority);
-        if (tag.line1 != null) {
-            mZenRadioGroupContent.announceForAccessibility(mContext.getString(
-                    R.string.zen_mode_and_condition, modeText, tag.line1.getText()));
-        }
     }
 
     private void updateAlarmWarningText(Condition condition) {
@@ -465,7 +475,16 @@ public class EnableZenModeDialog {
         mZenAlarmWarning.setVisibility(warningText == null ? View.GONE : View.VISIBLE);
     }
 
-    private String computeAlarmWarningText(Condition condition) {
+    @VisibleForTesting
+    protected String computeAlarmWarningText(Condition condition) {
+        boolean allowAlarms = (mNotificationManager.getNotificationPolicy().priorityCategories
+                & NotificationManager.Policy.PRIORITY_CATEGORY_ALARMS) != 0;
+
+        // don't show alarm warning if alarms are allowed to bypass dnd
+        if (allowAlarms) {
+            return null;
+        }
+
         final long now = System.currentTimeMillis();
         final long nextAlarm = getNextAlarm();
         if (nextAlarm < now) {
@@ -483,14 +502,19 @@ public class EnableZenModeDialog {
         if (warningRes == 0) {
             return null;
         }
+
+        return mContext.getResources().getString(warningRes, getTime(nextAlarm, now));
+    }
+
+    @VisibleForTesting
+    protected String getTime(long nextAlarm, long now) {
         final boolean soon = (nextAlarm - now) < 24 * 60 * 60 * 1000;
         final boolean is24 = DateFormat.is24HourFormat(mContext, ActivityManager.getCurrentUser());
         final String skeleton = soon ? (is24 ? "Hm" : "hma") : (is24 ? "EEEHm" : "EEEhma");
         final String pattern = DateFormat.getBestDateTimePattern(Locale.getDefault(), skeleton);
         final CharSequence formattedTime = DateFormat.format(pattern, nextAlarm);
         final int templateRes = soon ? R.string.alarm_template : R.string.alarm_template_far;
-        final String template = mContext.getResources().getString(templateRes, formattedTime);
-        return mContext.getResources().getString(warningRes, template);
+        return mContext.getResources().getString(templateRes, formattedTime);
     }
 
     // used as the view tag on condition rows

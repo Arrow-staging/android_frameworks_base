@@ -17,20 +17,23 @@
 #ifndef ANDROIDFW_ATTRIBUTERESOLUTION_H
 #define ANDROIDFW_ATTRIBUTERESOLUTION_H
 
-#include <androidfw/ResourceTypes.h>
+#include "androidfw/AssetManager2.h"
+#include "androidfw/ResourceTypes.h"
 
 namespace android {
 
 // Offsets into the outValues array populated by the methods below. outValues is a uint32_t
-// array, but each logical element takes up 6 uint32_t-sized physical elements.
+// array, but each logical element takes up 7 uint32_t-sized physical elements.
+// Keep these in sync with android.content.res.TypedArray java class
 enum {
-  STYLE_NUM_ENTRIES = 6,
+  STYLE_NUM_ENTRIES = 7,
   STYLE_TYPE = 0,
   STYLE_DATA = 1,
   STYLE_ASSET_COOKIE = 2,
   STYLE_RESOURCE_ID = 3,
   STYLE_CHANGING_CONFIGURATIONS = 4,
-  STYLE_DENSITY = 5
+  STYLE_DENSITY = 5,
+  STYLE_SOURCE_RESOURCE_ID = 6
 };
 
 // These are all variations of the same method. They each perform the exact same operation,
@@ -42,20 +45,28 @@ enum {
 
 // `out_values` must NOT be nullptr.
 // `out_indices` may be nullptr.
-bool ResolveAttrs(ResTable::Theme* theme, uint32_t def_style_attr, uint32_t def_style_res,
-                  uint32_t* src_values, size_t src_values_length, uint32_t* attrs,
-                  size_t attrs_length, uint32_t* out_values, uint32_t* out_indices);
+base::expected<std::monostate, IOError> ResolveAttrs(Theme* theme, uint32_t def_style_attr,
+                                                     uint32_t def_style_resid, uint32_t* src_values,
+                                                     size_t src_values_length, uint32_t* attrs,
+                                                     size_t attrs_length, uint32_t* out_values,
+                                                     uint32_t* out_indices);
 
 // `out_values` must NOT be nullptr.
 // `out_indices` is NOT optional and must NOT be nullptr.
-void ApplyStyle(ResTable::Theme* theme, ResXMLParser* xml_parser, uint32_t def_style_attr,
-                uint32_t def_style_res, const uint32_t* attrs, size_t attrs_length,
-                uint32_t* out_values, uint32_t* out_indices);
+base::expected<std::monostate, IOError> ApplyStyle(Theme* theme, ResXMLParser* xml_parser,
+                                                   uint32_t def_style_attr,
+                                                   uint32_t def_style_resid,
+                                                   const uint32_t* attrs, size_t attrs_length,
+                                                   uint32_t* out_values, uint32_t* out_indices);
 
 // `out_values` must NOT be nullptr.
 // `out_indices` may be nullptr.
-bool RetrieveAttributes(const ResTable* res, ResXMLParser* xml_parser, uint32_t* attrs,
-                        size_t attrs_length, uint32_t* out_values, uint32_t* out_indices);
+base::expected<std::monostate, IOError> RetrieveAttributes(AssetManager2* assetmanager,
+                                                           ResXMLParser* xml_parser,
+                                                           uint32_t* attrs,
+                                                           size_t attrs_length,
+                                                           uint32_t* out_values,
+                                                           uint32_t* out_indices);
 
 }  // namespace android
 

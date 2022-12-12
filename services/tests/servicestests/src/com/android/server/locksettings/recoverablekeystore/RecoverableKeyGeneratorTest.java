@@ -20,14 +20,15 @@ import static junit.framework.Assert.assertNotNull;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import android.content.Context;
-import android.security.keystore.AndroidKeyStoreSecretKey;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.support.test.InstrumentationRegistry;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDb;
 
@@ -39,9 +40,11 @@ import org.junit.runner.RunWith;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.util.Random;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 @SmallTest
@@ -51,13 +54,16 @@ public class RecoverableKeyGeneratorTest {
     private static final int TEST_GENERATION_ID = 3;
     private static final String ANDROID_KEY_STORE_PROVIDER = "AndroidKeyStore";
     private static final String KEY_ALGORITHM = "AES";
-    private static final int KEY_SIZE_BYTES = 32;
+    private static final int KEY_SIZE_BYTES = RecoverableKeyGenerator.KEY_SIZE_BITS / Byte.SIZE;
     private static final String KEY_WRAP_ALGORITHM = "AES/GCM/NoPadding";
     private static final String TEST_ALIAS = "karlin";
     private static final String WRAPPING_KEY_ALIAS = "RecoverableKeyGeneratorTestWrappingKey";
     private static final int TEST_USER_ID = 1000;
     private static final int KEYSTORE_UID_SELF = -1;
     private static final int GCM_TAG_LENGTH_BITS = 128;
+    private static final byte[] NULL_METADATA = null;
+    private static final byte[] NON_NULL_METADATA = "test-metadata".getBytes(
+            StandardCharsets.UTF_8);
 
     private PlatformEncryptionKey mPlatformKey;
     private PlatformDecryptionKey mDecryptKey;
@@ -71,7 +77,7 @@ public class RecoverableKeyGeneratorTest {
         mDatabaseFile = context.getDatabasePath(DATABASE_FILE_NAME);
         mRecoverableKeyStoreDb = RecoverableKeyStoreDb.newInstance(context);
 
-        AndroidKeyStoreSecretKey platformKey = generateAndroidKeyStoreKey();
+        SecretKey platformKey = generatePlatformKey();
         mPlatformKey = new PlatformEncryptionKey(TEST_GENERATION_ID, platformKey);
         mDecryptKey = new PlatformDecryptionKey(TEST_GENERATION_ID, platformKey);
         mRecoverableKeyGenerator = RecoverableKeyGenerator.newInstance(mRecoverableKeyStoreDb);
@@ -88,18 +94,29 @@ public class RecoverableKeyGeneratorTest {
     }
 
     @Test
-    public void generateAndStoreKey_storesWrappedKey() throws Exception {
+    public void generateAndStoreKey_storesWrappedKey_nullMetadata() throws Exception {
         mRecoverableKeyGenerator.generateAndStoreKey(
-                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS);
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS, NULL_METADATA);
 
         WrappedKey wrappedKey = mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS);
         assertNotNull(wrappedKey);
+        assertNull(wrappedKey.getKeyMetadata());
+    }
+
+    @Test
+    public void generateAndStoreKey_storesWrappedKey_nonNullMetadata() throws Exception {
+        mRecoverableKeyGenerator.generateAndStoreKey(
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS, NON_NULL_METADATA);
+
+        WrappedKey wrappedKey = mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS);
+        assertNotNull(wrappedKey);
+        assertArrayEquals(NON_NULL_METADATA, wrappedKey.getKeyMetadata());
     }
 
     @Test
     public void generateAndStoreKey_returnsRawMaterialOfCorrectLength() throws Exception {
         byte[] rawKey = mRecoverableKeyGenerator.generateAndStoreKey(
-                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS);
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS, NON_NULL_METADATA);
 
         assertEquals(KEY_SIZE_BYTES, rawKey.length);
     }
@@ -107,7 +124,7 @@ public class RecoverableKeyGeneratorTest {
     @Test
     public void generateAndStoreKey_storesTheWrappedVersionOfTheRawMaterial() throws Exception {
         byte[] rawMaterial = mRecoverableKeyGenerator.generateAndStoreKey(
-                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS);
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS, NULL_METADATA);
 
         WrappedKey wrappedKey = mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS);
         Cipher cipher = Cipher.getInstance(KEY_WRAP_ALGORITHM);
@@ -117,7 +134,41 @@ public class RecoverableKeyGeneratorTest {
         assertArrayEquals(rawMaterial, unwrappedMaterial);
     }
 
-    private AndroidKeyStoreSecretKey generateAndroidKeyStoreKey() throws Exception {
+    @Test
+    public void importKey_storesNullMetadata() throws Exception {
+        mRecoverableKeyGenerator.importKey(
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS,
+                randomBytes(KEY_SIZE_BYTES),
+                NULL_METADATA);
+        assertNull(mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS).getKeyMetadata());
+    }
+
+    @Test
+    public void importKey_storesNonNullMetadata() throws Exception {
+        mRecoverableKeyGenerator.importKey(
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS,
+                randomBytes(KEY_SIZE_BYTES),
+                NON_NULL_METADATA);
+        assertArrayEquals(NON_NULL_METADATA,
+                mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS).getKeyMetadata());
+    }
+
+    @Test
+    public void importKey_storesTheWrappedVersionOfTheRawMaterial() throws Exception {
+        byte[] rawMaterial = randomBytes(KEY_SIZE_BYTES);
+        mRecoverableKeyGenerator.importKey(
+                mPlatformKey, TEST_USER_ID, KEYSTORE_UID_SELF, TEST_ALIAS, rawMaterial,
+                NULL_METADATA);
+
+        WrappedKey wrappedKey = mRecoverableKeyStoreDb.getKey(KEYSTORE_UID_SELF, TEST_ALIAS);
+        Cipher cipher = Cipher.getInstance(KEY_WRAP_ALGORITHM);
+        cipher.init(Cipher.DECRYPT_MODE, mDecryptKey.getKey(),
+                new GCMParameterSpec(GCM_TAG_LENGTH_BITS, wrappedKey.getNonce()));
+        byte[] unwrappedMaterial = cipher.doFinal(wrappedKey.getKeyMaterial());
+        assertArrayEquals(rawMaterial, unwrappedMaterial);
+    }
+
+    private SecretKey generatePlatformKey() throws Exception {
         KeyGenerator keyGenerator = KeyGenerator.getInstance(
                 KEY_ALGORITHM,
                 ANDROID_KEY_STORE_PROVIDER);
@@ -126,10 +177,12 @@ public class RecoverableKeyGeneratorTest {
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .build());
-        return (AndroidKeyStoreSecretKey) keyGenerator.generateKey();
+        return keyGenerator.generateKey();
     }
 
-    private static byte[] getUtf8Bytes(String s) {
-        return s.getBytes(StandardCharsets.UTF_8);
+    private static byte[] randomBytes(int n) {
+        byte[] bytes = new byte[n];
+        new Random().nextBytes(bytes);
+        return bytes;
     }
 }

@@ -18,10 +18,11 @@ package com.android.server.wm;
 
 import static android.app.NotificationManager.IMPORTANCE_MIN;
 import static android.app.PendingIntent.FLAG_CANCEL_CURRENT;
+import static android.app.PendingIntent.FLAG_IMMUTABLE;
 import static android.content.Context.NOTIFICATION_SERVICE;
 import static android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
-import static android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION;
+import static android.provider.Settings.ACTION_MANAGE_APP_OVERLAY_PERMISSION;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -29,16 +30,16 @@ import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
-
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
-
 import android.net.Uri;
+import android.os.Bundle;
+
 import com.android.internal.R;
-import com.android.server.policy.IconUtilities;
+import com.android.internal.util.ImageUtils;
 
 /** Displays an ongoing notification for a process displaying an alert window */
 class AlertWindowNotification {
@@ -53,7 +54,6 @@ class AlertWindowNotification {
     private final NotificationManager mNotificationManager;
     private final String mPackageName;
     private boolean mPosted;
-    private IconUtilities mIconUtilities;
 
     AlertWindowNotification(WindowManagerService service, String packageName) {
         mService = service;
@@ -62,7 +62,6 @@ class AlertWindowNotification {
                 (NotificationManager) mService.mContext.getSystemService(NOTIFICATION_SERVICE);
         mNotificationTag = CHANNEL_PREFIX + mPackageName;
         mRequestCode = sNextRequestCode++;
-        mIconUtilities = new IconUtilities(mService.mContext);
     }
 
     void post() {
@@ -109,6 +108,8 @@ class AlertWindowNotification {
 
         final String message = context.getString(R.string.alert_windows_notification_message,
                 appName);
+        Bundle extras = new Bundle();
+        extras.putStringArray(Notification.EXTRA_FOREGROUND_APPS, new String[] {mPackageName});
         final Notification.Builder builder = new Notification.Builder(context, mNotificationTag)
                 .setOngoing(true)
                 .setContentTitle(
@@ -118,12 +119,14 @@ class AlertWindowNotification {
                 .setColor(context.getColor(R.color.system_notification_accent_color))
                 .setStyle(new Notification.BigTextStyle().bigText(message))
                 .setLocalOnly(true)
+                .addExtras(extras)
                 .setContentIntent(getContentIntent(context, mPackageName));
 
         if (aInfo != null) {
             final Drawable drawable = pm.getApplicationIcon(aInfo);
-            if (drawable != null) {
-                final Bitmap bitmap = mIconUtilities.createIconBitmap(drawable);
+            int size = context.getResources().getDimensionPixelSize(android.R.dimen.app_icon_size);
+            final Bitmap bitmap = ImageUtils.buildScaledBitmap(drawable, size, size);
+            if (bitmap != null) {
                 builder.setLargeIcon(bitmap);
             }
         }
@@ -132,11 +135,12 @@ class AlertWindowNotification {
     }
 
     private PendingIntent getContentIntent(Context context, String packageName) {
-        final Intent intent = new Intent(ACTION_MANAGE_OVERLAY_PERMISSION,
+        final Intent intent = new Intent(ACTION_MANAGE_APP_OVERLAY_PERMISSION,
                 Uri.fromParts("package", packageName, null));
         intent.setFlags(FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK);
         // Calls into activity manager...
-        return PendingIntent.getActivity(context, mRequestCode, intent, FLAG_CANCEL_CURRENT);
+        return PendingIntent.getActivity(context, mRequestCode, intent,
+                FLAG_CANCEL_CURRENT | FLAG_IMMUTABLE);
     }
 
     private void createNotificationChannel(Context context, String appName) {
@@ -157,8 +161,9 @@ class AlertWindowNotification {
         channel = new NotificationChannel(mNotificationTag, nameChannel, IMPORTANCE_MIN);
         channel.enableLights(false);
         channel.enableVibration(false);
-        channel.setBlockableSystem(true);
+        channel.setBlockable(true);
         channel.setGroup(sChannelGroup.getId());
+        channel.setBypassDnd(true);
         mNotificationManager.createNotificationChannel(channel);
     }
 

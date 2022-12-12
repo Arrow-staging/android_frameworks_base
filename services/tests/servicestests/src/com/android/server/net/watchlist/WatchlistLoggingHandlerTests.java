@@ -17,11 +17,12 @@
 package com.android.server.net.watchlist;
 
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doAnswer;
-
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import android.content.Context;
 import android.content.ContextWrapper;
@@ -32,20 +33,17 @@ import android.content.pm.UserInfo;
 import android.os.FileUtils;
 import android.os.Looper;
 import android.os.UserManager;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
-import android.support.test.InstrumentationRegistry;
+
+import androidx.test.InstrumentationRegistry;
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
-
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -63,8 +61,10 @@ public class WatchlistLoggingHandlerTests {
 
     private static final String APK_A = "A.apk";
     private static final String APK_B = "B.apk";
+    private static final String APK_C = "C.apk";
     private static final String APK_A_CONTENT = "AAA";
     private static final String APK_B_CONTENT = "BBB";
+    private static final String APK_C_CONTENT = "CCC";
     // Sha256 of "AAA"
     private static final String APK_A_CONTENT_HASH =
             "CB1AD2119D8FAFB69566510EE712661F9F14B83385006EF92AEC47F523A38358";
@@ -120,8 +120,9 @@ public class WatchlistLoggingHandlerTests {
             return result;
         }).when(mockPackageManager).getInstalledApplications(anyInt());
 
-        // Uid 1 app with is installed in primary user and package name is "A"
-        // Uid 2 app is installed in secondary user and package name is "B"
+        // Uid 1 app is installed in primary user only and package name is "A"
+        // Uid 2 app is installed in both primary user and secondary user, package name is "B"
+        // Uid 3 app is installed in secondary user and package name is "C"
         doAnswer((InvocationOnMock invocation) -> {
             int uid = (int) invocation.getArguments()[0];
             if (uid == 1) {
@@ -129,9 +130,13 @@ public class WatchlistLoggingHandlerTests {
             } else if (uid == 1000001) {
                 return null;
             } else if (uid == 2) {
-                return null;
+                return new String[]{"B"};
             } else if (uid == 1000002) {
                 return new String[]{"B"};
+            } else if (uid == 3) {
+                return null;
+            } else if (uid == 1000002) {
+                return new String[]{"C"};
             }
             return null;
         }).when(mockPackageManager).getPackagesForUid(anyInt());

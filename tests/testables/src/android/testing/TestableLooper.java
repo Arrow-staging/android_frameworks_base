@@ -20,8 +20,9 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.MessageQueue;
 import android.os.TestLooperManager;
-import android.support.test.InstrumentationRegistry;
 import android.util.ArrayMap;
+
+import androidx.test.InstrumentationRegistry;
 
 import org.junit.runners.model.FrameworkMethod;
 
@@ -29,6 +30,7 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.lang.reflect.Field;
 import java.util.Map;
 
 /**
@@ -39,6 +41,15 @@ import java.util.Map;
  */
 public class TestableLooper {
 
+    /**
+     * Whether to hold onto the main thread through all tests in an attempt to
+     * catch crashes.
+     */
+    public static final boolean HOLD_MAIN_THREAD = false;
+    private static final Field MESSAGE_QUEUE_MESSAGES_FIELD;
+    private static final Field MESSAGE_NEXT_FIELD;
+    private static final Field MESSAGE_WHEN_FIELD;
+
     private Looper mLooper;
     private MessageQueue mQueue;
     private MessageHandler mMessageHandler;
@@ -47,16 +58,29 @@ public class TestableLooper {
     private Runnable mEmptyMessage;
     private TestLooperManager mQueueWrapper;
 
+    static {
+        try {
+            MESSAGE_QUEUE_MESSAGES_FIELD = MessageQueue.class.getDeclaredField("mMessages");
+            MESSAGE_QUEUE_MESSAGES_FIELD.setAccessible(true);
+            MESSAGE_NEXT_FIELD = Message.class.getDeclaredField("next");
+            MESSAGE_NEXT_FIELD.setAccessible(true);
+            MESSAGE_WHEN_FIELD = Message.class.getDeclaredField("when");
+            MESSAGE_WHEN_FIELD.setAccessible(true);
+        } catch (NoSuchFieldException e) {
+            throw new RuntimeException("Failed to initialize TestableLooper", e);
+        }
+    }
+
     public TestableLooper(Looper l) throws Exception {
         this(acquireLooperManager(l), l);
     }
 
-    private TestableLooper(TestLooperManager wrapper, Looper l) throws Exception {
+    private TestableLooper(TestLooperManager wrapper, Looper l) {
         mQueueWrapper = wrapper;
         setupQueue(l);
     }
 
-    private TestableLooper(Looper looper, boolean b) throws Exception {
+    private TestableLooper(Looper looper, boolean b) {
         setupQueue(looper);
     }
 
@@ -64,7 +88,7 @@ public class TestableLooper {
         return mLooper;
     }
 
-    private void setupQueue(Looper l) throws Exception {
+    private void setupQueue(Looper l) {
         mLooper = l;
         mQueue = mLooper.getQueue();
         mHandler = new Handler(mLooper);
@@ -75,9 +99,9 @@ public class TestableLooper {
      * the looper will not be available for any subsequent tests. This is
      * automatically handled for tests using {@link RunWithLooper}.
      */
-    public void destroy() throws NoSuchFieldException, IllegalAccessException {
+    public void destroy() {
         mQueueWrapper.release();
-        if (mLooper == Looper.getMainLooper()) {
+        if (HOLD_MAIN_THREAD && mLooper == Looper.getMainLooper()) {
             TestableInstrumentation.releaseMain();
         }
     }
@@ -112,6 +136,33 @@ public class TestableLooper {
         while (processQueuedMessages() != 0) ;
     }
 
+    public void moveTimeForward(long milliSeconds) {
+        try {
+            Message msg = getMessageLinkedList();
+            while (msg != null) {
+                long updatedWhen = msg.getWhen() - milliSeconds;
+                if (updatedWhen < 0) {
+                    updatedWhen = 0;
+                }
+                MESSAGE_WHEN_FIELD.set(msg, updatedWhen);
+                msg = (Message) MESSAGE_NEXT_FIELD.get(msg);
+            }
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException("Access failed in TestableLooper: set - Message.when", e);
+        }
+    }
+
+    private Message getMessageLinkedList() {
+        try {
+            MessageQueue queue = mLooper.getQueue();
+            return (Message) MESSAGE_QUEUE_MESSAGES_FIELD.get(queue);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(
+                    "Access failed in TestableLooper: get - MessageQueue.mMessages",
+                    e);
+        }
+    }
+
     private int processQueuedMessages() {
         int count = 0;
         mEmptyMessage = () -> { };
@@ -133,7 +184,7 @@ public class TestableLooper {
 
                 if (mMessageHandler != null) {
                     if (mMessageHandler.onMessageHandled(result)) {
-                        result.getTarget().dispatchMessage(result);
+                        mQueueWrapper.execute(result);
                         mQueueWrapper.recycle(result);
                     } else {
                         mQueueWrapper.recycle(result);
@@ -141,7 +192,7 @@ public class TestableLooper {
                         return false;
                     }
                 } else {
-                    result.getTarget().dispatchMessage(result);
+                    mQueueWrapper.execute(result);
                     mQueueWrapper.recycle(result);
                 }
             } else {
@@ -199,7 +250,7 @@ public class TestableLooper {
     }
 
     private static TestLooperManager acquireLooperManager(Looper l) {
-        if (l == Looper.getMainLooper()) {
+        if (HOLD_MAIN_THREAD && l == Looper.getMainLooper()) {
             TestableInstrumentation.acquireMain();
         }
         return InstrumentationRegistry.getInstrumentation().acquireLooperManager(l);
@@ -215,6 +266,10 @@ public class TestableLooper {
         return sLoopers.get(test);
     }
 
+    public static void remove(Object test) {
+        sLoopers.remove(test);
+    }
+
     static class LooperFrameworkMethod extends FrameworkMethod {
         private HandlerThread mHandlerThread;
 
@@ -227,6 +282,9 @@ public class TestableLooper {
             try {
                 mLooper = setAsMain ? Looper.getMainLooper() : createLooper();
                 mTestableLooper = new TestableLooper(mLooper, false);
+                if (!setAsMain) {
+                    mTestableLooper.getLooper().getThread().setName(test.getClass().getName());
+                }
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -238,7 +296,7 @@ public class TestableLooper {
             super(base.getMethod());
             mLooper = other.mLooper;
             mTestableLooper = other;
-            mHandler = new Handler(mLooper);
+            mHandler = Handler.createAsync(mLooper);
         }
 
         public static FrameworkMethod get(FrameworkMethod base, boolean setAsMain, Object test) {
@@ -291,7 +349,7 @@ public class TestableLooper {
                 if (set) {
                     mTestableLooper.mQueueWrapper.release();
                     mTestableLooper.mQueueWrapper = null;
-                    if (mLooper == Looper.getMainLooper()) {
+                    if (HOLD_MAIN_THREAD && mLooper == Looper.getMainLooper()) {
                         TestableInstrumentation.releaseMain();
                     }
                 }

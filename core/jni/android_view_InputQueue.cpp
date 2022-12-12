@@ -39,6 +39,7 @@ namespace android {
 
 static struct {
     jmethodID finishInputEvent;
+    jmethodID getNativePtr;
 } gInputQueueClassInfo;
 
 enum {
@@ -176,8 +177,8 @@ void InputQueue::enqueueEvent(InputEvent* event) {
     Mutex::Autolock _l(mLock);
     mPendingEvents.push(event);
     if (mPendingEvents.size() == 1) {
-        char dummy = 0;
-        int res = TEMP_FAILURE_RETRY(write(mDispatchWriteFd, &dummy, sizeof(dummy)));
+        char payload = '\0';
+        int res = TEMP_FAILURE_RETRY(write(mDispatchWriteFd, &payload, sizeof(payload)));
         if (res < 0 && errno != EAGAIN) {
             ALOGW("Failed writing to dispatch fd: %s", strerror(errno));
         }
@@ -263,8 +264,14 @@ int register_android_view_InputQueue(JNIEnv* env)
     jclass clazz = FindClassOrDie(env, kInputQueuePathName);
     gInputQueueClassInfo.finishInputEvent = GetMethodIDOrDie(env, clazz, "finishInputEvent",
                                                              "(JZ)V");
+    gInputQueueClassInfo.getNativePtr = GetMethodIDOrDie(env, clazz, "getNativePtr", "()J");
 
     return RegisterMethodsOrDie(env, kInputQueuePathName, g_methods, NELEM(g_methods));
+}
+
+AInputQueue* android_view_InputQueue_getNativePtr(JNIEnv* env, jobject inputQueue) {
+    jlong ptr = env->CallLongMethod(inputQueue, gInputQueueClassInfo.getNativePtr);
+    return reinterpret_cast<AInputQueue*>(ptr);
 }
 
 } // namespace android

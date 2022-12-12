@@ -21,10 +21,12 @@ import android.annotation.CallbackExecutor;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresFeature;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -58,6 +60,7 @@ import java.util.stream.Collectors;
  */
 @SystemApi
 @SystemService(Context.RADIO_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_BROADCAST_RADIO)
 public class RadioManager {
     private static final String TAG = "BroadcastRadio.manager";
 
@@ -208,6 +211,7 @@ public class RadioManager {
         private final String mSerial;
         private final int mNumTuners;
         private final int mNumAudioSources;
+        private final boolean mIsInitializationRequired;
         private final boolean mIsCaptureSupported;
         private final BandDescriptor[] mBands;
         private final boolean mIsBgScanSupported;
@@ -219,7 +223,8 @@ public class RadioManager {
         /** @hide */
         public ModuleProperties(int id, String serviceName, int classId, String implementor,
                 String product, String version, String serial, int numTuners, int numAudioSources,
-                boolean isCaptureSupported, BandDescriptor[] bands, boolean isBgScanSupported,
+                boolean isInitializationRequired, boolean isCaptureSupported,
+                BandDescriptor[] bands, boolean isBgScanSupported,
                 @ProgramSelector.ProgramType int[] supportedProgramTypes,
                 @ProgramSelector.IdentifierType int[] supportedIdentifierTypes,
                 @Nullable Map<String, Integer> dabFrequencyTable,
@@ -233,6 +238,7 @@ public class RadioManager {
             mSerial = serial;
             mNumTuners = numTuners;
             mNumAudioSources = numAudioSources;
+            mIsInitializationRequired = isInitializationRequired;
             mIsCaptureSupported = isCaptureSupported;
             mBands = bands;
             mIsBgScanSupported = isBgScanSupported;
@@ -326,6 +332,18 @@ public class RadioManager {
             return mNumAudioSources;
         }
 
+        /**
+         * Checks, if BandConfig initialization (after {@link RadioManager#openTuner})
+         * is required to be done before other operations or not.
+         *
+         * If it is, the client has to wait for {@link RadioTuner.Callback#onConfigurationChanged}
+         * callback before executing any other operations. Otherwise, such operation will fail
+         * returning {@link RadioManager#STATUS_INVALID_OPERATION} error code.
+         */
+        public boolean isInitializationRequired() {
+            return mIsInitializationRequired;
+        }
+
         /** {@code true} if audio capture is possible from radio tuner output.
          * This indicates if routing to audio devices not connected to the same HAL as the FM radio
          * is possible (e.g. to USB) or DAR (Digital Audio Recorder) feature can be implemented.
@@ -416,8 +434,10 @@ public class RadioManager {
             mSerial = in.readString();
             mNumTuners = in.readInt();
             mNumAudioSources = in.readInt();
+            mIsInitializationRequired = in.readInt() == 1;
             mIsCaptureSupported = in.readInt() == 1;
-            Parcelable[] tmp = in.readParcelableArray(BandDescriptor.class.getClassLoader());
+            Parcelable[] tmp = in.readParcelableArray(BandDescriptor.class.getClassLoader(),
+                    BandDescriptor.class);
             mBands = new BandDescriptor[tmp.length];
             for (int i = 0; i < tmp.length; i++) {
                 mBands[i] = (BandDescriptor) tmp[i];
@@ -429,7 +449,7 @@ public class RadioManager {
             mVendorInfo = Utils.readStringMap(in);
         }
 
-        public static final Parcelable.Creator<ModuleProperties> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<ModuleProperties> CREATOR
                 = new Parcelable.Creator<ModuleProperties>() {
             public ModuleProperties createFromParcel(Parcel in) {
                 return new ModuleProperties(in);
@@ -451,6 +471,7 @@ public class RadioManager {
             dest.writeString(mSerial);
             dest.writeInt(mNumTuners);
             dest.writeInt(mNumAudioSources);
+            dest.writeInt(mIsInitializationRequired ? 1 : 0);
             dest.writeInt(mIsCaptureSupported ? 1 : 0);
             dest.writeParcelableArray(mBands, flags);
             dest.writeInt(mIsBgScanSupported ? 1 : 0);
@@ -465,6 +486,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "ModuleProperties [mId=" + mId
@@ -473,6 +495,7 @@ public class RadioManager {
                     + ", mVersion=" + mVersion + ", mSerial=" + mSerial
                     + ", mNumTuners=" + mNumTuners
                     + ", mNumAudioSources=" + mNumAudioSources
+                    + ", mIsInitializationRequired=" + mIsInitializationRequired
                     + ", mIsCaptureSupported=" + mIsCaptureSupported
                     + ", mIsBgScanSupported=" + mIsBgScanSupported
                     + ", mBands=" + Arrays.toString(mBands) + "]";
@@ -481,12 +504,12 @@ public class RadioManager {
         @Override
         public int hashCode() {
             return Objects.hash(mId, mServiceName, mClassId, mImplementor, mProduct, mVersion,
-                mSerial, mNumTuners, mNumAudioSources, mIsCaptureSupported, mBands,
-                mIsBgScanSupported, mDabFrequencyTable, mVendorInfo);
+                mSerial, mNumTuners, mNumAudioSources, mIsInitializationRequired,
+                mIsCaptureSupported, mBands, mIsBgScanSupported, mDabFrequencyTable, mVendorInfo);
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj) return true;
             if (!(obj instanceof ModuleProperties)) return false;
             ModuleProperties other = (ModuleProperties) obj;
@@ -500,6 +523,7 @@ public class RadioManager {
             if (!Objects.equals(mSerial, other.mSerial)) return false;
             if (mNumTuners != other.mNumTuners) return false;
             if (mNumAudioSources != other.mNumAudioSources) return false;
+            if (mIsInitializationRequired != other.mIsInitializationRequired) return false;
             if (mIsCaptureSupported != other.mIsCaptureSupported) return false;
             if (!Objects.equals(mBands, other.mBands)) return false;
             if (mIsBgScanSupported != other.mIsBgScanSupported) return false;
@@ -603,7 +627,7 @@ public class RadioManager {
             return type;
         }
 
-        public static final Parcelable.Creator<BandDescriptor> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<BandDescriptor> CREATOR
                 = new Parcelable.Creator<BandDescriptor>() {
             public BandDescriptor createFromParcel(Parcel in) {
                 int type = lookupTypeFromParcel(in);
@@ -638,6 +662,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "BandDescriptor [mRegion=" + mRegion + ", mType=" + mType + ", mLowerLimit="
@@ -657,7 +682,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!(obj instanceof BandDescriptor))
@@ -740,7 +765,7 @@ public class RadioManager {
             mEa = in.readByte() == 1;
         }
 
-        public static final Parcelable.Creator<FmBandDescriptor> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<FmBandDescriptor> CREATOR
                 = new Parcelable.Creator<FmBandDescriptor>() {
             public FmBandDescriptor createFromParcel(Parcel in) {
                 return new FmBandDescriptor(in);
@@ -766,6 +791,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "FmBandDescriptor [ "+ super.toString() + " mStereo=" + mStereo
@@ -786,7 +812,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!super.equals(obj))
@@ -833,7 +859,7 @@ public class RadioManager {
             mStereo = in.readByte() == 1;
         }
 
-        public static final Parcelable.Creator<AmBandDescriptor> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<AmBandDescriptor> CREATOR
                 = new Parcelable.Creator<AmBandDescriptor>() {
             public AmBandDescriptor createFromParcel(Parcel in) {
                 return new AmBandDescriptor(in);
@@ -855,6 +881,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "AmBandDescriptor [ "+ super.toString() + " mStereo=" + mStereo + "]";
@@ -869,7 +896,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!super.equals(obj))
@@ -944,7 +971,7 @@ public class RadioManager {
         }
 
 
-        public static final Parcelable.Creator<BandConfig> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<BandConfig> CREATOR
                 = new Parcelable.Creator<BandConfig>() {
             public BandConfig createFromParcel(Parcel in) {
                 int type = BandDescriptor.lookupTypeFromParcel(in);
@@ -975,6 +1002,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "BandConfig [ " + mDescriptor.toString() + "]";
@@ -989,7 +1017,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!(obj instanceof BandConfig))
@@ -1077,7 +1105,7 @@ public class RadioManager {
             mEa = in.readByte() == 1;
         }
 
-        public static final Parcelable.Creator<FmBandConfig> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<FmBandConfig> CREATOR
                 = new Parcelable.Creator<FmBandConfig>() {
             public FmBandConfig createFromParcel(Parcel in) {
                 return new FmBandConfig(in);
@@ -1103,6 +1131,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "FmBandConfig [" + super.toString()
@@ -1123,7 +1152,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!super.equals(obj))
@@ -1273,7 +1302,7 @@ public class RadioManager {
             mStereo = in.readByte() == 1;
         }
 
-        public static final Parcelable.Creator<AmBandConfig> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<AmBandConfig> CREATOR
                 = new Parcelable.Creator<AmBandConfig>() {
             public AmBandConfig createFromParcel(Parcel in) {
                 return new AmBandConfig(in);
@@ -1295,6 +1324,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "AmBandConfig [" + super.toString()
@@ -1310,7 +1340,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj)
                 return true;
             if (!super.equals(obj))
@@ -1606,7 +1636,7 @@ public class RadioManager {
             mVendorInfo = Utils.readStringMap(in);
         }
 
-        public static final Parcelable.Creator<ProgramInfo> CREATOR
+        public static final @android.annotation.NonNull Parcelable.Creator<ProgramInfo> CREATOR
                 = new Parcelable.Creator<ProgramInfo>() {
             public ProgramInfo createFromParcel(Parcel in) {
                 return new ProgramInfo(in);
@@ -1634,6 +1664,7 @@ public class RadioManager {
             return 0;
         }
 
+        @NonNull
         @Override
         public String toString() {
             return "ProgramInfo"
@@ -1654,7 +1685,7 @@ public class RadioManager {
         }
 
         @Override
-        public boolean equals(Object obj) {
+        public boolean equals(@Nullable Object obj) {
             if (this == obj) return true;
             if (!(obj instanceof ProgramInfo)) return false;
             ProgramInfo other = (ProgramInfo) obj;
@@ -1739,7 +1770,7 @@ public class RadioManager {
         TunerCallbackAdapter halCallback = new TunerCallbackAdapter(callback, handler);
         try {
             tuner = mService.openTuner(moduleId, config, withAudio, halCallback);
-        } catch (RemoteException | IllegalArgumentException ex) {
+        } catch (RemoteException | IllegalArgumentException | IllegalStateException ex) {
             Log.e(TAG, "Failed to open tuner", ex);
             return null;
         }

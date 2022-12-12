@@ -18,8 +18,9 @@ package com.android.printservice.recommendation.plugin.mdnsFilter;
 
 import android.content.Context;
 import android.net.nsd.NsdServiceInfo;
-import android.annotation.NonNull;
-import android.annotation.StringRes;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.StringRes;
 
 import com.android.printservice.recommendation.PrintServicePlugin;
 import com.android.printservice.recommendation.util.MDNSFilteredDiscovery;
@@ -83,8 +84,7 @@ public class MDNSFilterPlugin implements PrintServicePlugin {
      */
     public MDNSFilterPlugin(@NonNull Context context, @NonNull String name,
             @NonNull CharSequence packageName, @NonNull List<String> mDNSNames) {
-        mName = context.getResources().getIdentifier(name, null,
-                "com.android.printservice.recommendation");
+        mName = context.getResources().getIdentifier(name, null, context.getPackageName());
         mPackageName = packageName;
         mMDNSFilteredDiscovery = new MDNSFilteredDiscovery(context, PRINTER_SERVICE_TYPES,
                 new VendorNameFilter(new HashSet<>(mDNSNames)));

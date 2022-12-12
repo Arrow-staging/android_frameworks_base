@@ -21,13 +21,14 @@
 #include <string>
 #include <vector>
 
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 #include "androidfw/StringPiece.h"
-#include "utils/Unicode.h"
-
+#include "build/version.h"
 #include "text/Unicode.h"
 #include "text/Utf8Iterator.h"
 #include "util/BigBuffer.h"
-#include "util/Maybe.h"
+#include "utils/Unicode.h"
 
 using ::aapt::text::Utf8Iterator;
 using ::android::StringPiece;
@@ -35,6 +36,11 @@ using ::android::StringPiece16;
 
 namespace aapt {
 namespace util {
+
+// Package name and shared user id would be used as a part of the file name.
+// Limits size to 223 and reserves 32 for the OS.
+// See frameworks/base/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+constexpr static const size_t kMaxPackageNameSize = 223;
 
 static std::vector<std::string> SplitAndTransform(
     const StringPiece& str, char sep, const std::function<char(char)>& f) {
@@ -74,6 +80,34 @@ bool EndsWith(const StringPiece& str, const StringPiece& suffix) {
     return false;
   }
   return str.substr(str.size() - suffix.size(), suffix.size()) == suffix;
+}
+
+StringPiece TrimLeadingWhitespace(const StringPiece& str) {
+  if (str.size() == 0 || str.data() == nullptr) {
+    return str;
+  }
+
+  const char* start = str.data();
+  const char* end = start + str.length();
+
+  while (start != end && isspace(*start)) {
+    start++;
+  }
+  return StringPiece(start, end - start);
+}
+
+StringPiece TrimTrailingWhitespace(const StringPiece& str) {
+  if (str.size() == 0 || str.data() == nullptr) {
+    return str;
+  }
+
+  const char* start = str.data();
+  const char* end = start + str.length();
+
+  while (end != start && isspace(*(end - 1))) {
+    end--;
+  }
+  return StringPiece(start, end - start);
 }
 
 StringPiece TrimWhitespace(const StringPiece& str) {
@@ -139,15 +173,27 @@ static int IsAndroidNameImpl(const StringPiece& str) {
 }
 
 bool IsAndroidPackageName(const StringPiece& str) {
+  if (str.size() > kMaxPackageNameSize) {
+    return false;
+  }
   return IsAndroidNameImpl(str) > 1 || str == "android";
+}
+
+bool IsAndroidSharedUserId(const android::StringPiece& package_name,
+                           const android::StringPiece& shared_user_id) {
+  if (shared_user_id.size() > kMaxPackageNameSize) {
+    return false;
+  }
+  return shared_user_id.empty() || IsAndroidNameImpl(shared_user_id) > 1 ||
+         package_name == "android";
 }
 
 bool IsAndroidSplitName(const StringPiece& str) {
   return IsAndroidNameImpl(str) > 0;
 }
 
-Maybe<std::string> GetFullyQualifiedClassName(const StringPiece& package,
-                                              const StringPiece& classname) {
+std::optional<std::string> GetFullyQualifiedClassName(const StringPiece& package,
+                                                      const StringPiece& classname) {
   if (classname.empty()) {
     return {};
   }
@@ -170,6 +216,31 @@ Maybe<std::string> GetFullyQualifiedClassName(const StringPiece& package,
     return {};
   }
   return result;
+}
+
+const char* GetToolName() {
+  static const char* const sToolName = "Android Asset Packaging Tool (aapt)";
+  return sToolName;
+}
+
+std::string GetToolFingerprint() {
+  // DO NOT UPDATE, this is more of a marketing version.
+  static const char* const sMajorVersion = "2";
+
+  // Update minor version whenever a feature or flag is added.
+  static const char* const sMinorVersion = "19";
+
+  // The build id of aapt2 binary.
+  static std::string sBuildId = android::build::GetBuildNumber();
+
+  if (android::base::StartsWith(sBuildId, "eng.")) {
+    time_t now = time(0);
+    tm* ltm = localtime(&now);
+
+    sBuildId = android::base::StringPrintf("eng.%d%d", 1900 + ltm->tm_year, 1 + ltm->tm_mon);
+  }
+
+  return android::base::StringPrintf("%s.%s-%s", sMajorVersion, sMinorVersion, sBuildId.c_str());
 }
 
 static size_t ConsumeDigits(const char* start, const char* end) {
@@ -269,160 +340,105 @@ bool VerifyJavaStringFormat(const StringPiece& str) {
   return true;
 }
 
-static bool AppendCodepointToUtf8String(char32_t codepoint, std::string* output) {
-  ssize_t len = utf32_to_utf8_length(&codepoint, 1);
-  if (len < 0) {
-    return false;
+std::string Utf8ToModifiedUtf8(const std::string& utf8) {
+  // Java uses Modified UTF-8 which only supports the 1, 2, and 3 byte formats of UTF-8. To encode
+  // 4 byte UTF-8 codepoints, Modified UTF-8 allows the use of surrogate pairs in the same format
+  // of CESU-8 surrogate pairs. Calculate the size of the utf8 string with all 4 byte UTF-8
+  // codepoints replaced with 2 3 byte surrogate pairs
+  size_t modified_size = 0;
+  const size_t size = utf8.size();
+  for (size_t i = 0; i < size; i++) {
+    if (((uint8_t) utf8[i] >> 4) == 0xF) {
+      modified_size += 6;
+      i += 3;
+    } else {
+      modified_size++;
+    }
   }
 
-  const size_t start_append_pos = output->size();
+  // Early out if no 4 byte codepoints are found
+  if (size == modified_size) {
+    return utf8;
+  }
 
-  // Make room for the next character.
-  output->resize(output->size() + len);
+  std::string output;
+  output.reserve(modified_size);
+  for (size_t i = 0; i < size; i++) {
+    if (((uint8_t) utf8[i] >> 4) == 0xF) {
+      int32_t codepoint = utf32_from_utf8_at(utf8.data(), size, i, nullptr);
 
-  char* dst = &*(output->begin() + start_append_pos);
-  utf32_to_utf8(&codepoint, 1, dst, len + 1);
-  return true;
+      // Calculate the high and low surrogates as UTF-16 would
+      int32_t high = ((codepoint - 0x10000) / 0x400) + 0xD800;
+      int32_t low = ((codepoint - 0x10000) % 0x400) + 0xDC00;
+
+      // Encode each surrogate in UTF-8
+      output.push_back((char) (0xE4 | ((high >> 12) & 0xF)));
+      output.push_back((char) (0x80 | ((high >> 6) & 0x3F)));
+      output.push_back((char) (0x80 | (high & 0x3F)));
+      output.push_back((char) (0xE4 | ((low >> 12) & 0xF)));
+      output.push_back((char) (0x80 | ((low >> 6) & 0x3F)));
+      output.push_back((char) (0x80 | (low & 0x3F)));
+      i += 3;
+    } else {
+      output.push_back(utf8[i]);
+    }
+  }
+
+  return output;
 }
 
-static bool AppendUnicodeCodepoint(Utf8Iterator* iter, std::string* output) {
-  char32_t code = 0;
-  for (size_t i = 0; i < 4 && iter->HasNext(); i++) {
-    char32_t codepoint = iter->Next();
-    char32_t a;
-    if (codepoint >= U'0' && codepoint <= U'9') {
-      a = codepoint - U'0';
-    } else if (codepoint >= U'a' && codepoint <= U'f') {
-      a = codepoint - U'a' + 10;
-    } else if (codepoint >= U'A' && codepoint <= U'F') {
-      a = codepoint - U'A' + 10;
-    } else {
+std::string ModifiedUtf8ToUtf8(const std::string& modified_utf8) {
+  // The UTF-8 representation will have a byte length less than or equal to the Modified UTF-8
+  // representation.
+  std::string output;
+  output.reserve(modified_utf8.size());
+
+  size_t index = 0;
+  const size_t modified_size = modified_utf8.size();
+  while (index < modified_size) {
+    size_t next_index;
+    int32_t high_surrogate = utf32_from_utf8_at(modified_utf8.data(), modified_size, index,
+                                                &next_index);
+    if (high_surrogate < 0) {
       return {};
     }
-    code = (code << 4) | a;
-  }
-  return AppendCodepointToUtf8String(code, output);
-}
 
-static bool IsCodepointSpace(char32_t codepoint) {
-  if (static_cast<uint32_t>(codepoint) & 0xffffff00u) {
-    return false;
-  }
-  return isspace(static_cast<char>(codepoint));
-}
-
-StringBuilder::StringBuilder(bool preserve_spaces) : preserve_spaces_(preserve_spaces) {
-}
-
-StringBuilder& StringBuilder::Append(const StringPiece& str) {
-  if (!error_.empty()) {
-    return *this;
-  }
-
-  // Where the new data will be appended to.
-  const size_t new_data_index = str_.size();
-
-  Utf8Iterator iter(str);
-  while (iter.HasNext()) {
-    const char32_t codepoint = iter.Next();
-
-    if (last_char_was_escape_) {
-      switch (codepoint) {
-        case U't':
-          str_ += '\t';
-          break;
-
-        case U'n':
-          str_ += '\n';
-          break;
-
-        case U'#':
-        case U'@':
-        case U'?':
-        case U'"':
-        case U'\'':
-        case U'\\':
-          str_ += static_cast<char>(codepoint);
-          break;
-
-        case U'u':
-          if (!AppendUnicodeCodepoint(&iter, &str_)) {
-            error_ = "invalid unicode escape sequence";
-            return *this;
-          }
-          break;
-
-        default:
-          // Ignore the escape character and just include the codepoint.
-          AppendCodepointToUtf8String(codepoint, &str_);
-          break;
+    // Check that the first codepoint is within the high surrogate range
+    if (high_surrogate >= 0xD800 && high_surrogate <= 0xDB7F) {
+      int32_t low_surrogate = utf32_from_utf8_at(modified_utf8.data(), modified_size, next_index,
+                                                 &next_index);
+      if (low_surrogate < 0) {
+        return {};
       }
-      last_char_was_escape_ = false;
 
-    } else if (!preserve_spaces_ && codepoint == U'"') {
-      if (!quote_ && trailing_space_) {
-        // We found an opening quote, and we have trailing space, so we should append that
-        // space now.
-        if (trailing_space_) {
-          // We had trailing whitespace, so replace with a single space.
-          if (!str_.empty()) {
-            str_ += ' ';
-          }
-          trailing_space_ = false;
-        }
-      }
-      quote_ = !quote_;
+      // Check that the second codepoint is within the low surrogate range
+      if (low_surrogate >= 0xDC00 && low_surrogate <= 0xDFFF) {
+        const char32_t codepoint = (char32_t) (((high_surrogate - 0xD800) * 0x400)
+            + (low_surrogate - 0xDC00) + 0x10000);
 
-    } else if (!preserve_spaces_ && codepoint == U'\'' && !quote_) {
-      // This should be escaped.
-      error_ = "unescaped apostrophe";
-      return *this;
+        // The decoded codepoint should represent a 4 byte, UTF-8 character
+        const size_t utf8_length = (size_t) utf32_to_utf8_length(&codepoint, 1);
+        if (utf8_length != 4) {
+          return {};
+        }
 
-    } else if (codepoint == U'\\') {
-      // This is an escape sequence, convert to the real value.
-      if (!quote_ && trailing_space_) {
-        // We had trailing whitespace, so
-        // replace with a single space.
-        if (!str_.empty()) {
-          str_ += ' ';
-        }
-        trailing_space_ = false;
-      }
-      last_char_was_escape_ = true;
-    } else {
-      if (preserve_spaces_ || quote_) {
-        // Quotes mean everything is taken, including whitespace.
-        AppendCodepointToUtf8String(codepoint, &str_);
-      } else {
-        // This is not quoted text, so we will accumulate whitespace and only emit a single
-        // character of whitespace if it is followed by a non-whitespace character.
-        if (IsCodepointSpace(codepoint)) {
-          // We found whitespace.
-          trailing_space_ = true;
-        } else {
-          if (trailing_space_) {
-            // We saw trailing space before, so replace all
-            // that trailing space with one space.
-            if (!str_.empty()) {
-              str_ += ' ';
-            }
-            trailing_space_ = false;
-          }
-          AppendCodepointToUtf8String(codepoint, &str_);
-        }
+        // Encode the UTF-8 representation of the codepoint into the string
+        char* start = &output[output.size()];
+        output.resize(output.size() + utf8_length);
+        utf32_to_utf8((char32_t*) &codepoint, 1, start, utf8_length + 1);
+
+        index = next_index;
+        continue;
       }
     }
-  }
 
-  // Accumulate the added string's UTF-16 length.
-  ssize_t len = utf8_to_utf16_length(reinterpret_cast<const uint8_t*>(str_.data()) + new_data_index,
-                                     str_.size() - new_data_index);
-  if (len < 0) {
-    error_ = "invalid unicode code point";
-    return *this;
+    // Append non-surrogate pairs to the output string
+    for (size_t i = index; i < next_index; i++) {
+      output.push_back(modified_utf8[i]);
+    }
+    index = next_index;
   }
-  utf16_len_ += len;
-  return *this;
+  return output;
 }
 
 std::u16string Utf8ToUtf16(const StringPiece& utf8) {
@@ -538,19 +554,15 @@ bool ExtractResFilePathParts(const StringPiece& path, StringPiece* out_prefix,
 }
 
 StringPiece16 GetString16(const android::ResStringPool& pool, size_t idx) {
-  size_t len;
-  const char16_t* str = pool.stringAt(idx, &len);
-  if (str != nullptr) {
-    return StringPiece16(str, len);
+  if (auto str = pool.stringAt(idx); str.ok()) {
+    return *str;
   }
   return StringPiece16();
 }
 
 std::string GetString(const android::ResStringPool& pool, size_t idx) {
-  size_t len;
-  const char* str = pool.string8At(idx, &len);
-  if (str != nullptr) {
-    return std::string(str, len);
+  if (auto str = pool.string8At(idx); str.ok()) {
+    return ModifiedUtf8ToUtf8(str->to_string());
   }
   return Utf16ToUtf8(GetString16(pool, idx));
 }

@@ -16,45 +16,98 @@
 
 package com.android.systemui.shared.recents;
 
+import android.graphics.Rect;
+import android.graphics.Region;
+import android.os.Bundle;
 import android.view.MotionEvent;
 import com.android.systemui.shared.recents.ISystemUiProxy;
 
 oneway interface IOverviewProxy {
-    void onBind(in ISystemUiProxy sysUiProxy);
+
+    void onActiveNavBarRegionChanges(in Region activeRegion) = 11;
+
+    void onInitialize(in Bundle params) = 12;
 
     /**
-     * Proxies motion events from the nav bar in SystemUI to the OverviewProxyService. The sender
-     * guarantees the following order of events:
-     *
-     * Normal gesture: DOWN, (MOVE/POINTER_DOWN/POINTER_UP)*, UP
-     * Quick switch: DOWN, (MOVE/POINTER_DOWN/POINTER_UP)*, SWITCH
-     * Quick scrub: DOWN, (MOVE/POINTER_DOWN/POINTER_UP)*, SCRUB_START, SCRUB_PROGRESS*, SCRUB_END
-     *
-     * Once quick switch/scrub is sent, then no further motion events will be provided.
+     * Sent when overview button is pressed to toggle show/hide of overview.
      */
-    void onMotionEvent(in MotionEvent event);
+    void onOverviewToggle() = 6;
 
     /**
-     * Sent when a user has quickly flinged on the nav bar to switch tasks. Once this event is sent
-     * the caller will stop sending any motion events and will no longer preemptively cancel any
-     * recents animations started as a part of the motion event handling.
+     * Sent when overview is to be shown.
      */
-    void onQuickSwitch();
+    void onOverviewShown(boolean triggeredFromAltTab) = 7;
 
     /**
-     * Sent when the user starts to actively scrub the nav bar to switch tasks. Once this event is
-     * sent the caller will stop sending any motion events and will no longer preemptively cancel
-     * any recents animations started as a part of the motion event handling.
+     * Sent when overview is to be hidden.
      */
-    void onQuickScrubStart();
+    void onOverviewHidden(boolean triggeredFromAltTab, boolean triggeredFromHomeKey) = 8;
 
     /**
-     * Sent when the user stops actively scrubbing the nav bar to switch tasks.
+     * Sent when there was an action on one of the onboarding tips view.
+     * TODO: Move this implementation to SystemUI completely
      */
-    void onQuickScrubEnd();
+    void onTip(int actionType, int viewType) = 10;
 
     /**
-     * Sent for each movement over the nav bar while the user is scrubbing it to switch tasks.
+     * Sent when device assistant changes its default assistant whether it is available or not.
      */
-    void onQuickScrubProgress(float progress);
+    void onAssistantAvailable(boolean available) = 13;
+
+    /**
+     * Sent when the assistant changes how visible it is to the user.
+     */
+    void onAssistantVisibilityChanged(float visibility) = 14;
+
+    /**
+     * Sent when back is triggered.
+     * TODO: Move this implementation to SystemUI completely
+     */
+    void onBackAction(boolean completed, int downX, int downY, boolean isButton,
+            boolean gestureSwipeLeft) = 15;
+
+    /**
+     * Sent when some system ui state changes.
+     */
+    void onSystemUiStateChanged(int stateFlags) = 16;
+
+    /**
+     * Sent when the split screen is resized
+     */
+    void onSplitScreenSecondaryBoundsChanged(in Rect bounds, in Rect insets) = 17;
+
+    /**
+     * Sent when suggested rotation button could be shown
+     */
+    void onRotationProposal(int rotation, boolean isValid) = 18;
+
+    /**
+     * Sent when disable flags change
+     */
+    void disable(int displayId, int state1, int state2, boolean animate) = 19;
+
+    /**
+     * Sent when behavior changes. See WindowInsetsController#@Behavior
+     */
+    void onSystemBarAttributesChanged(int displayId, int behavior) = 20;
+
+    /**
+     * Sent when screen turned on and ready to use (blocker scrim is hidden)
+     */
+    void onScreenTurnedOn() = 21;
+
+    /**
+     * Sent when the desired dark intensity of the nav buttons has changed
+     */
+    void onNavButtonsDarkIntensityChanged(float darkIntensity) = 22;
+
+     /**
+      * Sent when screen started turning on.
+      */
+     void onScreenTurningOn() = 23;
+
+     /**
+      * Sent when screen started turning off.
+      */
+     void onScreenTurningOff() = 24;
 }

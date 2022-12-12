@@ -15,53 +15,98 @@
  */
 
 #include <DeviceInfo.h>
-
-#include <gui/ISurfaceComposer.h>
-#include <gui/SurfaceComposerClient.h>
-
-#include <mutex>
-#include <thread>
-
+#include <android/hardware_buffer.h>
+#include <apex/display.h>
 #include <log/log.h>
+#include <utils/Errors.h>
 
-#include <GLES2/gl2.h>
+#include "Properties.h"
 
 namespace android {
 namespace uirenderer {
 
-static DeviceInfo* sDeviceInfo = nullptr;
-static std::once_flag sInitializedFlag;
-
-const DeviceInfo* DeviceInfo::get() {
-    LOG_ALWAYS_FATAL_IF(!sDeviceInfo, "DeviceInfo not yet initialized.");
-    return sDeviceInfo;
+DeviceInfo* DeviceInfo::get() {
+    static DeviceInfo sDeviceInfo;
+    return &sDeviceInfo;
 }
 
-void DeviceInfo::initialize() {
-    std::call_once(sInitializedFlag, []() {
-        sDeviceInfo = new DeviceInfo();
-        sDeviceInfo->load();
-    });
+DeviceInfo::DeviceInfo() {
+#if HWUI_NULL_GPU
+    mMaxTextureSize = NULL_GPU_MAX_TEXTURE_SIZE;
+#else
+    mMaxTextureSize = -1;
+#endif
 }
 
-void DeviceInfo::initialize(int maxTextureSize) {
-    std::call_once(sInitializedFlag, [maxTextureSize]() {
-        sDeviceInfo = new DeviceInfo();
-        sDeviceInfo->loadDisplayInfo();
-        sDeviceInfo->mMaxTextureSize = maxTextureSize;
-    });
+void DeviceInfo::updateDisplayInfo() {
+    if (Properties::isolatedProcess) {
+        return;
+    }
+
+    ADisplay** displays;
+    int size = ADisplay_acquirePhysicalDisplays(&displays);
+
+    if (size <= 0) {
+        LOG_ALWAYS_FATAL("Failed to acquire physical displays for WCG support!");
+    }
+
+    for (int i = 0; i < size; ++i) {
+        // Pick the first internal display for querying the display type
+        // In practice this is controlled by a sysprop so it doesn't really
+        // matter which display we use.
+        if (ADisplay_getDisplayType(displays[i]) == DISPLAY_TYPE_INTERNAL) {
+            // We get the dataspace from DisplayManager already. Allocate space
+            // for the result here but we don't actually care about using it.
+            ADataSpace dataspace;
+            AHardwareBuffer_Format pixelFormat;
+            ADisplay_getPreferredWideColorFormat(displays[i], &dataspace, &pixelFormat);
+
+            if (pixelFormat == AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) {
+                mWideColorType = SkColorType::kN32_SkColorType;
+            } else if (pixelFormat == AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT) {
+                mWideColorType = SkColorType::kRGBA_F16_SkColorType;
+            } else {
+                LOG_ALWAYS_FATAL("Unreachable: unsupported pixel format: %d", pixelFormat);
+            }
+            ADisplay_release(displays);
+            return;
+        }
+    }
+    LOG_ALWAYS_FATAL("Failed to find a valid physical display for WCG support!");
 }
 
-void DeviceInfo::load() {
-    loadDisplayInfo();
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mMaxTextureSize);
+int DeviceInfo::maxTextureSize() const {
+    LOG_ALWAYS_FATAL_IF(mMaxTextureSize < 0, "MaxTextureSize has not been initialized yet.");
+    return mMaxTextureSize;
 }
 
-void DeviceInfo::loadDisplayInfo() {
-    sp<IBinder> dtoken(SurfaceComposerClient::getBuiltInDisplay(ISurfaceComposer::eDisplayIdMain));
-    status_t status = SurfaceComposerClient::getDisplayInfo(dtoken, &mDisplayInfo);
-    LOG_ALWAYS_FATAL_IF(status, "Failed to get display info, error %d", status);
+void DeviceInfo::setMaxTextureSize(int maxTextureSize) {
+    DeviceInfo::get()->mMaxTextureSize = maxTextureSize;
 }
+
+void DeviceInfo::setWideColorDataspace(ADataSpace dataspace) {
+    switch (dataspace) {
+        case ADATASPACE_DISPLAY_P3:
+            get()->mWideColorSpace =
+                    SkColorSpace::MakeRGB(SkNamedTransferFn::kSRGB, SkNamedGamut::kDisplayP3);
+            break;
+        case ADATASPACE_SCRGB:
+            get()->mWideColorSpace = SkColorSpace::MakeSRGB();
+            break;
+        case ADATASPACE_SRGB:
+            // when sRGB is returned, it means wide color gamut is not supported.
+            get()->mWideColorSpace = SkColorSpace::MakeSRGB();
+            break;
+        default:
+            LOG_ALWAYS_FATAL("Unreachable: unsupported wide color space.");
+    }
+}
+
+void DeviceInfo::onRefreshRateChanged(int64_t vsyncPeriod) {
+    mVsyncPeriod = vsyncPeriod;
+}
+
+std::atomic<float> DeviceInfo::sDensity = 2.0;
 
 } /* namespace uirenderer */
 } /* namespace android */

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package android.service.euicc;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -23,9 +24,10 @@ import static org.junit.Assert.assertTrue;
 
 import android.os.Parcel;
 import android.service.carrier.CarrierIdentifier;
-import android.support.test.filters.SmallTest;
-import android.support.test.runner.AndroidJUnit4;
 import android.telephony.UiccAccessRule;
+
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -149,6 +151,29 @@ public class EuiccProfileInfoTest {
 
         assertEquals(p, copied);
         assertEquals(p.hashCode(), copied.hashCode());
+    }
+
+    @Test
+    public void testBuilder_BasedOnAnotherProfileWithEmptyAccessRules() {
+        EuiccProfileInfo p =
+                new EuiccProfileInfo.Builder("21430000000000006587")
+                        .setNickname("profile nickname")
+                        .setProfileName("profile name")
+                        .setServiceProviderName("service provider")
+                        .setCarrierIdentifier(
+                                new CarrierIdentifier(
+                                        new byte[] {0x23, 0x45, 0x67},
+                                        "123",
+                                        "45"))
+                        .setState(EuiccProfileInfo.PROFILE_STATE_ENABLED)
+                        .setProfileClass(EuiccProfileInfo.PROFILE_CLASS_OPERATIONAL)
+                        .setPolicyRules(EuiccProfileInfo.POLICY_RULE_DO_NOT_DELETE)
+                        .setUiccAccessRule(null)
+                        .build();
+
+        EuiccProfileInfo copied = new EuiccProfileInfo.Builder(p).build();
+
+        assertEquals(null, copied.getUiccAccessRules());
     }
 
     @Test

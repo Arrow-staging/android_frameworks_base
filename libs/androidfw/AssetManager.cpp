@@ -28,7 +28,7 @@
 #include <androidfw/misc.h>
 #include <androidfw/ResourceTypes.h>
 #include <androidfw/ZipFileRO.h>
-#include <utils/Atomic.h>
+#include <cutils/atomic.h>
 #include <utils/Log.h>
 #include <utils/String8.h>
 #include <utils/String8.h>
@@ -72,8 +72,11 @@ static volatile int32_t gCount = 0;
 
 const char* AssetManager::RESOURCES_FILENAME = "resources.arsc";
 const char* AssetManager::IDMAP_BIN = "/system/bin/idmap";
-const char* AssetManager::OVERLAY_DIR = "/vendor/overlay";
+const char* AssetManager::VENDOR_OVERLAY_DIR = "/vendor/overlay";
 const char* AssetManager::PRODUCT_OVERLAY_DIR = "/product/overlay";
+const char* AssetManager::SYSTEM_EXT_OVERLAY_DIR = "/system_ext/overlay";
+const char* AssetManager::ODM_OVERLAY_DIR = "/odm/overlay";
+const char* AssetManager::OEM_OVERLAY_DIR = "/oem/overlay";
 const char* AssetManager::OVERLAY_THEME_DIR_PROPERTY = "ro.boot.vendor.overlay.theme";
 const char* AssetManager::TARGET_PACKAGE_NAME = "android";
 const char* AssetManager::TARGET_APK_PATH = "/system/framework/framework-res.apk";
@@ -348,7 +351,7 @@ bool AssetManager::createIdmap(const char* targetApkPath, const char* overlayApk
                 goto exit;
             }
         }
-        ret = tables[0].createIdmap(tables[1], targetCrc, overlayCrc,
+        ret = tables[1].createIdmap(tables[0], targetCrc, overlayCrc,
                 targetApkPath, overlayApkPath, (void**)outData, outSize) == NO_ERROR;
     }
 
@@ -572,7 +575,7 @@ bool AssetManager::appendPathToResTable(asset_path& ap, bool appAsLib) const {
                         mZipSet.setZipResourceTableAsset(ap.path, ass);
                 }
             }
-            
+
             if (nextEntryIdx == 0 && ass != NULL) {
                 // If this is the first resource table in the asset
                 // manager, then we are going to cache it so that we
@@ -914,7 +917,7 @@ Asset* AssetManager::openAssetFromFileLocked(const String8& pathName,
 Asset* AssetManager::openAssetFromZipLocked(const ZipFileRO* pZipFile,
     const ZipEntryRO entry, AccessMode mode, const String8& entryName)
 {
-    Asset* pAsset = NULL;
+    std::unique_ptr<Asset> pAsset;
 
     // TODO: look for previously-created shared memory slice?
     uint16_t method;
@@ -929,28 +932,28 @@ Asset* AssetManager::openAssetFromZipLocked(const ZipFileRO* pZipFile,
         return NULL;
     }
 
-    FileMap* dataMap = pZipFile->createEntryFileMap(entry);
-    if (dataMap == NULL) {
+    std::optional<incfs::IncFsFileMap> dataMap = pZipFile->createEntryIncFsFileMap(entry);
+    if (!dataMap.has_value()) {
         ALOGW("create map from entry failed\n");
         return NULL;
     }
 
     if (method == ZipFileRO::kCompressStored) {
-        pAsset = Asset::createFromUncompressedMap(dataMap, mode);
+        pAsset = Asset::createFromUncompressedMap(std::move(*dataMap), mode);
         ALOGV("Opened uncompressed entry %s in zip %s mode %d: %p", entryName.string(),
-                dataMap->getFileName(), mode, pAsset);
+                dataMap->file_name(), mode, pAsset.get());
     } else {
-        pAsset = Asset::createFromCompressedMap(dataMap,
+        pAsset = Asset::createFromCompressedMap(std::move(*dataMap),
             static_cast<size_t>(uncompressedLen), mode);
         ALOGV("Opened compressed entry %s in zip %s mode %d: %p", entryName.string(),
-                dataMap->getFileName(), mode, pAsset);
+                dataMap->file_name(), mode, pAsset.get());
     }
     if (pAsset == NULL) {
         /* unexpected */
         ALOGW("create from segment failed\n");
     }
 
-    return pAsset;
+    return pAsset.release();
 }
 
 /*

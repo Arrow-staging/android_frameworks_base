@@ -1,7 +1,17 @@
-per-file privapp-permissions-platform.xml = bpoiesz@google.com
-per-file privapp-permissions-platform.xml = fkupolov@google.com
-per-file privapp-permissions-platform.xml = hackbod@android.com
-per-file privapp-permissions-platform.xml = jsharkey@android.com
-per-file privapp-permissions-platform.xml = svetoslavganov@google.com
-per-file privapp-permissions-platform.xml = toddke@google.com
-per-file privapp-permissions-platform.xml = yamasani@google.com
+alanstokes@google.com
+cbrubaker@google.com
+hackbod@android.com
+hackbod@google.com
+jeffv@google.com
+jsharkey@android.com
+jsharkey@google.com
+lorenzo@google.com
+svetoslavganov@android.com
+svetoslavganov@google.com
+toddke@android.com
+toddke@google.com
+patb@google.com
+yamasani@google.com
+
+per-file preinstalled-packages* = file:/MULTIUSER_OWNERS
+per-file services.core.protolog.json =  file:/services/core/java/com/android/server/wm/OWNERS
