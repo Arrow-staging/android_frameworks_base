@@ -137,6 +137,7 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
     private final SecureSettings mSecureSettings;
     private final Executor mMainExecutor;
     private final DumpManager mDumpManager;
+
     private BatteryMeterView mBatteryMeterView;
     private StatusIconContainer mStatusIcons;
     private int mSignalClusterEndPadding = 0;
