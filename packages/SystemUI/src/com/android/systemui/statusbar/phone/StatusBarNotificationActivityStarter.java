@@ -551,7 +551,7 @@ class StatusBarNotificationActivityStarter implements NotificationActivityStarte
 
     @VisibleForTesting
     void handleFullScreenIntent(NotificationEntry entry) {
-        GameSpaceManager gameSpace = mCentralSurfaces.getGameSpaceManager();
+        GameSpaceManager gameSpace = mStatusBar.getGameSpaceManager();
         if (gameSpace != null && gameSpace.shouldSuppressFullScreenIntent()) {
             return;
         }
